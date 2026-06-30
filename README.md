@@ -1,6 +1,16 @@
 # COMPRESOR
 
-Herramienta multi-formato de compresión y descompresión vía pipe, con soporte para 11 formatos, detección automática de gestor de paquetes, dry-run, split, exclusión de patrones y verificación de integridad.
+Herramienta multi-formato de compresión y descompresión vía pipe, con soporte para 13 formatos, detección automática de gestor de paquetes, dry-run, split, exclusión de patrones y verificación de integridad.
+
+## Instalación
+
+```bash
+# Compilar desde fuente (Go 1.21+)
+go build -o compresor .
+
+# O simplemente instalar dependencias y usar el script Bash
+# (ver rama bash/)
+```
 
 ## Formatos
 
@@ -37,18 +47,22 @@ compresor -t *.tar.gz      # verificar integridad
 compresor -l archivo.7z     # listar contenido
 compresor -r archivo.txt.gz | head  # leer a stdout
 
-# Instalar dependencias
+# Instalar dependencias faltantes
 compresor --install
 ```
 
 ## Ramas
 
 - **main** — documentación del proyecto
-- **bash** — versión original en Bash Script
-- **go** — versión migrada a Go (en desarrollo)
+- **bash** — versión original en Bash Script (estable)
+- **go** — versión migrada a Go (desarrollo activo)
 
 ## Historial del proyecto
 
-El proyecto nació como un script Bash (`compresor.sh`) y se migró a Go para obtener tipado fuerte, tests nativos y un binario estático sin dependencias. La versión Go replica toda la funcionalidad del Bash y añade tests unitarios.
+El proyecto nació como un script Bash (`compresor.sh`) y se migró a Go para obtener tipado fuerte, tests nativos y un binario estático sin dependencias externas. La versión Go replica toda la funcionalidad del Bash y añade tests unitarios.
 
-Ver `COMPRESOR.md` en la rama `bash` para el historial completo de desarrollo.
+Ver `COMPRESOR.md` y `AGENTS.md` para más detalles.
+
+## Licencia
+
+MIT

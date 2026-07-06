@@ -176,12 +176,9 @@ func DoCompress(items []string, opts CompressOptions) error {
 	WriteLogf("  Tiempo: %v\n", elapsed.Round(time.Second))
 	WriteLogf("  Archivo: %s\n", outPath)
 
-	if !opts.KeepOrig {
+		if !opts.KeepOrig {
 		removed := 0
 		for _, f := range filteredFiles {
-			if !strings.HasPrefix(f, "/") {
-				continue
-			}
 			if err := os.Remove(f); err == nil {
 				removed++
 			}
@@ -268,20 +265,20 @@ func compressItems(files []string, outPath string, opts CompressOptions) error {
 
 func compressTarPipe(files []string, outPath string, opts CompressOptions) error {
 	var compressCmd *exec.Cmd
+	var pvCmd *exec.Cmd
 	ext := opts.Format.String()
 
 	switch ext {
 	case "gz":
+		optFlags := strings.Fields(opts.CompressionOpts)
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 1))}
+		args = append(args, optFlags...)
+		compressCmd = exec.Command("pigz", args...)
+		if !hasTool("pigz") {
+			compressCmd = exec.Command("gzip", args...)
+		}
 		if opts.Progress && hasTool("pv") {
-			compressCmd = exec.Command("pv", "-B", "256k")
-		} else {
-			optFlags := strings.Fields(opts.CompressionOpts)
-			args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 1))}
-			args = append(args, optFlags...)
-			compressCmd = exec.Command("pigz", args...)
-			if !hasTool("pigz") {
-				compressCmd = exec.Command("gzip", args...)
-			}
+			pvCmd = exec.Command("pv", "-B", "256k")
 		}
 	case "xz":
 		optFlags := strings.Fields(opts.CompressionOpts)
@@ -297,19 +294,17 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 	case "bz3":
 		args := []string{"-c", "-j" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 6))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		compressCmd = exec.Command("bzip3", args...)
 		if opts.Progress && hasTool("pv") {
-			compressCmd = exec.Command("pv", "-B", "256k")
-		} else {
-			compressCmd = exec.Command("bzip3", args...)
+			pvCmd = exec.Command("pv", "-B", "256k")
 		}
 	case "zst":
 		optFlags := strings.Fields(opts.CompressionOpts)
 		args := []string{"-c", "-T0", fmt.Sprintf("-%d", fastOrSlow(opts, 3))}
 		args = append(args, optFlags...)
+		compressCmd = exec.Command("zstd", args...)
 		if opts.Progress && hasTool("pv") {
-			compressCmd = exec.Command("pv", "-B", "256k")
-		} else {
-			compressCmd = exec.Command("zstd", args...)
+			pvCmd = exec.Command("pv", "-B", "256k")
 		}
 	case "lz":
 		optFlags := strings.Fields(opts.CompressionOpts)
@@ -377,7 +372,12 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		return nil
 	}
 
-	if err := pipeline(writer, os.Stderr, tarCmd, compressCmd); err != nil {
+	pipeCmds := []*exec.Cmd{tarCmd}
+	if pvCmd != nil {
+		pipeCmds = append(pipeCmds, pvCmd)
+	}
+	pipeCmds = append(pipeCmds, compressCmd)
+	if err := pipeline(writer, os.Stderr, pipeCmds...); err != nil {
 		return fmt.Errorf("Error en pipeline de compresión: %w", err)
 	}
 

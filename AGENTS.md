@@ -27,7 +27,12 @@ go test ./... -v
 ./compresor -c -f gz archivo.txt
 ./compresor -d archivo.tar.gz
 
-# Binario final
+# Instalación / desinstalación
+./compresor --install             # binario + dependencias del sistema
+./compresor --install-deps         # solo dependencias
+./compresor --uninstall            # eliminar binario
+
+# Binario final (sin dependencias)
 make install        # install -m 755 compresor /usr/local/bin/
 ```
 
@@ -57,9 +62,9 @@ compresor/
 
 ## Estado actual
 
-- Bash: completo. 59 tests en bats. 1120 líneas. Sin bugs conocidos.
-- Go: migración 1:1 completa. 34 tests nativos pasando. 2604 líneas.
-- Features implementadas en Go: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar, colors, logging, install deps, test, list, read.
+- Bash: completo. 59 tests en bats. 1144 líneas. Sin bugs conocidos. Flags: --install (bin + deps), --install-deps, --uninstall.
+- Go: migración 1:1 completa. 39 tests nativos pasando. ~2650 líneas.
+- Features implementadas en Go: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar, colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall.
 
 ## Próximos pasos
 

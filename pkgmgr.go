@@ -114,6 +114,25 @@ func runCmd(name string, args ...string) error {
 	return nil
 }
 
+// runElevated runs a command with root privileges if not already root.
+// Tries direct → sudo → pkexec.
+func runElevated(name string, args ...string) error {
+	if os.Geteuid() == 0 {
+		return runCmd(name, args...)
+	}
+	elevators := []string{"sudo", "pkexec"}
+	for _, elev := range elevators {
+		if _, err := exec.LookPath(elev); err != nil {
+			continue
+		}
+		elevArgs := append([]string{name}, args...)
+		if err := runCmd(elev, elevArgs...); err == nil {
+			return nil
+		}
+	}
+	return runCmd(name, args...)
+}
+
 func runCmdWithOutput(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	out, err := cmd.CombinedOutput()
@@ -217,7 +236,7 @@ func InstallMissingDeps(tools_needed []string, mgr *PkgManager) []string {
 	WriteLogf("%sInstalando dependencias...%s\n", Yellow, NC)
 	if mgr.Update != "" {
 		WriteLogf("  $ %s\n", mgr.Update)
-		if err := runCmd(strings.Fields(mgr.Update)[0], strings.Fields(mgr.Update)[1:]...); err != nil {
+		if err := runElevated(strings.Fields(mgr.Update)[0], strings.Fields(mgr.Update)[1:]...); err != nil {
 			WriteLogf("  %s⚠ advertencia: update falló%s\n", Yellow, NC)
 		}
 	}
@@ -231,11 +250,11 @@ func InstallMissingDeps(tools_needed []string, mgr *PkgManager) []string {
 		if retry > 0 {
 			WriteLogf("  %sReintento %d/3...%s\n", Yellow, retry+1, NC)
 		}
-		if err := runCmd(installArgs[0], installArgs[1:]...); err == nil {
+		if err := runElevated(installArgs[0], installArgs[1:]...); err == nil {
 			WriteLogf("  %s✓ Dependencias instaladas%s\n", Green, NC)
 			if mgr.Prune != "" {
 				pruneArgs := strings.Fields(mgr.Prune)
-				runCmd(pruneArgs[0], pruneArgs[1:]...)
+				runElevated(pruneArgs[0], pruneArgs[1:]...)
 			}
 			return nil
 		} else {

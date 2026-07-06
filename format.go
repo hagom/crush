@@ -39,6 +39,10 @@ var formatNames = map[Format]string{
 	Br:     "br",
 }
 
+var FormatsByCompression = []Format{
+	Lrz, Bz3, Xz, SevenZ, Bz2, Br, Zst, Rar, Lz, Gz, Lz4, Zip, Tar,
+}
+
 func (f Format) String() string {
 	if s, ok := formatNames[f]; ok {
 		return s

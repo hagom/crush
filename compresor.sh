@@ -617,7 +617,8 @@ usage() {
     printf "  ${GREEN}--exclude PAT${NC}: Excluir patrones (ej: --exclude=.git --exclude=*.log)\n"
     printf "  ${GREEN}--split TAM${NC}  : Dividir en volúmenes (ej: --split=100M, --split=1G)\n"
     printf "  ${GREEN}-i${NC}          : Comprimir cada archivo por separado en vez de agruparlos\n"
-    printf "  ${GREEN}--install${NC}    : Copiar script a /usr/local/bin/compresor\n"
+    printf "  ${GREEN}--install${NC}    : Copiar script a /usr/local/bin/compresor + instalar dependencias\n"
+    printf "  ${GREEN}--install-deps${NC}: Instalar solo dependencias del sistema\n"
     printf "  ${GREEN}--uninstall${NC}  : Eliminar /usr/local/bin/compresor\n"
     printf "\n"
 }
@@ -993,7 +994,7 @@ else RAR_BIN="rar"; fi
 
 detect_pkg_manager
 
-PARSED_ARGS=$(getopt -o 'c:dhrn:lti' -l 'help,dry-run,exclude:,split:,test,individual,install,uninstall' -- "$@") || { usage; exit 1; }
+PARSED_ARGS=$(getopt -o 'c:dhrn:lti' -l 'help,dry-run,exclude:,split:,test,individual,install,install-deps,uninstall' -- "$@") || { usage; exit 1; }
 eval set -- "$PARSED_ARGS"
 
 while true; do
@@ -1041,7 +1042,12 @@ while true; do
             INDIVIDUAL=1
             shift
             ;;
+        --install-deps)
+            install_missing_deps
+            exit 0
+            ;;
         --install)
+            install_missing_deps
             SCRIPT_SRC=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf '%s' "$0")
             DEST="/usr/local/bin/compresor"
             DIR=$(dirname "$DEST")

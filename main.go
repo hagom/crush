@@ -3,11 +3,22 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
 func main() {
+	// Handle --help / -help before flag.Parse (flag pkg intercepts --help)
+	for _, arg := range os.Args[1:] {
+		if arg == "--help" || arg == "-help" {
+			printHelp()
+			return
+		}
+	}
+
 	// Flags
 	compressFlag := flag.Bool("c", false, "Comprimir archivos")
 	decompressFlag := flag.Bool("d", false, "Descomprimir archivos")
@@ -15,9 +26,11 @@ func main() {
 	testFlag := flag.Bool("t", false, "Verificar integridad de archivos comprimidos")
 	readFlag := flag.Bool("r", false, "Leer contenido de archivo comprimido a stdout")
 	helpFlag := flag.Bool("h", false, "Mostrar ayuda")
-	installFlag := flag.Bool("install", false, "Instalar herramientas de compresión faltantes")
+	installFlag := flag.Bool("install", false, "Instalar compresor en el sistema + herramientas faltantes")
+	installDepsFlag := flag.Bool("install-deps", false, "Instalar solo herramientas de compresión faltantes")
+	uninstallFlag := flag.Bool("uninstall", false, "Desinstalar compresor del sistema")
 
-	formatStr := flag.String("f", "", "Formato de compresión (gz, xz, bz2, zst, lz, lrz, zip, 7z, tar, rar, bz3, lz4, br)")
+	formatStr := flag.String("f", "", "Formato de compresión (ver -h para lista ordenada por compresión)")
 	outputDir := flag.String("o", ".", "Directorio de salida")
 	dryRun := flag.Bool("n", false, "Modo simulacro (no ejecutar)")
 	keepOrig := flag.Bool("k", false, "Conservar archivos originales")
@@ -40,14 +53,26 @@ func main() {
 	}
 
 	// Handle -h / no args
-	if *helpFlag || (flag.NFlag() == 0 && flag.NArg() == 0 && !*installFlag) {
+	if *helpFlag || (flag.NFlag() == 0 && flag.NArg() == 0) {
 		printHelp()
 		return
 	}
 
-	// Handle --install
+	// Handle --uninstall
+	if *uninstallFlag {
+		handleUninstall()
+		return
+	}
+
+	// Handle --install (binary + deps)
 	if *installFlag {
 		handleInstall()
+		return
+	}
+
+	// Handle --install-deps (solo deps)
+	if *installDepsFlag {
+		handleInstallDeps()
 		return
 	}
 
@@ -159,8 +184,80 @@ func main() {
 	os.Exit(1)
 }
 
+func installBinary() error {
+	src, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("error obteniendo ruta del binario: %w", err)
+	}
+	src, err = filepath.Abs(src)
+	if err != nil {
+		return fmt.Errorf("error resolviendo ruta: %w", err)
+	}
+
+	dest := "/usr/local/bin/compresor"
+
+	// Try direct copy
+	if err := copyFile(src, dest); err == nil {
+		WriteLogf("  %s✓ Binario instalado en %s%s\n", Green, dest, NC)
+		return nil
+	}
+
+	// Fallback 1: sudo install
+	if hasTool("sudo") {
+		cmd := exec.Command("sudo", "install", "-m", "755", src, dest)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			WriteLogf("  %s✓ Binario instalado en %s%s\n", Green, dest, NC)
+			return nil
+		}
+	}
+
+	// Fallback 2: pkexec install
+	if hasTool("pkexec") {
+		cmd := exec.Command("pkexec", "install", "-m", "755", src, dest)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			WriteLogf("  %s✓ Binario instalado en %s%s\n", Green, dest, NC)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no se pudo instalar en %s (intente con sudo manualmente)", dest)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Chmod(0755)
+}
+
 func handleInstall() {
-	// Detect which tools are missing
+	WriteLogf("%sInstalando compresor en el sistema...%s\n", Blue, NC)
+
+	if err := installBinary(); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError: %v%s\n", Red, err, NC)
+		os.Exit(1)
+	}
+
+	handleInstallDeps()
+}
+
+func handleInstallDeps() {
 	var neededTools []string
 	allTools := []string{"pigz", "xz", "lbzip2", "pbzip2", "bzip3", "zstd", "plzip",
 		"lrzip", "zip", "unzip", "p7zip", "rar", "tar", "numfmt", "pv", "getconf"}
@@ -172,7 +269,7 @@ func handleInstall() {
 	}
 
 	if len(neededTools) == 0 {
-		fmt.Println("Todas las herramientas están instaladas.")
+		WriteLogf("  %s✓ Todas las herramientas están instaladas.%s\n", Green, NC)
 		return
 	}
 
@@ -182,12 +279,52 @@ func handleInstall() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Detectado gestor de paquetes: %s\n", mgr.Name)
+	WriteLogf("  Detectado gestor de paquetes: %s\n", mgr.Name)
 	remaining := InstallMissingDeps(neededTools, mgr)
 	if remaining != nil {
-		fmt.Fprintf(os.Stderr, "Error: No se pudieron instalar: %v\n", remaining)
+		fmt.Fprintf(os.Stderr, "%sError: No se pudieron instalar: %v%s\n", Red, remaining, NC)
 		os.Exit(1)
 	}
+}
+
+func handleUninstall() {
+	dest := "/usr/local/bin/compresor"
+
+	if _, err := os.Stat(dest); os.IsNotExist(err) {
+		WriteLogf("  %s✗ compresor no está instalado en %s%s\n", Yellow, dest, NC)
+		return
+	}
+
+	// Try direct remove
+	if err := os.Remove(dest); err == nil {
+		WriteLogf("  %s✓ compresor desinstalado de %s%s\n", Green, dest, NC)
+		return
+	}
+
+	// Fallback 1: sudo
+	if hasTool("sudo") {
+		cmd := exec.Command("sudo", "rm", "-f", dest)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			WriteLogf("  %s✓ compresor desinstalado de %s%s\n", Green, dest, NC)
+			return
+		}
+	}
+
+	// Fallback 2: pkexec
+	if hasTool("pkexec") {
+		cmd := exec.Command("pkexec", "rm", "-f", dest)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			WriteLogf("  %s✓ compresor desinstalado de %s%s\n", Green, dest, NC)
+			return
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "%sError: no se pudo desinstalar (intente con sudo manualmente)%s\n", Red, NC)
+	os.Exit(1)
 }
 
 func printHelp() {
@@ -200,7 +337,9 @@ func printHelp() {
 	w(Yellow, "  compresor -l archivo...\n")
 	w(Yellow, "  compresor -t archivo...\n")
 	w(Yellow, "  compresor -r archivo...\n")
-	w(Yellow, "  compresor --install\n\n")
+	w(Yellow, "  compresor --install\n")
+	w(Yellow, "  compresor --install-deps\n")
+	w(Yellow, "  compresor --uninstall\n\n")
 	w(Bold+Blue, "Opciones de modo:\n")
 	w(Yellow, "  -c"); fmt.Print("                   Comprimir archivos\n")
 	w(Yellow, "  -d"); fmt.Print("                   Descomprimir archivos\n")
@@ -209,7 +348,16 @@ func printHelp() {
 	w(Yellow, "  -r"); fmt.Print("                   Leer contenido de archivo comprimido a stdout\n")
 	w(Yellow, "  -h"); fmt.Print("                   Mostrar esta ayuda\n\n")
 	w(Bold+Blue, "Opciones generales:\n")
-	w(Yellow, "  -f FORMATO"); fmt.Print("           Formato de compresión (gz, xz, bz2, zst, lz, lrz, zip, 7z, tar, rar, bz3, lz4, br)\n")
+
+	// Build format list ordered by compression ratio
+	var ordered []string
+	for _, f := range FormatsByCompression {
+		ordered = append(ordered, f.String())
+	}
+	fmt.Print("  -f FORMATO           Formato de compresión: ")
+	fmt.Print(strings.Join(ordered, ", "))
+	fmt.Print("\n                       lrz ofrece la máxima compresión\n")
+
 	w(Yellow, "  -o DIRECTORIO"); fmt.Print("        Directorio de salida (por defecto: .)\n")
 	w(Yellow, "  -n"); fmt.Print("                   Modo simulacro (dry-run)\n")
 	w(Yellow, "  -k"); fmt.Print("                   Conservar archivos originales\n")
@@ -221,7 +369,9 @@ func printHelp() {
 	w(Yellow, "  -s N"); fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
 	w(Yellow, "  -opts \"opciones\""); fmt.Print("     Opciones adicionales para la herramienta de compresión\n")
 	w(Yellow, "  -exclude patrón"); fmt.Print("      Patrón de exclusión (se puede repetir)\n")
-	w(Yellow, "  --install"); fmt.Print("            Instalar herramientas de compresión faltantes\n\n")
+	w(Yellow, "  --install"); fmt.Print("            Instalar compresor en el sistema + herramientas faltantes\n")
+	w(Yellow, "  --install-deps"); fmt.Print("        Instalar solo herramientas de compresión faltantes\n")
+	w(Yellow, "  --uninstall"); fmt.Print("          Desinstalar compresor del sistema\n\n")
 	w(Bold+Blue, "Ejemplos:\n")
 	w(Yellow, "  compresor -c -f gz documento.txt\n")
 	w(Yellow, "  compresor -c -f xz -v -p archivo.tar\n")
@@ -233,6 +383,8 @@ func printHelp() {
 	w(Yellow, "  compresor -l archivo.7z\n")
 	w(Yellow, "  compresor -r archivo.txt.gz | head\n")
 	w(Yellow, "  compresor --install\n")
+	w(Yellow, "  compresor --install-deps\n")
+	w(Yellow, "  compresor --uninstall\n")
 }
 
 // multiFlag implements flag.Value for repeated string flags

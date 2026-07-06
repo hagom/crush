@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 )
 
@@ -53,5 +54,24 @@ func TestContains(t *testing.T) {
 	}
 	if contains(list, "d") {
 		t.Error("contains should not find 'd'")
+	}
+}
+
+func TestIsToolInstalled(t *testing.T) {
+	if isToolInstalled(nil, "pigz") {
+		t.Error("isToolInstalled(nil, pigz) = true, want false")
+	}
+}
+
+func TestListCompressed(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "*.unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	err = ListCompressed(f)
+	if err == nil {
+		t.Error("ListCompressed(.unknown) = nil, want error")
 	}
 }

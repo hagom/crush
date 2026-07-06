@@ -124,3 +124,64 @@ func TestFormatString(t *testing.T) {
 		}
 	}
 }
+
+func TestSevenZ(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  Format
+		err   bool
+	}{
+		{"sevenZ parse", "7z", SevenZ, false},
+		{"sevenZ upper", "7Z", SevenZ, false},
+		{"sevenZ format name", SevenZ.String(), SevenZ, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseFormat(tt.input)
+			if (err != nil) != tt.err {
+				t.Errorf("ParseFormat(%q) error = %v, wantErr = %v", tt.input, err, tt.err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("ParseFormat(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatInfo(t *testing.T) {
+	tests := []struct {
+		format Format
+		ext    string
+	}{
+		{Gz, "gz"},
+		{Xz, "xz"},
+		{Bz2, "bz2"},
+		{Bz3, "bz3"},
+		{Zst, "zst"},
+		{Lz, "lz"},
+		{Lrz, "lrz"},
+		{Zip, "zip"},
+		{SevenZ, "7z"},
+		{Tar, "tar"},
+		{Rar, "rar"},
+		{Lz4, "lz4"},
+		{Br, "br"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ext, func(t *testing.T) {
+			if tt.format.String() != tt.ext {
+				t.Errorf("Format(%d).String() = %q, want %q", tt.format, tt.format.String(), tt.ext)
+			}
+			got, err := ParseFormat(tt.ext)
+			if err != nil {
+				t.Errorf("ParseFormat(%q) error = %v", tt.ext, err)
+				return
+			}
+			if got != tt.format {
+				t.Errorf("ParseFormat(%q) = %v, want %v", tt.ext, got, tt.format)
+			}
+		})
+	}
+}

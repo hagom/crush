@@ -335,7 +335,11 @@ func (w *splitWriter) Write(p []byte) (int, error) {
 }
 
 func (w *splitWriter) Close() error {
-	if w.file != nil && w.file != w.base.(*os.File) {
+	baseFile, ok := w.base.(*os.File)
+	if !ok {
+		return nil
+	}
+	if w.file != nil && w.file != baseFile {
 		return w.file.Close()
 	}
 	return nil

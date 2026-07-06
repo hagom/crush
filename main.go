@@ -34,6 +34,11 @@ func main() {
 
 	flag.Parse()
 
+	defer CloseLog()
+	if err := SetupLogging(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error configurando logging: %v\n", err)
+	}
+
 	// Handle -h / no args
 	if *helpFlag || (flag.NFlag() == 0 && flag.NArg() == 0 && !*installFlag) {
 		printHelp()

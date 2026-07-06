@@ -83,8 +83,12 @@ _get_format_info() {
         *.tar.zst|*.tzst)     echo "zstd|-dc -T0|-d -T0|1|-t" ;;
         *.tar.lz|*.tlz)       echo "plzip|-dc --threads=$NCPU|-dk --threads=$NCPU|1|-t" ;;
         *.tar.lrz)            echo "lrzip|-d -p $NCPU -o -|-d -k -p $NCPU|1|-t" ;;
+        *.tar.lz4)            echo "lz4|-dc|-dk|1|-t" ;;
+        *.tar.br)             echo "brotli|-dc|-dk|1|-t" ;;
         *.lrz)                echo "lrzip|-d -p $NCPU -o -|-d -k -p $NCPU|0|-t" ;;
         *.zst)                echo "zstd|-dc -T0|-d -T0|0|-t" ;;
+        *.lz4)                echo "lz4|-dc|-dk|0|-t" ;;
+        *.br)                 echo "brotli|-dc|-dk|0|-t" ;;
         *.xz)                 echo "xz|-dc -T0|-d -T0 -k|0|-t" ;;
         *.gz)                 echo "pigz|-dc|-dk|0|-t" ;;
         *.bz2)                echo "$BZIP2_BIN|-dc|-dk|0|-t" ;;
@@ -287,6 +291,8 @@ register_compress_tools() {
         zip)  ensure_tool zip ; ensure_tool 7z "$SEVENZ_BIN" ;;
         7z)   ensure_tool 7z "$SEVENZ_BIN" ;;
         rar)  ensure_tool rar ;;
+        lz4)  ensure_tool lz4 ;;
+        br)   ensure_tool brotli ;;
         tar)  ensure_tool tar ;;
     esac
 }
@@ -619,7 +625,7 @@ usage() {
 # $FORMAT (global) → stdout: extensión (gz → "tar.gz", zip → "zip")
 _ext_for_format() {
     case $FORMAT in
-        zip|7z|rar|tar) echo "$FORMAT" ;;
+        zip|7z|rar|tar|lz4|br) echo "$FORMAT" ;;
         *)          echo "tar.$FORMAT" ;;
     esac
 }
@@ -685,6 +691,8 @@ _compress_items() {
             zip) printf "  %s a -tzip -mx=9 -mmt=on %s %s\n" "$SEVENZ_BIN" "$FINAL_FILE" "${items[*]}" ;;
             7z)  printf "  %s a -mx=9 -md=128m -ms=on -mmt=on %s %s\n" "$SEVENZ_BIN" "$FINAL_FILE" "${items[*]}" ;;
             rar) printf "  %s a -m5 -mt%s %s %s\n" "$RAR_BIN" "$NCPU" "$FINAL_FILE" "${items[*]}" ;;
+            lz4) printf "  tar -cvf - %s | lz4 -c > %s\n" "${items[*]}" "$FINAL_FILE" ;;
+            br)  printf "  tar -cvf - %s | brotli -c > %s\n" "${items[*]}" "$FINAL_FILE" ;;
             tar) printf "  tar -cvf %s %s\n" "$FINAL_FILE" "${items[*]}" ;;
         esac
         if [[ -n "$SPLIT_SIZE" ]]; then
@@ -753,6 +761,12 @@ _compress_items() {
             ;;
         rar)
             "$RAR_BIN" a -m5 -mt"$NCPU" "$FINAL_FILE" -- "${items[@]}" || CMD_EXIT=$?
+            ;;
+        lz4)
+            tar "${tar_exclude[@]}" -cvf - -- "${items[@]}" | _pv_pipe "$TOTAL_ORIG_BYTES" | lz4 -c > "$FINAL_FILE" || CMD_EXIT=$?
+            ;;
+        br)
+            tar "${tar_exclude[@]}" -cvf - -- "${items[@]}" | _pv_pipe "$TOTAL_ORIG_BYTES" | brotli -c > "$FINAL_FILE" || CMD_EXIT=$?
             ;;
         tar)
             tar "${tar_exclude[@]}" -cvf "$FINAL_FILE" -- "${items[@]}" || CMD_EXIT=$?

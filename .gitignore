@@ -1,2 +1,3 @@
 compresor
 *.log
+.codegraph/

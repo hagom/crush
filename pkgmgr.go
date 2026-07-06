@@ -127,21 +127,22 @@ func isToolInstalled(mgr *PkgManager, pkg string) bool {
 	if mgr == nil {
 		return false
 	}
+	fields := strings.Fields(mgr.Query)
 	switch mgr.Name {
 	case "apt-get":
-		raw, err := runCmdWithOutput(mgr.Query, pkg)
+		raw, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
 		if err != nil {
 			return false
 		}
 		return strings.Contains(raw, "install ok installed")
 	case "pacman":
-		_, err := runCmdWithOutput(mgr.Query, pkg)
+		_, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
 		return err == nil
 	case "apk":
-		_, err := runCmdWithOutput(mgr.Query, pkg)
+		_, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
 		return err == nil
 	default:
-		_, err := runCmdWithOutput(mgr.Query, pkg)
+		_, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
 		return err == nil
 	}
 }
@@ -171,7 +172,7 @@ func InstallMissingDeps(tools_needed []string, mgr *PkgManager) []string {
 		if toolInfo == nil {
 			continue
 		}
-		var finalPkg *ToolInfo
+		finalPkg := toolInfo
 		aliases := []string{tool}
 		if tool == "p7zip" {
 			aliases = []string{"7zz", "7z", "7za"}

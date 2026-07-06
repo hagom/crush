@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -84,4 +87,36 @@ func TestRarBin(t *testing.T) {
 	if bin == "" {
 		t.Errorf("rarBin() = empty")
 	}
+}
+
+func TestPipeline(t *testing.T) {
+	t.Run("empty cmds", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := pipeline(&buf, nil); err != nil {
+			t.Errorf("pipeline(empty) = %v, want nil", err)
+		}
+	})
+
+	t.Run("single cmd", func(t *testing.T) {
+		var buf bytes.Buffer
+		cmd := exec.Command("echo", "hello")
+		if err := pipeline(&buf, nil, cmd); err != nil {
+			t.Errorf("pipeline(echo) = %v, want nil", err)
+		}
+		if strings.TrimSpace(buf.String()) != "hello" {
+			t.Errorf("pipeline(echo) output = %q, want %q", buf.String(), "hello\n")
+		}
+	})
+
+	t.Run("pipe two cmds", func(t *testing.T) {
+		var buf bytes.Buffer
+		echo := exec.Command("echo", "hello-pipe")
+		cat := exec.Command("cat")
+		if err := pipeline(&buf, nil, echo, cat); err != nil {
+			t.Errorf("pipeline(echo|cat) = %v, want nil", err)
+		}
+		if strings.TrimSpace(buf.String()) != "hello-pipe" {
+			t.Errorf("pipeline(echo|cat) output = %q, want %q", buf.String(), "hello-pipe\n")
+		}
+	})
 }

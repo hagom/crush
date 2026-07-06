@@ -229,6 +229,9 @@ func expandGlobs(items []string) []string {
 	for _, item := range items {
 		matches, err := filepath.Glob(item)
 		if err != nil || len(matches) == 0 {
+			if err != nil {
+				WriteLogf("warning: patrón glob inválido %q: %v\n", item, err)
+			}
 			// Try as literal file
 			if _, err := os.Stat(item); err == nil {
 				result = append(result, item)
@@ -311,10 +314,6 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 6)), "--threads=" + ncpuStr()}
 		args = append(args, optFlags...)
 		compressCmd = exec.Command("plzip", args...)
-	case "lrz":
-		args := []string{"-f", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 6)), "-o", outPath}
-		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		compressCmd = exec.Command("lrzip", args...)
 	case "lz4":
 		optFlags := strings.Fields(opts.CompressionOpts)
 		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 1))}

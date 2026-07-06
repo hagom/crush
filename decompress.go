@@ -266,8 +266,9 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	default:
-		// Use tool directly: pigz -dk file.gz etc
-		cmd := exec.Command(info.Tool, "-d", "-k", "--", file)
+		directArgs := strings.Fields(info.DirectFlags)
+		cmd := exec.Command(info.Tool, directArgs...)
+		cmd.Args = append(cmd.Args, "--", file)
 		cmd.Dir = dir
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

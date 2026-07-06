@@ -292,9 +292,7 @@ register_compress_tools() {
         br)   ensure_tool brotli; ensure_tool tar ;;
         zip)  ensure_tool zip ; ensure_tool 7z "$SEVENZ_BIN" ;;
         7z)   ensure_tool 7z "$SEVENZ_BIN" ;;
-        rar)  ensure_tool rar ;;
-        lz4)  ensure_tool lz4 ;;
-        br)   ensure_tool brotli ;;
+        rar)  ensure_tool rar "$RAR_BIN" rar unrar ;;
         tar)  ensure_tool tar ;;
     esac
 }

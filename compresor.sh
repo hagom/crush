@@ -286,7 +286,7 @@ register_compress_tools() {
         lrz)  ensure_tool lrzip ;;
         zip)  ensure_tool zip ; ensure_tool 7z "$SEVENZ_BIN" ;;
         7z)   ensure_tool 7z "$SEVENZ_BIN" ;;
-        rar)  ensure_tool rar ;;
+        rar)  ensure_tool rar "$RAR_BIN" rar unrar ;;
         tar)  ensure_tool tar ;;
     esac
 }

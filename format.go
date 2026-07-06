@@ -95,6 +95,10 @@ func DetectFormat(filename string) (FormatInfo, error) {
 		info = FormatInfo{Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".tar.lrz"):
 		info = FormatInfo{Tool: "lrzip", PipeFlags: "-d -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: true, TestFlag: "-t"}
+	case strings.HasSuffix(ext, ".tar.lz4"):
+		info = FormatInfo{Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
+	case strings.HasSuffix(ext, ".tar.br"):
+		info = FormatInfo{Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".lrz"):
 		info = FormatInfo{Tool: "lrzip", PipeFlags: "-d -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".lz4"):

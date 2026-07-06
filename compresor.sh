@@ -281,13 +281,15 @@ install_missing_deps() {
 # Según FORMAT actual, llama a ensure_tool con los binarios correctos.
 register_compress_tools() {
     case "$FORMAT" in
-        gz)   ensure_tool pigz ;;
-        xz)   ensure_tool xz ;;
-        bz2)  ensure_tool "$BZIP2_BIN" "$BZIP2_BIN" pbzip2 ;;
-        bz3)  ensure_tool bzip3 ;;
-        zst)  ensure_tool zstd ;;
-        lz)   ensure_tool plzip ;;
-        lrz)  ensure_tool lrzip ;;
+        gz)   ensure_tool pigz; ensure_tool tar ;;
+        xz)   ensure_tool xz; ensure_tool tar ;;
+        bz2)  ensure_tool "$BZIP2_BIN" "$BZIP2_BIN" pbzip2; ensure_tool tar ;;
+        bz3)  ensure_tool bzip3; ensure_tool tar ;;
+        zst)  ensure_tool zstd; ensure_tool tar ;;
+        lz)   ensure_tool plzip; ensure_tool tar ;;
+        lrz)  ensure_tool lrzip; ensure_tool tar ;;
+        lz4)  ensure_tool lz4; ensure_tool tar ;;
+        br)   ensure_tool brotli; ensure_tool tar ;;
         zip)  ensure_tool zip ; ensure_tool 7z "$SEVENZ_BIN" ;;
         7z)   ensure_tool 7z "$SEVENZ_BIN" ;;
         rar)  ensure_tool rar ;;

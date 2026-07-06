@@ -492,6 +492,11 @@ get_unique_name() {
         base_name="${base_name%.$ext}"
     fi
 
+    local simple_ext="${ext##*.}"
+    if [[ "$ext" != "$simple_ext" && "$base_name" == *."$simple_ext" ]]; then
+        base_name="${base_name%.$simple_ext}"
+    fi
+
     final_name="${base_name}.${ext}"
     if [[ -e "$final_name" ]]; then
         while [[ -e "${base_name}_${counter}.${ext}" ]]; do

@@ -139,6 +139,51 @@ func main() {
 		return
 	}
 
+	// Check mode conflicts among -c, -d, -l, -t, -r
+	modes := 0
+	for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag} {
+		if m {
+			modes++
+		}
+	}
+	if modes > 1 {
+		fmt.Fprintln(os.Stderr, "Error: solo puede usar un modo a la vez (-c, -d, -l, -t, -r)")
+		os.Exit(1)
+	}
+
+	// Check --install/--install-deps/--uninstall conflicts
+	installModeCount := 0
+	if *installFlag {
+		installModeCount++
+	}
+	if *installDepsFlag {
+		installModeCount++
+	}
+	if *uninstallFlag {
+		installModeCount++
+	}
+	if installModeCount > 1 {
+		fmt.Fprintln(os.Stderr, "Error: --install, --install-deps y --uninstall son mutuamente excluyentes")
+		os.Exit(1)
+	}
+	if installModeCount > 0 {
+		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag} {
+			if m {
+				fmt.Fprintln(os.Stderr, "Error: --install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -r")
+				os.Exit(1)
+			}
+		}
+	}
+
+	// -f solo tiene sentido con -c
+	if *formatStr != "" && !*compressFlag {
+		fmt.Fprintln(os.Stderr, "Warning: -f solo tiene efecto con -c (ignorado)")
+	}
+	// -s solo tiene sentido con -c
+	if *splitSize > 0 && !*compressFlag {
+		fmt.Fprintln(os.Stderr, "Warning: -s solo tiene efecto con -c (ignorado)")
+	}
+
 	// Handle --uninstall
 	if *uninstallFlag {
 		handleUninstall()
@@ -155,18 +200,6 @@ func main() {
 	if *installDepsFlag {
 		handleInstallDeps()
 		return
-	}
-
-	// Check mode conflicts
-	modes := 0
-	for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag} {
-		if m {
-			modes++
-		}
-	}
-	if modes > 1 {
-		fmt.Fprintln(os.Stderr, "Error: solo puede usar un modo a la vez (-c, -d, -l, -t, -r)")
-		os.Exit(1)
 	}
 
 	// Get files from args or stdin

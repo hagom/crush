@@ -170,7 +170,11 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			return exec.Command("tar", "-xf", file, "-C", dir).Run()
 		}
 
-		pvCmd := exec.Command("pv", "-B", "256k")
+		pvArgs := []string{"-B", "256k"}
+		if needed > 0 {
+			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", needed))
+		}
+		pvCmd := exec.Command("pv", pvArgs...)
 
 		if err := pipeline(os.Stdout, os.Stderr, decompCmd, pvCmd, tarExtract); err != nil {
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
@@ -254,15 +258,50 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 
-		case strings.HasSuffix(ext, ".lrz"):
-			outputPath := filepath.Join(dir, strings.TrimSuffix(filepath.Base(file), ".lrz"))
-			args := []string{"-d", "-p", ncpuStr(), "-k", "--", file, "-o", outputPath}
+	case strings.HasSuffix(ext, ".lrz"):
+		outputPath := filepath.Join(dir, strings.TrimSuffix(filepath.Base(file), ".lrz"))
+		if opts.Progress && hasTool("pv") {
+			pipeFlags := strings.Fields(info.PipeFlags)
+			decompCmd := exec.Command(info.Tool, pipeFlags...)
+			decompCmd.Args = append(decompCmd.Args, "--", file)
+			outFile, err := os.Create(outputPath)
+			if err != nil {
+				return fmt.Errorf("Error creando archivo de salida: %w", err)
+			}
+			defer outFile.Close()
+			pvArgs := []string{"-B", "256k"}
+			if size := EstimateUncompressedSize(file); size > 0 {
+				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
+			}
+			return pipeline(outFile, os.Stderr, decompCmd, exec.Command("pv", pvArgs...))
+		}
+		args := []string{"-d", "-p", ncpuStr(), "-k", "--", file, "-o", outputPath}
 		cmd := exec.Command("lrzip", args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 
 	default:
+		if opts.Progress && hasTool("pv") {
+			pipeFlags := strings.Fields(info.PipeFlags)
+			decompCmd := exec.Command(info.Tool, pipeFlags...)
+			decompCmd.Args = append(decompCmd.Args, "--", file)
+			outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
+			outFile, err := os.Create(outputPath)
+			if err != nil {
+				return fmt.Errorf("Error creando archivo de salida: %w", err)
+			}
+			defer outFile.Close()
+			pvArgs := []string{"-B", "256k"}
+			if size := EstimateUncompressedSize(file); size > 0 {
+				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
+			}
+			pvCmd := exec.Command("pv", pvArgs...)
+			if err := pipeline(outFile, os.Stderr, decompCmd, pvCmd); err != nil {
+				return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
+			}
+			return nil
+		}
 		directArgs := strings.Fields(info.DirectFlags)
 		cmd := exec.Command(info.Tool, directArgs...)
 		cmd.Args = append(cmd.Args, "--", file)
@@ -285,6 +324,18 @@ func stripTarExt(file string) string {
 		}
 	}
 	return file
+}
+
+var singleCompExts = []string{".gz", ".xz", ".bz2", ".bz3", ".zst", ".lz", ".lrz", ".lz4", ".br"}
+
+func stripCompressionExt(base string) string {
+	lower := strings.ToLower(base)
+	for _, ext := range singleCompExts {
+		if strings.HasSuffix(lower, ext) {
+			return base[:len(base)-len(ext)]
+		}
+	}
+	return base
 }
 
 // splitWriter writes to underlying writer, splitting every splitSize bytes

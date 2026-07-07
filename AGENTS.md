@@ -121,7 +121,7 @@ Actuar como **equipo de desarrollo completo**. Sin necesidad de instrucciones ex
 
 **Flujo por omisión:** Planificar → Implementar → Testear → Revisar bugs → Mergear → Documentar.
 
-- **Fixes en paralelo:** Siempre que haya bugs en múltiples versiones (Go + Bash), ejecutar fixes en paralelo usando múltiples worktrees/ramas para ahorrar tiempo.
+- **Fixes en paralelo con worktrees descriptivos:** Por cada bug a fixear, crear un worktree con nombre descriptivo del bug (ej: `fix/nil-pointer-decompress`, `fix/lrzip-estimate`). Todos los worktrees se trabajan en paralelo para ahorrar tiempo. Al terminar cada fix, mergear a `main` y eliminar worktree + rama.
 - **Revisión exhaustiva de bugs:** Tras implementar fixes, hacer re-revisión completa del código en busca de bugs restantes. Si se encuentran nuevos bugs, fixearlos y repetir el ciclo. No detenerse hasta que queden **0 bugs conocidos** en todo el proyecto.
 - No esperar instrucciones en cada sub-paso.
 - Al terminar un encargo, dejar el repo limpio (rama `main` actualizada, worktrees removidos, ramas fix eliminadas, AGENTS.md reflejando el nuevo estado).

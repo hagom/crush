@@ -378,19 +378,20 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 }
 
 func compressZip(files []string, outPath string, opts CompressOptions) error {
-	args := []string{"-r"}
+	sevenz := sevenzBin()
+	args := []string{"a", "-tzip", "-mx" + fmt.Sprintf("%d", fastOrSlow(opts, 5)), "-mmt=on"}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
 	args = append(args, outPath)
 	args = append(args, "--")
 	args = append(args, files...)
 
-	cmd := exec.Command("zip", args...)
+	cmd := exec.Command(sevenz, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if opts.Verbose {
-		WriteLogf("  $ zip %s\n", strings.Join(args, " "))
+		WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
 	}
 
 	return cmd.Run()
@@ -403,6 +404,8 @@ func compress7z(files []string, outPath string, opts CompressOptions) error {
 	args = append(args, optFlags...)
 	if opts.Threads > 0 {
 		args = append(args, "-mmt"+fmt.Sprintf("%d", opts.Threads))
+	} else {
+		args = append(args, "-mmt=on")
 	}
 	if !opts.KeepOrig {
 		args = append(args, "-sdel")
@@ -444,7 +447,7 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions) erro
 
 func compressRar(files []string, outPath string, opts CompressOptions) error {
 	rar := rarBin()
-	args := []string{"a", "-m" + fmt.Sprintf("%d", fastOrSlow(opts, 5))}
+	args := []string{"a", "-m" + fmt.Sprintf("%d", fastOrSlow(opts, 5)), "-mt" + ncpuStr()}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
 	if !opts.KeepOrig {

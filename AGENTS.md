@@ -45,6 +45,12 @@ make install        # install -m 755 compresor /usr/local/bin/
 - NO agregar comentarios a menos que sea estrictamente necesario.
 - Los colores ANSI van en las constantes de `util.go` (Green, Red, Yellow, Blue, Bold, NC).
 
+## Filosofía del proyecto
+
+- **Siempre paralelizar** los compresores. Usar versiones multihilo (`pigz`, `lbzip2`/`pbzip2`, `plzip`, `bzip3 -j N`, `xz -T0`, `zstd -T0`, `lrzip -p N`, `7z -mmt=on`, `rar -mtN`) para aprovechar todos los núcleos del CPU.
+- **Sistemas target**: Debian (apt) y RedHat (dnf/yum). El instalador de dependencias debe priorizar estos gestores.
+- Si la versión paralela de un compresor no está disponible, caer en la versión serial (`gzip`, `bzip2`, etc.) como último recurso, nunca fallar.
+
 ## Estructura del código Go
 
 ```

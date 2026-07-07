@@ -94,8 +94,10 @@ func bzip2Bin() string {
 			bzip2Cache = "lbzip2"
 		} else if lookupPath("pbzip2") {
 			bzip2Cache = "pbzip2"
+		} else if lookupPath("bzip2") {
+			bzip2Cache = "bzip2"
 		} else {
-			bzip2Cache = "lbzip2"
+			bzip2Cache = "bzip2"
 		}
 	})
 	return bzip2Cache

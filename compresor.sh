@@ -988,7 +988,8 @@ else SEVENZ_BIN="7z"; fi
 
 if command -v lbzip2 &>/dev/null; then BZIP2_BIN="lbzip2"
 elif command -v pbzip2 &>/dev/null; then BZIP2_BIN="pbzip2"
-else BZIP2_BIN="lbzip2"; fi
+elif command -v bzip2 &>/dev/null; then BZIP2_BIN="bzip2"
+else BZIP2_BIN="bzip2"; fi
 
 if command -v rar &>/dev/null; then RAR_BIN="rar"
 elif command -v unrar &>/dev/null; then RAR_BIN="unrar"

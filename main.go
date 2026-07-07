@@ -10,6 +10,83 @@ import (
 	"strings"
 )
 
+// knownShortFlags lists single-dash short flags that can be combined (-ptkv).
+// Only single-character flags that take no argument belong here.
+var knownShortFlags = map[byte]bool{
+	'c': true,
+	'd': true,
+	'l': true,
+	't': true,
+	'r': true,
+	'h': true,
+	'k': true,
+	'v': true,
+	'p': true,
+	'n': true,
+}
+
+// takesValue reports whether a flag token consumes the next argument as its value.
+func flagTakesValue(a string) bool {
+	switch {
+	case a == "-f", a == "-o", a == "-T", a == "-s", a == "-opts":
+		return true
+	case a == "-exclude" || strings.HasPrefix(a, "-exclude="):
+		return true
+	case len(a) > 7 && a[:7] == "-exclude":
+		return true
+	default:
+		return false
+	}
+}
+
+// reorderArgs expands combined short flags (-ptkv → -p -t -k -v) and moves
+// all flags before positional arguments so flag.Parse can see them.
+// Flag-value pairs (-f 7z) are kept together.
+func reorderArgs(args []string) []string {
+	if len(args) < 2 {
+		return args
+	}
+	var out []string
+	var positional []string
+	skip := false
+	for i := 1; i < len(args); i++ {
+		if skip {
+			skip = false
+			continue
+		}
+		a := args[i]
+		if len(a) > 2 && a[0] == '-' && a[1] != '-' && !flagTakesValue(a) {
+			// Potential combined short flags: -ptkv
+			allKnown := true
+			for j := 1; j < len(a); j++ {
+				if !knownShortFlags[a[j]] {
+					allKnown = false
+					break
+				}
+			}
+			if allKnown && len(a)-1 >= 2 {
+				for j := 1; j < len(a); j++ {
+					out = append(out, "-"+string(a[j]))
+				}
+				continue
+			}
+		}
+		if a[0] == '-' {
+			out = append(out, a)
+			if flagTakesValue(a) && i+1 < len(args) {
+				out = append(out, args[i+1])
+				skip = true
+			}
+		} else {
+			positional = append(positional, a)
+		}
+	}
+	result := []string{args[0]}
+	result = append(result, out...)
+	result = append(result, positional...)
+	return result
+}
+
 func main() {
 	// Handle --help / -help before flag.Parse (flag pkg intercepts --help)
 	for _, arg := range os.Args[1:] {
@@ -18,6 +95,10 @@ func main() {
 			return
 		}
 	}
+
+	// Reorder args: expand combined short flags (-ptkv → -p -t -k -v)
+	// and move all flags before positional args so flag.Parse catches them
+	os.Args = reorderArgs(os.Args)
 
 	// Flags
 	compressFlag := flag.Bool("c", false, "Comprimir archivos")
@@ -74,6 +155,18 @@ func main() {
 	if *installDepsFlag {
 		handleInstallDeps()
 		return
+	}
+
+	// Check mode conflicts
+	modes := 0
+	for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag} {
+		if m {
+			modes++
+		}
+	}
+	if modes > 1 {
+		fmt.Fprintln(os.Stderr, "Error: solo puede usar un modo a la vez (-c, -d, -l, -t, -r)")
+		os.Exit(1)
 	}
 
 	// Get files from args or stdin

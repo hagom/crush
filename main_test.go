@@ -1,0 +1,63 @@
+package main
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestReorderArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "combined short flags",
+			args: []string{"compresor", "-c", "-f", "gz", "file.txt", "-pkv"},
+			want: []string{"compresor", "-c", "-f", "gz", "-p", "-k", "-v", "file.txt"},
+		},
+		{
+			name: "flags after positional args",
+			args: []string{"compresor", "-c", "-f", "7z", "file.txt", "-k", "-v"},
+			want: []string{"compresor", "-c", "-f", "7z", "-k", "-v", "file.txt"},
+		},
+		{
+			name: "no args",
+			args: []string{"compresor"},
+			want: []string{"compresor"},
+		},
+		{
+			name: "no flags",
+			args: []string{"compresor", "file.txt"},
+			want: []string{"compresor", "file.txt"},
+		},
+		{
+			name: "combined with single flag",
+			args: []string{"compresor", "-c", "-f", "gz", "file.txt", "-pv"},
+			want: []string{"compresor", "-c", "-f", "gz", "-p", "-v", "file.txt"},
+		},
+		{
+			name: "long flags untouched",
+			args: []string{"compresor", "--force", "file.txt"},
+			want: []string{"compresor", "--force", "file.txt"},
+		},
+		{
+			name: "flag with value preserved",
+			args: []string{"compresor", "-f", "gz", "-o", "/tmp/out", "file.txt"},
+			want: []string{"compresor", "-f", "gz", "-o", "/tmp/out", "file.txt"},
+		},
+		{
+			name: "thread flag with value",
+			args: []string{"compresor", "-c", "-f", "gz", "-T", "4", "file.txt"},
+			want: []string{"compresor", "-c", "-f", "gz", "-T", "4", "file.txt"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reorderArgs(tt.args)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("reorderArgs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -407,9 +407,6 @@ func compress7z(files []string, outPath string, opts CompressOptions) error {
 	} else {
 		args = append(args, "-mmt=on")
 	}
-	if !opts.KeepOrig {
-		args = append(args, "-sdel")
-	}
 	args = append(args, outPath)
 	args = append(args, "--")
 	args = append(args, files...)

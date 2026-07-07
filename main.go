@@ -238,12 +238,18 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
 		return err
 	}
-	return out.Chmod(0755)
+	if err := out.Chmod(0755); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	return out.Close()
 }
 
 func handleInstall() {
@@ -330,8 +336,8 @@ func handleUninstall() {
 func printHelp() {
 	w := func(c, s string) { fmt.Print(c, s, NC) }
 
-	w(Bold+Blue, "COMPRESOR  Herramienta multi-formato de compresión y descompresión\n\n")
-	w(Bold+Blue, "Uso:\n")
+	w(BoldBlue, "COMPRESOR  Herramienta multi-formato de compresión y descompresión\n\n")
+	w(BoldBlue, "Uso:\n")
 	w(Yellow, "  compresor -c -f FORMATO [opciones] archivo...\n")
 	w(Yellow, "  compresor -d [opciones] archivo...\n")
 	w(Yellow, "  compresor -l archivo...\n")
@@ -340,14 +346,14 @@ func printHelp() {
 	w(Yellow, "  compresor --install\n")
 	w(Yellow, "  compresor --install-deps\n")
 	w(Yellow, "  compresor --uninstall\n\n")
-	w(Bold+Blue, "Opciones de modo:\n")
+	w(BoldBlue, "Opciones de modo:\n")
 	w(Yellow, "  -c"); fmt.Print("                   Comprimir archivos\n")
 	w(Yellow, "  -d"); fmt.Print("                   Descomprimir archivos\n")
 	w(Yellow, "  -l"); fmt.Print("                   Listar contenido de archivo comprimido\n")
 	w(Yellow, "  -t"); fmt.Print("                   Verificar integridad de archivos comprimidos\n")
 	w(Yellow, "  -r"); fmt.Print("                   Leer contenido de archivo comprimido a stdout\n")
 	w(Yellow, "  -h"); fmt.Print("                   Mostrar esta ayuda\n\n")
-	w(Bold+Blue, "Opciones generales:\n")
+	w(BoldBlue, "Opciones generales:\n")
 
 	// Build format list ordered by compression ratio
 	var ordered []string
@@ -372,7 +378,7 @@ func printHelp() {
 	w(Yellow, "  --install"); fmt.Print("            Instalar compresor en el sistema + herramientas faltantes\n")
 	w(Yellow, "  --install-deps"); fmt.Print("        Instalar solo herramientas de compresión faltantes\n")
 	w(Yellow, "  --uninstall"); fmt.Print("          Desinstalar compresor del sistema\n\n")
-	w(Bold+Blue, "Ejemplos:\n")
+	w(BoldBlue, "Ejemplos:\n")
 	w(Yellow, "  compresor -c -f gz documento.txt\n")
 	w(Yellow, "  compresor -c -f xz -v -p archivo.tar\n")
 	w(Yellow, "  compresor -c -f zip -o /tmp/ varios_archivos.txt\n")

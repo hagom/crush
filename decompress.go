@@ -112,7 +112,9 @@ func decompressFile(file string, opts DecompressOptions) error {
 	}
 
 	if !opts.KeepOrig {
-		os.Remove(file)
+		if err := os.Remove(file); err != nil {
+			WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, file, err, NC)
+		}
 	}
 
 	elapsed := time.Since(startTime)
@@ -160,6 +162,10 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			decompCmd = exec.Command("plzip", "-dc", "--threads="+ncpuStr(), "--", file)
 		case strings.HasSuffix(ext, ".tar.lrz"):
 			decompCmd = exec.Command("lrzip", "-d", "-p", ncpuStr(), "-o", "-", "--", file)
+		case strings.HasSuffix(ext, ".tar.lz4"):
+			decompCmd = exec.Command("lz4", "-dc", "--", file)
+		case strings.HasSuffix(ext, ".tar.br"):
+			decompCmd = exec.Command("brotli", "-dc", "--", file)
 		case strings.HasSuffix(ext, ".tar"):
 			return exec.Command("tar", "-xf", file, "-C", dir).Run()
 		}
@@ -170,7 +176,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 	} else {
-		// Direct tool invocation
+		// Direct tool invocation — decompress the compression layer
 		args := strings.Fields(info.DirectFlags)
 		args = append(args, "--", file)
 		cmd := exec.Command(info.Tool, args...)
@@ -181,33 +187,22 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 		}
 
-		// For tar-based archives, we need to extract the tar manually if tool didn't do it
-		if strings.HasSuffix(file, ".lrz") || strings.HasSuffix(file, ".tar.lrz") {
-			// lrzip needs special handling - it produces the tar
-			base := file
-			if strings.HasSuffix(file, ".lrz") {
-				base = strings.TrimSuffix(file, ".lrz")
-			} else if strings.HasSuffix(file, ".tar.lrz") {
-				base = strings.TrimSuffix(file, ".lrz")
-			}
-			if _, err := os.Stat(base); err == nil && !strings.HasSuffix(base, ".tar") {
-				// It's the lrz decompressor, now extract tar if applicable
-				if strings.HasPrefix(info.Tool, "tar") || info.IsTar {
-					extractCmd := exec.Command("tar", "-xf", base, "-C", dir)
-					extractCmd.Stdout = os.Stdout
-					extractCmd.Stderr = os.Stderr
-					if err := extractCmd.Run(); err != nil {
-						return fmt.Errorf("Error extrayendo tar de %s: %w", base, err)
-					}
-				}
-			} else if strings.HasSuffix(base, ".tar") {
-				// Direct tar file - extract it
-				extractCmd := exec.Command("tar", "-xf", base, "-C", dir)
+		// For tar-based archives, extract the resulting tar
+		if info.IsTar {
+			base := stripTarExt(file)
+			tarName := base + ".tar"
+			if _, err := os.Stat(tarName); err == nil {
+				extractCmd := exec.Command("tar", "-xf", tarName, "-C", dir)
 				extractCmd.Stdout = os.Stdout
 				extractCmd.Stderr = os.Stderr
 				if err := extractCmd.Run(); err != nil {
-					return fmt.Errorf("Error extrayendo tar de %s: %w", base, err)
+					return fmt.Errorf("Error extrayendo tar de %s: %w", tarName, err)
 				}
+				if !opts.KeepOrig {
+						if err := os.Remove(tarName); err != nil {
+							WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, tarName, err, NC)
+						}
+					}
 			}
 		}
 	}
@@ -220,11 +215,11 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 	switch {
 	case strings.HasSuffix(ext, ".zip"):
-		args := []string{"-o"}
-		if !opts.Force {
-			args = append(args, "-n")
-		} else {
+		args := []string{}
+		if opts.Force {
 			args = append(args, "-o")
+		} else {
+			args = append(args, "-n")
 		}
 		dirFlag := "-d"
 		args = append(args, file, dirFlag, dir)
@@ -259,8 +254,10 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 
-	case strings.HasSuffix(ext, ".lrz"):
-		cmd := exec.Command("lrzip", "-d", "-p", ncpuStr(), "-k", "--", file, "-o", dir+"/")
+		case strings.HasSuffix(ext, ".lrz"):
+			outputPath := filepath.Join(dir, strings.TrimSuffix(filepath.Base(file), ".lrz"))
+			args := []string{"-d", "-p", ncpuStr(), "-k", "--", file, "-o", outputPath}
+		cmd := exec.Command("lrzip", args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
@@ -274,6 +271,20 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 	}
+}
+
+var tarSuffixes = []string{".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2",
+	".tar.bz3", ".tar.zst", ".tzst", ".tar.lz", ".tlz",
+	".tar.lrz", ".tar.lz4", ".tar.br"}
+
+func stripTarExt(file string) string {
+	lower := strings.ToLower(file)
+	for _, s := range tarSuffixes {
+		if strings.HasSuffix(lower, s) {
+			return file[:len(file)-len(s)]
+		}
+	}
+	return file
 }
 
 // splitWriter writes to underlying writer, splitting every splitSize bytes

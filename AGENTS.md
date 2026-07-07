@@ -119,7 +119,12 @@ Actuar como **equipo de desarrollo completo**. Sin necesidad de instrucciones ex
 | **DevOps** | Worktrees, merge strategy, cleanup |
 | **Documentador** | Mantener AGENTS.md actualizado con decisiones |
 
-**Flujo por omisión:** Planificar → Implementar → Testear → Mergear → Documentar. No esperar instrucciones en cada sub-paso. Al terminar un encargo, dejar el repo limpio (rama `main` actualizada, worktrees removidos, ramas fix eliminadas, AGENTS.md reflejando el nuevo estado).
+**Flujo por omisión:** Planificar → Implementar → Testear → Revisar bugs → Mergear → Documentar.
+
+- **Fixes en paralelo:** Siempre que haya bugs en múltiples versiones (Go + Bash), ejecutar fixes en paralelo usando múltiples worktrees/ramas para ahorrar tiempo.
+- **Revisión exhaustiva de bugs:** Tras implementar fixes, hacer re-revisión completa del código en busca de bugs restantes. Si se encuentran nuevos bugs, fixearlos y repetir el ciclo. No detenerse hasta que queden **0 bugs conocidos** en todo el proyecto.
+- No esperar instrucciones en cada sub-paso.
+- Al terminar un encargo, dejar el repo limpio (rama `main` actualizada, worktrees removidos, ramas fix eliminadas, AGENTS.md reflejando el nuevo estado).
 
 ## Referencias
 

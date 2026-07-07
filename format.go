@@ -73,10 +73,6 @@ func ParseFormat(s string) (Format, error) {
 			return f, nil
 		}
 	}
-	// Handle "7z" special case
-	if s == "7z" {
-		return SevenZ, nil
-	}
 	return 0, fmt.Errorf("formato no soportado: %s", s)
 }
 

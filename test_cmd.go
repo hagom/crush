@@ -76,10 +76,6 @@ func TestFile(file string, opts TestOptions) (string, error) {
 		if hasTool("pigz") {
 			return testWith(file, "pigz", "-t", "--", file)
 		}
-		warn, _ := testWith(file, "gzip", "-t", "--", file)
-		if warn == "WARNING" {
-			return "WARNING", fmt.Errorf("herramienta no disponible")
-		}
 		return testWith(file, "gzip", "-t", "--", file)
 
 	case strings.HasSuffix(ext, ".tar.xz") || strings.HasSuffix(ext, ".txz"):

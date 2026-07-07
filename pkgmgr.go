@@ -130,7 +130,8 @@ func runElevated(name string, args ...string) error {
 			return nil
 		}
 	}
-	return runCmd(name, args...)
+	return fmt.Errorf("no se pudo ejecutar como root (intente manualmente con sudo)"+
+		" para: %s %s", name, strings.Join(args, " "))
 }
 
 func runCmdWithOutput(name string, args ...string) (string, error) {
@@ -191,7 +192,6 @@ func InstallMissingDeps(tools_needed []string, mgr *PkgManager) []string {
 		if toolInfo == nil {
 			continue
 		}
-		finalPkg := toolInfo
 		aliases := []string{tool}
 		if tool == "p7zip" {
 			aliases = []string{"7zz", "7z", "7za"}
@@ -199,16 +199,16 @@ func InstallMissingDeps(tools_needed []string, mgr *PkgManager) []string {
 		if tool == "unzip" {
 			aliases = []string{"unzip"}
 		}
+		var alreadyInstalled bool
 		for _, a := range aliases {
 			if _, err := exec.LookPath(a); err == nil {
-				finalPkg = nil
+				alreadyInstalled = true
 				break
 			}
 		}
-		if finalPkg == nil {
+		if alreadyInstalled {
 			continue
 		}
-		_ = finalPkg
 
 		pkg := toolPkgSlice(*toolInfo, *mgr)
 

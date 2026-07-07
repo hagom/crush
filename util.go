@@ -327,8 +327,8 @@ func EstimateUncompressedSize(file string) int64 {
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.Contains(line, "Decompressed file size") {
 				fields := strings.Fields(line)
-				if len(fields) > 0 {
-					if size, err := strconv.ParseInt(fields[len(fields)-1], 10, 64); err == nil {
+			if len(fields) >= 2 {
+					if size, err := strconv.ParseInt(fields[len(fields)-2], 10, 64); err == nil {
 						return size
 					}
 				}
@@ -344,7 +344,8 @@ func EstimateUncompressedSize(file string) int64 {
 
 	case strings.HasSuffix(f, ".bz2") || strings.HasSuffix(f, ".tbz2") ||
 		strings.HasSuffix(f, ".bz3") || strings.HasSuffix(f, ".lz") ||
-		strings.HasSuffix(f, ".tlz"):
+		strings.HasSuffix(f, ".tlz") || strings.HasSuffix(f, ".lz4") ||
+		strings.HasSuffix(f, ".br"):
 		cmd := exec.Command("stat", "-c%s", "--", file)
 		out, _ := cmd.Output()
 		if size, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); err == nil {
@@ -368,15 +369,16 @@ func GetUniqueName(base, ext string) string {
 		base = strings.TrimSuffix(base, "."+ext)
 	}
 	name := base + "." + ext
-	if _, err := os.Stat(name); err == nil {
-		for counter := 1; ; counter++ {
-			name = fmt.Sprintf("%s_%d.%s", base, counter, ext)
-			if _, err := os.Stat(name); os.IsNotExist(err) {
-				break
-			}
+	if _, err := os.Stat(name); os.IsNotExist(err) {
+		return name
+	}
+	for counter := 1; counter < 1000; counter++ {
+		name = fmt.Sprintf("%s_%d.%s", base, counter, ext)
+		if _, err := os.Stat(name); os.IsNotExist(err) {
+			return name
 		}
 	}
-	return name
+	return fmt.Sprintf("%s_%d.%s", base, 999, ext)
 }
 
 // --- Logging ---
@@ -426,12 +428,13 @@ func CloseLog() {
 // --- Colors ---
 
 const (
-	Green  = "\033[0;32m"
-	Red    = "\033[0;31m"
-	Yellow = "\033[1;33m"
-	Blue   = "\033[0;34m"
-	Bold   = "\033[1m"
-	NC     = "\033[0m"
+	Green    = "\033[0;32m"
+	Red      = "\033[0;31m"
+	Yellow   = "\033[1;33m"
+	Blue     = "\033[0;34m"
+	Bold     = "\033[1m"
+	BoldBlue = "\033[1;34m"
+	NC       = "\033[0m"
 )
 
 // --- Helpers ---
@@ -456,19 +459,16 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	}
 	cmds[len(cmds)-1].Stdout = stdout
 	if stderr != nil {
-		for i := 0; i < len(cmds); i++ {
+		for i := range cmds {
 			cmds[i].Stderr = stderr
 		}
 	}
-	for i := 0; i < len(cmds)-1; i++ {
+	for i := range cmds {
 		if err := cmds[i].Start(); err != nil {
 			return fmt.Errorf("pipeline start %d: %w", i, err)
 		}
 	}
-	if err := cmds[len(cmds)-1].Run(); err != nil {
-		return fmt.Errorf("pipeline run: %w", err)
-	}
-	for i := 0; i < len(cmds)-1; i++ {
+	for i := range cmds {
 		if err := cmds[i].Wait(); err != nil {
 			return fmt.Errorf("pipeline wait %d: %w", i, err)
 		}

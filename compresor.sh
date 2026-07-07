@@ -257,7 +257,7 @@ install_missing_deps() {
     local -a install_cmd update_cmd
     if [[ "$(id -u)" -eq 0 ]]; then
         IFS=' ' read -ra install_cmd <<< "$PKG_INSTALL"
-        IFS=' ' read -ra update_cmd <<< "$PKG_UPDATE"
+        update_cmd=(bash -c "$PKG_UPDATE")
     else
         install_cmd=(sudo)
         IFS=' ' read -ra tmp <<< "$PKG_INSTALL"
@@ -400,7 +400,7 @@ estimate_uncompressed_size() {
             return
             ;;
         *.lrz)
-            lrzip -i -- "$file" 2>/dev/null | awk '/Decompressed file size/{print $NF}'
+            lrzip -i -- "$file" 2>/dev/null | awk '/Decompressed file size/{for(i=NF;i>0;i--)if($i+0==$i){print $i;exit}}'
             return
             ;;
         *.tar)
@@ -505,7 +505,7 @@ get_unique_name() {
 
     final_name="${base_name}.${ext}"
     if [[ -e "$final_name" ]]; then
-        while [[ -e "${base_name}_${counter}.${ext}" ]]; do
+        while [[ -e "${base_name}_${counter}.${ext}" && $counter -lt 10000 ]]; do
             counter=$((counter + 1))
         done
         final_name="${base_name}_${counter}.${ext}"
@@ -574,12 +574,14 @@ list_compressors() {
     printf "7. ${GREEN}bz2${NC} : ${YELLOW}Alto${NC} (lbzip2). Clásico, buena relación peso/tiempo.\n"
     printf "\n"
     printf "${YELLOW}--- Alta Velocidad ---${NC}\n"
-    printf "8. ${GREEN}gz${NC}  : ${YELLOW}Rápido${NC} (pigz). El más compatible y rápido.\n"
-    printf "9. ${GREEN}rar${NC} : ${YELLOW}Alta${NC} (RAR). Propietario, amplia compatibilidad.\n"
-    printf "10. ${GREEN}zip${NC} : ${YELLOW}Básico${NC}. Compatibilidad universal (Windows/Mac/Linux).\n"
+    printf "8. ${GREEN}lz4${NC} : ${YELLOW}Muy rápido${NC} (LZ4). Velocidad extremadamente alta, compresión moderada.\n"
+    printf "9. ${GREEN}br${NC}  : ${YELLOW}Balanceado${NC} (Brotli). Buen ratio web/estático.\n"
+    printf "10. ${GREEN}gz${NC}  : ${YELLOW}Rápido${NC} (pigz). El más compatible y rápido.\n"
+    printf "11. ${GREEN}rar${NC} : ${YELLOW}Alta${NC} (RAR). Propietario, amplia compatibilidad.\n"
+    printf "12. ${GREEN}zip${NC} : ${YELLOW}Básico${NC}. Compatibilidad universal (Windows/Mac/Linux).\n"
     printf "\n"
     printf "${YELLOW}--- Sin compresión ---${NC}\n"
-    printf "11. ${GREEN}tar${NC} : Solo empaquetado sin compresión.\n"
+    printf "13. ${GREEN}tar${NC} : Solo empaquetado sin compresión.\n"
     printf "\n"
     printf "${BLUE}Nota:${NC} Todos los formatos usan multiprocesamiento automático.\n"
     exit 0
@@ -606,7 +608,7 @@ usage() {
     printf "  ${BLUE}Ejemplo:${NC} %s -t archivo.tar.zst archivo.zip\n" "$0"
     printf "\n"
     printf "${YELLOW}OPCIONES:${NC}\n"
-    printf "  ${GREEN}-c <fmt>${NC}    : Comprimir (formatos: gz, xz, bz2, bz3, zst, lz, lrz, rar, zip, 7z, tar)\n"
+    printf "  ${GREEN}-c <fmt>${NC}    : Comprimir (formatos: gz, xz, bz2, bz3, zst, lz, lrz, lz4, br, rar, zip, 7z, tar)\n"
     printf "  ${GREEN}-d${NC}          : Descomprimir (detecta formato automáticamente)\n"
     printf "  ${GREEN}-t${NC}          : Verificar integridad de archivos comprimidos\n"
     printf "  ${GREEN}-r${NC}          : ${RED}Borrar original${NC} al finalizar (solo si no hubo errores)\n"
@@ -631,8 +633,8 @@ usage() {
 # $FORMAT (global) → stdout: extensión (gz → "tar.gz", zip → "zip")
 _ext_for_format() {
     case $FORMAT in
-        zip|7z|rar|tar|lz4|br) echo "$FORMAT" ;;
-        *)          echo "tar.$FORMAT" ;;
+        zip|7z|rar|tar) echo "$FORMAT" ;;
+        *)       echo "tar.$FORMAT" ;;
     esac
 }
 
@@ -900,11 +902,11 @@ do_decompress() {
         if [[ $SUCCESS -eq 0 ]]; then
             IFS='|' read -r tool pipe_flags direct_flags is_tar _ <<< "$info"
             if [[ "$is_tar" == 1 ]]; then
-                $tool $pipe_flags -- "$file" | tar -xvf - || SUCCESS=$?
+                "$tool" $pipe_flags -- "$file" | tar -xvf - || SUCCESS=$?
             elif [[ "$tool" == "tar" ]]; then
-                $tool $direct_flags "$file" || SUCCESS=$?
+                "$tool" $direct_flags "$file" || SUCCESS=$?
             else
-                $tool $direct_flags -- "$file" || SUCCESS=$?
+                "$tool" $direct_flags -- "$file" || SUCCESS=$?
             fi
         fi
 
@@ -948,7 +950,7 @@ do_test_file() {
     info=$(_get_format_info "$file") || { printf "${GREEN}[OK]${NC}\n"; return 0; }
     IFS='|' read -r tool pipe_flags _ is_tar _ <<< "$info"
     if [[ "$is_tar" == 1 ]]; then
-        $tool $pipe_flags -- "$file" 2>/dev/null | tar -t >/dev/null 2>&1 || { printf "${RED}[CORRUPTO O INVÁLIDO]${NC}\n"; return 1; }
+        "$tool" $pipe_flags -- "$file" 2>/dev/null | tar -t >/dev/null 2>&1 || { printf "${RED}[CORRUPTO O INVÁLIDO]${NC}\n"; return 1; }
     elif [[ "$tool" == "tar" ]]; then
         tar -tf "$file" >/dev/null 2>&1 || { printf "${RED}[CORRUPTO O INVÁLIDO]${NC}\n"; return 1; }
     fi

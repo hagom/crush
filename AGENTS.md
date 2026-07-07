@@ -69,8 +69,8 @@ compresor/
 ## Estado actual
 
 - Bash: completo. 59 tests en bats. 1144 líneas. Sin bugs conocidos. Flags: --install (bin + deps), --install-deps, --uninstall.
-- Go: migración 1:1 completa. 39 tests nativos pasando. ~2650 líneas.
-- Features implementadas en Go: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar, colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall.
+- Go: migración 1:1 completa. 47 tests nativos pasando. ~2800 líneas.
+- Features implementadas en Go: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar (compresión + descompresión), colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall, detección de modos conflictivos, expansión de flags combinados (-ptkv).
 
 ## Próximos pasos
 
@@ -127,7 +127,12 @@ Actuar como **equipo de desarrollo completo**. Sin necesidad de instrucciones ex
 
 **Flujo por omisión:** Planificar → Implementar → Testear → Revisar bugs → Mergear → Documentar.
 
-- **Fixes en paralelo con worktrees descriptivos:** Por cada bug a fixear, crear un worktree con nombre descriptivo del bug (ej: `fix/nil-pointer-decompress`, `fix/lrzip-estimate`). Todos los worktrees se trabajan en paralelo para ahorrar tiempo. Al terminar cada fix, mergear a `main` y eliminar worktree + rama.
+- **Trabajo en paralelo con worktrees descriptivos:** Por cada tarea (fix o feature), crear un worktree con nombre descriptivo (ej: `fix/mode-conflicts`, `feat/decompress-progress`). Todos los worktrees se trabajan en paralelo usando subagentes simultáneos para ahorrar tiempo. Al terminar cada uno, mergear a `main` y eliminar worktree + rama.
+  1. `git branch fix/algo main && git worktree add ../compresor-fix-algo fix/algo`
+  2. Lanzar subagentes simultáneos, cada uno trabajando en su worktree
+  3. Verificar compilación y tests en cada worktree
+  4. `git merge fix/algo --no-edit` en `main`
+  5. `git worktree remove ../compresor-fix-algo && git branch -d fix/algo`
 - **Revisión exhaustiva de bugs:** Tras implementar fixes, hacer re-revisión completa del código en busca de bugs restantes. Si se encuentran nuevos bugs, fixearlos y repetir el ciclo. No detenerse hasta que queden **0 bugs conocidos** en todo el proyecto.
 - No esperar instrucciones en cada sub-paso.
 - Al terminar un encargo, dejar el repo limpio (rama `main` actualizada, worktrees removidos, ramas fix eliminadas, AGENTS.md reflejando el nuevo estado).

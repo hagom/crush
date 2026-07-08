@@ -8,8 +8,6 @@ Soporta 13 formatos: gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br.
 ## Ramas
 
 - **main** — documentación (README.md, AGENTS.md, COMPRESOR.md)
-- **bash** — versión Bash Script (`compresor.sh`). Estable, solo mantenimiento.
-- **go** — versión Go. **Desarrollo activo. Trabajar aquí por defecto.**
 
 ## Comandos
 

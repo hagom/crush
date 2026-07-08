@@ -113,22 +113,28 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		}
 	}
 
-	// Estimate compressed size (rough estimate per format)
+	// Estimate compressed size per format using real-world compression ratios
 	var estimated int64
 	switch opts.Format {
 	case SevenZ:
-		estimated = totalSize * 30 / 100
+		// LZMA2: 5-15% typical. 20% is realistic.
+		estimated = totalSize * 20 / 100
 	case Rar:
-		estimated = totalSize * 40 / 100
-	case Zip:
-		estimated = totalSize * 60 / 100
-	case Tar:
-		estimated = totalSize * 100 / 100
-	default:
 		estimated = totalSize * 30 / 100
+	case Zip:
+		// Deflate: ~50-60% typical
+		estimated = totalSize * 50 / 100
+	case Tar:
+		// No compression, add 10% tar overhead
+		estimated = totalSize + totalSize/10
+	default:
+		// Tar-pipe formats (gz, xz, bz2, bz3, zst, lz, lrz, lz4, br):
+		// ~10-25% typical. Same as Bash (20% for all non-tar).
+		estimated = totalSize * 20 / 100
 	}
-	// Add 10% margin
-	estimated = estimated * 110 / 100
+	if estimated < 1<<20 {
+		estimated = 1 << 20 // at least 1MB
+	}
 
 	if err := CheckDiskSpace(estimated, opts.OutputDir); err != nil {
 		return "", err

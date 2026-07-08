@@ -295,7 +295,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 	switch ext {
 	case "gz":
 		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 1))}
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
 		args = append(args, optFlags...)
 		compressCmd = exec.Command("pigz", args...)
 		if !hasTool("pigz") {
@@ -303,27 +303,27 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		}
 	case "xz":
 		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", "-T" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 6))}
+		args := []string{"-c", "-T" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "-e"}
 		args = append(args, optFlags...)
 		compressCmd = exec.Command("xz", args...)
 	case "bz2":
 		bin := bzip2Bin()
 		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 6))}
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
 		args = append(args, optFlags...)
 		compressCmd = exec.Command(bin, args...)
 	case "bz3":
-		args := []string{"-c", "-j" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 6))}
+		args := []string{"-c", "-j" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 11))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		compressCmd = exec.Command("bzip3", args...)
 	case "zst":
 		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", "-T0", fmt.Sprintf("-%d", fastOrSlow(opts, 3))}
+		args := []string{"-c", "-T0", fmt.Sprintf("-%d", fastOrSlow(opts, 19))}
 		args = append(args, optFlags...)
 		compressCmd = exec.Command("zstd", args...)
 	case "lz":
 		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 6)), "--threads=" + ncpuStr()}
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "--threads=" + ncpuStr()}
 		args = append(args, optFlags...)
 		compressCmd = exec.Command("plzip", args...)
 	case "lz4":
@@ -333,7 +333,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		compressCmd = exec.Command("lz4", args...)
 	case "br":
 		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 6))}
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 11))}
 		args = append(args, optFlags...)
 		compressCmd = exec.Command("brotli", args...)
 	default:
@@ -377,7 +377,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 
 	// For lrzip which writes directly to file instead of stdout
 	if ext == "lrz" {
-		args := []string{"-f", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 6)), "-o", outPath}
+		args := []string{"-f", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		compressCmd = exec.Command("lrzip", args...)
 		if err := pipeline(writer, os.Stderr, tarCmd, compressCmd); err != nil {
@@ -400,7 +400,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 
 func compressZip(files []string, outPath string, opts CompressOptions) error {
 	sevenz := sevenzBin()
-	args := []string{"a", "-tzip", "-mx" + fmt.Sprintf("%d", fastOrSlow(opts, 5)), "-mmt=on"}
+	args := []string{"a", "-tzip", "-mx=9", "-mmt=on"}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
 	args = append(args, outPath)
@@ -420,7 +420,7 @@ func compressZip(files []string, outPath string, opts CompressOptions) error {
 
 func compress7z(files []string, outPath string, opts CompressOptions) error {
 	sevenz := sevenzBin()
-	args := []string{"a", "-mx" + fmt.Sprintf("%d", fastOrSlow(opts, 5))}
+	args := []string{"a", "-mx=9", "-md=128m", "-ms=on"}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
 	if opts.Threads > 0 {

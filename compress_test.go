@@ -19,7 +19,7 @@ func TestCompressDryRun(t *testing.T) {
 		OutputDir: tmpDir,
 	}
 
-	err := DoCompress([]string{testFile}, opts)
+	_, err := DoCompress([]string{testFile}, opts)
 	if err != nil {
 		t.Errorf("DoCompress dry-run = %v", err)
 	}
@@ -30,7 +30,7 @@ func TestCompressNoFiles(t *testing.T) {
 		Format:    Gz,
 		OutputDir: ".",
 	}
-	err := DoCompress(nil, opts)
+	_, err := DoCompress(nil, opts)
 	if err == nil {
 		t.Error("DoCompress with nil files should error")
 	}

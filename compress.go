@@ -26,9 +26,9 @@ type CompressOptions struct {
 	TarTool         string
 }
 
-func DoCompress(items []string, opts CompressOptions) error {
+func DoCompress(items []string, opts CompressOptions) (outPath string, err error) {
 	if len(items) == 0 {
-		return fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
+		return "", fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
 	}
 
 	// Resolve input items
@@ -36,7 +36,7 @@ func DoCompress(items []string, opts CompressOptions) error {
 	if opts.FromFile != "" {
 		lines, err := ReadFileLines(opts.FromFile)
 		if err != nil {
-			return fmt.Errorf("Error leyendo archivo de lista: %w", err)
+			return "", fmt.Errorf("Error leyendo archivo de lista: %w", err)
 		}
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
@@ -45,15 +45,16 @@ func DoCompress(items []string, opts CompressOptions) error {
 					files = append(files, line)
 				} else {
 					files = append(files, filepath.Join(filepath.Dir(opts.FromFile), line))
-				}
-			}
-		}
+	}
+	}
+	return outPath, nil
+}
 	} else {
 		files = expandGlobs(items)
 	}
 
 	if len(files) == 0 {
-		return fmt.Errorf("No se encontraron archivos válidos")
+		return "", fmt.Errorf("No se encontraron archivos válidos")
 	}
 
 	// Handle directory as single item (one .tar.* or .zip etc)
@@ -67,7 +68,6 @@ func DoCompress(items []string, opts CompressOptions) error {
 
 	// Build output path
 	ext := ExtForFormat(opts.Format)
-	var outPath string
 
 	if singleItem {
 		base := filepath.Base(files[0])
@@ -88,7 +88,7 @@ func DoCompress(items []string, opts CompressOptions) error {
 		} else {
 			WriteLogf("%s[Simulacro] Formato: %s%s\n", Blue, ext, NC)
 		}
-		return nil
+		return "", nil
 	}
 
 	// Check disk space
@@ -98,7 +98,19 @@ func DoCompress(items []string, opts CompressOptions) error {
 		if err != nil {
 			continue
 		}
-		totalSize += info.Size()
+		if info.IsDir() {
+			filepath.Walk(f, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return nil
+				}
+				if !info.IsDir() {
+					totalSize += info.Size()
+				}
+				return nil
+			})
+		} else {
+			totalSize += info.Size()
+		}
 	}
 
 	// Estimate compressed size (very rough: 30% of original for most, 50% for zip/rar/7z/tar)
@@ -115,7 +127,7 @@ func DoCompress(items []string, opts CompressOptions) error {
 	estimated = estimated * 110 / 100
 
 	if err := CheckDiskSpace(estimated, opts.OutputDir); err != nil {
-		return err
+		return "", err
 	}
 
 	// Check exclude patterns
@@ -143,7 +155,7 @@ func DoCompress(items []string, opts CompressOptions) error {
 	}
 
 	if len(filteredFiles) == 0 {
-		return fmt.Errorf("Todos los archivos fueron excluidos")
+		return "", fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
 	startTime := time.Now()
@@ -154,9 +166,9 @@ func DoCompress(items []string, opts CompressOptions) error {
 	WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
 	WriteLogf("\n")
 
-	err := compressItems(filteredFiles, outPath, opts)
+	err = compressItems(filteredFiles, outPath, opts)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	elapsed := time.Since(startTime)
@@ -187,8 +199,7 @@ func DoCompress(items []string, opts CompressOptions) error {
 			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
 		}
 	}
-
-	return nil
+	return outPath, nil
 }
 
 func compressModeDesc(f Format) string {
@@ -362,8 +373,8 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		if err := pipeline(writer, os.Stderr, tarCmd, compressCmd); err != nil {
 			return fmt.Errorf("Error en pipeline de compresión: %w", err)
 		}
-		return nil
-	}
+	return nil
+}
 
 	pipeCmds := []*exec.Cmd{tarCmd}
 	if pvCmd != nil {

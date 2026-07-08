@@ -140,14 +140,49 @@ func main() {
 	}
 
 	// Check mode conflicts among -c, -d, -l, -t, -r
-	modes := 0
-	for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag} {
+	// Allowed: -c + -t (compress then test), -d + -t (test before decompress)
+	// Everything else with >= 2 modes is a conflict
+	hasC := *compressFlag
+	hasD := *decompressFlag
+	hasL := *listFlag
+	hasT := *testFlag
+	hasR := *readFlag
+
+	writeModes := 0
+	for _, m := range []bool{hasC, hasD} {
 		if m {
-			modes++
+			writeModes++
 		}
 	}
-	if modes > 1 {
-		fmt.Fprintln(os.Stderr, "Error: solo puede usar un modo a la vez (-c, -d, -l, -t, -r)")
+	readModes := 0
+	for _, m := range []bool{hasL, hasR} {
+		if m {
+			readModes++
+		}
+	}
+
+	conflict := false
+	var conflictFlags []string
+
+	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 {
+		conflict = true
+	} else if hasL && hasT {
+		conflict = true
+	} else if hasR && hasT {
+		conflict = true
+	} else if hasC && hasD {
+		conflict = true
+	} else if hasT && !hasC && !hasD && (hasL || hasR) {
+		conflict = true
+	}
+
+	if conflict {
+		for f, name := range map[*bool]string{compressFlag: "-c", decompressFlag: "-d", listFlag: "-l", testFlag: "-t", readFlag: "-r"} {
+			if *f {
+				conflictFlags = append(conflictFlags, name)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "Error: los flags %s no se pueden combinar\n", strings.Join(conflictFlags, " + "))
 		os.Exit(1)
 	}
 
@@ -247,8 +282,8 @@ func main() {
 		return
 	}
 
-	// Handle -t (test)
-	if *testFlag {
+	// Handle -t alone (test only)
+	if *testFlag && !*compressFlag && !*decompressFlag {
 		opts := TestOptions{
 			Verbose: *verbose,
 			Quick:   *quick,
@@ -259,7 +294,7 @@ func main() {
 		return
 	}
 
-	// Handle -c (compress)
+	// Handle -c (compress), optionally followed by -t (test)
 	if *compressFlag {
 		format, err := ParseFormat(*formatStr)
 		if err != nil {
@@ -280,15 +315,30 @@ func main() {
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,
 		}
-		if err := DoCompress(files, opts); err != nil {
+		outPath, err := DoCompress(files, opts)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
+		}
+		if *testFlag && outPath != "" {
+			WriteLogf("\n%sVerificando integridad del archivo comprimido...%s\n", Bold, NC)
+			if err := DoTest([]string{outPath}, TestOptions{Verbose: *verbose, Quick: *quick}); err != nil {
+				os.Exit(1)
+			}
 		}
 		return
 	}
 
-	// Handle -d (decompress)
+	// Handle -d (decompress), optionally preceded by -t (test)
 	if *decompressFlag {
+		if *testFlag {
+			WriteLogf("%sVerificando integridad antes de descomprimir...%s\n", Bold, NC)
+			if err := DoTest(files, TestOptions{Verbose: *verbose, Quick: *quick}); err != nil {
+				os.Exit(1)
+			}
+			WriteLogf("%s✓ Integridad verificada, descomprimiendo...%s\n\n", Green, NC)
+		}
+
 		opts := DecompressOptions{
 			DryRun:    *dryRun,
 			Verbose:   *verbose,

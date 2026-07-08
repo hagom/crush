@@ -118,7 +118,19 @@ func decompressFile(file string, opts DecompressOptions) error {
 	}
 
 	elapsed := time.Since(startTime)
-	WriteLogf("  %s✓ Hecho (%v)%s\n", Green, elapsed.Round(time.Second), NC)
+
+	// Show decompression report
+	compressedSize := int64(0)
+	if info, err := os.Stat(file); err == nil {
+		compressedSize = info.Size()
+	}
+	WriteLogf("\n")
+	WriteLogf("%s=== Reporte de Descompresión ===%s\n", Green, NC)
+	WriteLogf("%sArchivo Origen:%s     %s%s%s\n", Blue, NC, Yellow, file, NC)
+	WriteLogf("%sTamaño Comprimido:%s  %s%s%s\n", Blue, NC, Red, FormatSize(compressedSize), NC)
+	WriteLogf("%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
+	WriteLogf("%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, NCPU(), NC)
+	WriteLogf("%s=============================%s\n", Green, NC)
 
 	return nil
 }

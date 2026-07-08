@@ -191,12 +191,14 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 	}
 
 	WriteLogf("\n")
-	WriteLogf("%s✓ Compresión completada%s\n", Green, NC)
-	WriteLogf("  Original: %s\n", FormatSize(origSize))
-	WriteLogf("  Comprimido: %s\n", FormatSize(finalSize))
-	WriteLogf("  Reducción: %s%%\n", CalcPct(origSize, finalSize))
-	WriteLogf("  Tiempo: %v\n", elapsed.Round(time.Second))
-	WriteLogf("  Archivo: %s\n", outPath)
+	WriteLogf("%s=== Reporte de Compresión ===%s\n", Green, NC)
+	WriteLogf("%sArchivo Salida:%s    %s%s%s\n", Blue, NC, Yellow, outPath, NC)
+	WriteLogf("%sTamaño Original:%s   %s%s%s\n", Blue, NC, Red, FormatSize(origSize), NC)
+	WriteLogf("%sTamaño Final:%s      %s%s%s\n", Blue, NC, Green, FormatSize(finalSize), NC)
+	WriteLogf("%sAhorro de espacio:%s %s%s%%%s\n", Blue, NC, Green, CalcPct(origSize, finalSize), NC)
+	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
+	WriteLogf("%sHilos utilizados:%s  %s%d%s\n", Blue, NC, Bold, NCPU(), NC)
+	WriteLogf("%s=============================%s\n", Green, NC)
 
 		if !opts.KeepOrig {
 		removed := 0

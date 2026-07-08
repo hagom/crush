@@ -315,7 +315,9 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		args = append(args, optFlags...)
 		compressCmd = exec.Command(bin, args...)
 	case "bz3":
-		args := []string{"-c", "-j" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 11))}
+		// bzip3 doesn't use numeric level flags like bzip2.
+		// Default block size (16 MiB) is maximum. Just use -j for threads.
+		args := []string{"-c", "-j" + ncpuStr()}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		compressCmd = exec.Command("bzip3", args...)
 	case "zst":

@@ -113,11 +113,15 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		}
 	}
 
-	// Estimate compressed size (very rough: 30% of original for most, 50% for zip/rar/7z/tar)
+	// Estimate compressed size (rough estimate per format)
 	var estimated int64
 	switch opts.Format {
-	case Zip, SevenZ, Rar:
-		estimated = totalSize * 80 / 100
+	case SevenZ:
+		estimated = totalSize * 30 / 100
+	case Rar:
+		estimated = totalSize * 40 / 100
+	case Zip:
+		estimated = totalSize * 60 / 100
 	case Tar:
 		estimated = totalSize * 100 / 100
 	default:

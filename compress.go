@@ -24,6 +24,7 @@ type CompressOptions struct {
 	Exclude         []string
 	FromFile        string
 	TarTool         string
+	TotalSize       int64
 }
 
 func DoCompress(items []string, opts CompressOptions) (outPath string, err error) {
@@ -174,8 +175,12 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 	WriteLogf("  Formato: %s\n", ext)
 	WriteLogf("  Destino: %s\n", outPath)
 	WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
+	if opts.TotalSize > 0 {
+		WriteLogf("  Tamaño total: %s\n", FormatSize(totalSize))
+	}
 	WriteLogf("\n")
 
+	opts.TotalSize = totalSize
 	err = compressItems(filteredFiles, outPath, opts)
 	if err != nil {
 		return "", err
@@ -345,7 +350,11 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 	}
 
 	if opts.Progress && hasTool("pv") {
-		pvCmd = exec.Command("pv", "-B", "256k")
+		pvArgs := []string{"-f", "-B", "256k"}
+		if opts.TotalSize > 0 {
+			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
+		}
+		pvCmd = exec.Command("pv", pvArgs...)
 	}
 
 	// Split support
@@ -384,11 +393,21 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		args := []string{"-f", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		compressCmd = exec.Command("lrzip", args...)
-		if err := pipeline(writer, os.Stderr, tarCmd, compressCmd); err != nil {
+		pipeCmds := []*exec.Cmd{tarCmd}
+		if opts.Progress && hasTool("pv") {
+			pvArgs := []string{"-f", "-B", "256k"}
+			if opts.TotalSize > 0 {
+				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
+			}
+			pvCmd = exec.Command("pv", pvArgs...)
+			pipeCmds = append(pipeCmds, pvCmd)
+		}
+		pipeCmds = append(pipeCmds, compressCmd)
+		if err := pipeline(writer, os.Stderr, pipeCmds...); err != nil {
 			return fmt.Errorf("Error en pipeline de compresión: %w", err)
 		}
 	return nil
-}
+	}
 
 	pipeCmds := []*exec.Cmd{tarCmd}
 	if pvCmd != nil {

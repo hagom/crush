@@ -182,7 +182,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			return exec.Command("tar", "-xf", file, "-C", dir).Run()
 		}
 
-		pvArgs := []string{"-B", "256k"}
+		pvArgs := []string{"-f", "-B", "256k"}
 		if needed > 0 {
 			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", needed))
 		}
@@ -281,7 +281,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 				return fmt.Errorf("Error creando archivo de salida: %w", err)
 			}
 			defer outFile.Close()
-			pvArgs := []string{"-B", "256k"}
+			pvArgs := []string{"-f", "-B", "256k"}
 			if size := EstimateUncompressedSize(file); size > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
 			}
@@ -304,7 +304,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 				return fmt.Errorf("Error creando archivo de salida: %w", err)
 			}
 			defer outFile.Close()
-			pvArgs := []string{"-B", "256k"}
+			pvArgs := []string{"-f", "-B", "256k"}
 			if size := EstimateUncompressedSize(file); size > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
 			}

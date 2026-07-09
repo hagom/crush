@@ -164,15 +164,7 @@ func main() {
 	conflict := false
 	var conflictFlags []string
 
-	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 {
-		conflict = true
-	} else if hasL && hasT {
-		conflict = true
-	} else if hasR && hasT {
-		conflict = true
-	} else if hasC && hasD {
-		conflict = true
-	} else if hasT && !hasC && !hasD && (hasL || hasR) {
+	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 || (hasT && (hasL || hasR)) {
 		conflict = true
 	}
 
@@ -296,6 +288,11 @@ func main() {
 
 	// Handle -c (compress), optionally followed by -t (test)
 	if *compressFlag {
+		if *formatStr == "" {
+			fmt.Fprintf(os.Stderr, "Error: debe especificar formato con -f (ej: -f gz)\n")
+			printHelp()
+			os.Exit(1)
+		}
 		format, err := ParseFormat(*formatStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

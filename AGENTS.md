@@ -68,7 +68,7 @@ crush/
 
 - Go: migración completa. 47 tests nativos pasando. ~2850 líneas.
 - Features implementadas: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar (compresión + descompresión), colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall, detección de modos conflictivos, expansión de flags combinados (-ptkv).
-- **Bugs conocidos: 6** (2 críticos, 1 grave, 3 medios). Ver `COMPRESOR.md`.
+- **Bugs conocidos: 1** (medio). Ver `COMPRESOR.md`.
 
 ## Fixes realizados (jul 2026)
 
@@ -81,15 +81,16 @@ crush/
 | `-c -t` borra originales antes del test | GRAVE | `main.go:306-328` | Ahora testea primero, borra después si el test pasa |
 | Stat después de borrar en reporte | MEDIO | `decompress.go:124` | Movido `os.Stat` antes del `os.Remove` |
 | `.tar` intermedio no se limpiaba si fallaba | MEDIO | `decompress.go:215` | Añadido `os.Remove(tarName)` antes del return error |
+| WriteLogf stdout → stderr | MEDIO | `util.go:409,416` | Cambiado `fmt.Print` → `fmt.Fprint(os.Stderr, ...)` |
+| `-c` sin `-f` error genérico | MEDIO | `main.go:299` | Mensaje claro: "debe especificar formato con -f" |
+| Zip decompress usa 7zz MT + fallback unzip | FILOSOFÍA | `decompress.go:248` | Primero 7zz -mmt=on, fallback unzip ST |
+| Código redundante conflicto modos | LEVE | `main.go:169-176` | Eliminadas condiciones else-if duplicadas |
+| Reporte muestra hilos reales por formato | LEVE | `compress.go:205, decompress.go:134` | `effectiveThreads()` retorna 1 para lz4/br, NCPU() para MT |
+| Faltan tests DetectFormat .tar.lz4/.tar.br | LEVE | `format_test.go` | Añadidos `file.tar.lz4` y `file.tar.br` |
 
 ## Próximos pasos
 
-- [ ] **FIX CRÍTICO**: `pkgmgr.go:174` — finalPkg nunca asignado, --install-deps no instala nada
-- [ ] **FIX CRÍTICO**: `pkgmgr.go:126` — isToolInstalled pasa query sin split
-- [ ] **FIX GRAVE**: `compress.go:275` — -p + pv produce archivos sin comprimir (antiguo; verificar si persiste)
-- [ ] **FIX MEDIO**: `format.go:100` — .tar.lz4/.tar.br mal detectados
-- [ ] **FIX MEDIO**: `decompress.go:338` — splitWriter.Close() puede panic
-- [ ] **FIX MEDIO**: `main.go:131` — logging muerto (SetupLogging/CloseLog no llamados)
+- [ ] **FIX MEDIO**: `util.go:409,416` — WriteLog/WriteLogf escribe a stdout en vez de stderr. Diagnóstico CLI debe ir a stderr para no romper pipes.
 - [ ] Tests con mock de exec.Command (inyección de dependencias)
 - [ ] Benchmarks Go
 - [ ] Comando `--bench` para medir velocidad por formato

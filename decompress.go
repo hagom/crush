@@ -113,11 +113,12 @@ func decompressFile(file string, opts DecompressOptions) error {
 
 	elapsed := time.Since(startTime)
 
-	// Show decompression report — read size before potentially removing file
 	compressedSize := int64(0)
 	if fi, err := os.Stat(file); err == nil {
 		compressedSize = fi.Size()
 	}
+
+	uncompressedSize := getDirSize(dir)
 
 	if !opts.KeepOrig {
 		if err := os.Remove(file); err != nil {
@@ -128,11 +129,24 @@ func decompressFile(file string, opts DecompressOptions) error {
 	WriteLogf("%s=== Reporte de Descompresión ===%s\n", Green, NC)
 	WriteLogf("%sArchivo Origen:%s     %s%s%s\n", Blue, NC, Yellow, file, NC)
 	WriteLogf("%sTamaño Comprimido:%s  %s%s%s\n", Blue, NC, Red, FormatSize(compressedSize), NC)
+	WriteLogf("%sTamaño Descomprimido:%s %s%s%s\n", Blue, NC, Green, FormatSize(uncompressedSize), NC)
 	WriteLogf("%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
 	WriteLogf("%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, NCPU(), NC)
 	WriteLogf("%s=============================%s\n", Green, NC)
 
 	return nil
+}
+
+func getDirSize(dir string) int64 {
+	var total int64
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
 }
 
 func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions) error {

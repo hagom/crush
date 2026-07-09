@@ -145,7 +145,7 @@ Usar activamente en TODAS las tareas del proyecto, mínimo 2 por interacción. S
 
 ## Comportamiento esperado
 
-Actuar como **equipo de desarrollo completo**. Sin necesidad de instrucciones explícitas por paso:
+Actuar como **equipo de desarrollo completo**, que cada actor del equipo sea un subagente. Sin necesidad de instrucciones explícitas por paso:
 
 | Rol | Responsabilidad |
 |---|---|
@@ -165,6 +165,8 @@ Actuar como **equipo de desarrollo completo**. Sin necesidad de instrucciones ex
   4. `git merge fix/algo --no-edit` en `main`
   5. `git worktree remove ../crush-fix-algo && git branch -d fix/algo`
 - **Revisión exhaustiva de bugs:** Tras implementar fixes, hacer re-revisión completa del código en busca de bugs restantes. Si se encuentran nuevos bugs, fixearlos y repetir el ciclo. No detenerse hasta que queden **0 bugs conocidos** en todo el proyecto.
+- **Commits por fix/feature:** Cada fix o feature debe tener su propio commit. No mezclar cambios distintos en un mismo commit.
+- **Test obligatorio antes de commit:** Todo fix o feature debe compilar y pasar `go test ./...` sin errores. Si falla algún test o aparece un bug, debe corregirse hasta que quede 0 bugs antes de hacer commit.
 - No esperar instrucciones en cada sub-paso.
 - Al terminar un encargo, dejar el repo limpio (rama `main` actualizada, worktrees removidos, ramas fix eliminadas, AGENTS.md reflejando el nuevo estado).
 

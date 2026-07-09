@@ -88,23 +88,23 @@ func DetectFormat(filename string) (FormatInfo, error) {
 	case strings.HasSuffix(ext, ".tar.bz2") || strings.HasSuffix(ext, ".tbz2"):
 		info = FormatInfo{Tool: bzip2Bin(), PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".tar.bz3"):
-		info = FormatInfo{Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -j " + ncpuStr(), IsTar: true, TestFlag: "-t"}
+		info = FormatInfo{Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -kj " + ncpuStr(), IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".tar.zst") || strings.HasSuffix(ext, ".tzst"):
-		info = FormatInfo{Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0", IsTar: true, TestFlag: "-t"}
+		info = FormatInfo{Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".tar.lz") || strings.HasSuffix(ext, ".tlz"):
 		info = FormatInfo{Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".tar.lrz"):
-		info = FormatInfo{Tool: "lrzip", PipeFlags: "-d -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: true, TestFlag: "-t"}
+		info = FormatInfo{Tool: "lrzip", PipeFlags: "-d -k -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".tar.lz4"):
 		info = FormatInfo{Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".tar.br"):
 		info = FormatInfo{Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".lrz"):
-		info = FormatInfo{Tool: "lrzip", PipeFlags: "-d -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
+		info = FormatInfo{Tool: "lrzip", PipeFlags: "-d -k -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".lz4"):
 		info = FormatInfo{Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".zst"):
-		info = FormatInfo{Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0", IsTar: false, TestFlag: "-t"}
+		info = FormatInfo{Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".xz"):
 		info = FormatInfo{Tool: "xz", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".gz"):
@@ -112,15 +112,15 @@ func DetectFormat(filename string) (FormatInfo, error) {
 	case strings.HasSuffix(ext, ".bz2"):
 		info = FormatInfo{Tool: bzip2Bin(), PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".bz3"):
-		info = FormatInfo{Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -j " + ncpuStr(), IsTar: false, TestFlag: "-t"}
+		info = FormatInfo{Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -kj " + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".lz"):
 		info = FormatInfo{Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".zip"):
 		info = FormatInfo{Tool: "unzip", PipeFlags: "-o", DirectFlags: "-o", IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".7z"):
-		info = FormatInfo{Tool: sevenzBin(), PipeFlags: "x", DirectFlags: "x", IsTar: false, TestFlag: "t"}
+		info = FormatInfo{Tool: sevenzBin(), PipeFlags: "x -mmt=on", DirectFlags: "x -mmt=on", IsTar: false, TestFlag: "t"}
 	case strings.HasSuffix(ext, ".rar"):
-		info = FormatInfo{Tool: rarBin(), PipeFlags: "x", DirectFlags: "x", IsTar: false, TestFlag: "t"}
+		info = FormatInfo{Tool: rarBin(), PipeFlags: "x -mt" + ncpuStr(), DirectFlags: "x -mt" + ncpuStr(), IsTar: false, TestFlag: "t"}
 	case strings.HasSuffix(ext, ".br"):
 		info = FormatInfo{Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case strings.HasSuffix(ext, ".tar"):

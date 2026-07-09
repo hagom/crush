@@ -107,9 +107,9 @@ func main() {
 	testFlag := flag.Bool("t", false, "Verificar integridad de archivos comprimidos")
 	readFlag := flag.Bool("r", false, "Leer contenido de archivo comprimido a stdout")
 	helpFlag := flag.Bool("h", false, "Mostrar ayuda")
-	installFlag := flag.Bool("install", false, "Instalar compresor en el sistema + herramientas faltantes")
+	installFlag := flag.Bool("install", false, "Instalar crush en el sistema + herramientas faltantes")
 	installDepsFlag := flag.Bool("install-deps", false, "Instalar solo herramientas de compresión faltantes")
-	uninstallFlag := flag.Bool("uninstall", false, "Desinstalar compresor del sistema")
+	uninstallFlag := flag.Bool("uninstall", false, "Desinstalar crush del sistema")
 
 	formatStr := flag.String("f", "", "Formato de compresión (ver -h para lista ordenada por compresión)")
 	outputDir := flag.String("o", ".", "Directorio de salida")
@@ -303,6 +303,8 @@ func main() {
 			os.Exit(1)
 		}
 
+		// When -c -t, defer deletion until after the test to prevent data loss
+		skipCleanup := *testFlag && !*keepOrig
 		opts := CompressOptions{
 			Format:          format,
 			DryRun:          *dryRun,
@@ -310,7 +312,7 @@ func main() {
 			OutputDir:       *outputDir,
 			SplitSize:       *splitSize,
 			Progress:        *progress,
-			KeepOrig:        *keepOrig,
+			KeepOrig:        *keepOrig || skipCleanup,
 			Threads:         *threadCount,
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,
@@ -324,6 +326,13 @@ func main() {
 			WriteLogf("\n%sVerificando integridad del archivo comprimido...%s\n", Bold, NC)
 			if err := DoTest([]string{outPath}, TestOptions{Verbose: *verbose, Quick: *quick}); err != nil {
 				os.Exit(1)
+			}
+			// Test passed — now delete originals if user didn't request -k
+			if skipCleanup && len(CompressCleanupFiles) > 0 {
+				removed := removeFiles(CompressCleanupFiles, *verbose)
+				if removed > 0 {
+					WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
+				}
 			}
 		}
 		return
@@ -370,7 +379,7 @@ func installBinary() error {
 		return fmt.Errorf("error resolviendo ruta: %w", err)
 	}
 
-	dest := "/usr/local/bin/compresor"
+	dest := "/usr/local/bin/crush"
 
 	// Try direct copy
 	if err := copyFile(src, dest); err == nil {
@@ -429,7 +438,7 @@ func copyFile(src, dst string) error {
 }
 
 func handleInstall() {
-	WriteLogf("%sInstalando compresor en el sistema...%s\n", Blue, NC)
+	WriteLogf("%sInstalando crush en el sistema...%s\n", Blue, NC)
 
 	if err := installBinary(); err != nil {
 		fmt.Fprintf(os.Stderr, "%sError: %v%s\n", Red, err, NC)
@@ -470,16 +479,16 @@ func handleInstallDeps() {
 }
 
 func handleUninstall() {
-	dest := "/usr/local/bin/compresor"
+	dest := "/usr/local/bin/crush"
 
 	if _, err := os.Stat(dest); os.IsNotExist(err) {
-		WriteLogf("  %s✗ compresor no está instalado en %s%s\n", Yellow, dest, NC)
+		WriteLogf("  %s✗ crush no está instalado en %s%s\n", Yellow, dest, NC)
 		return
 	}
 
 	// Try direct remove
 	if err := os.Remove(dest); err == nil {
-		WriteLogf("  %s✓ compresor desinstalado de %s%s\n", Green, dest, NC)
+		WriteLogf("  %s✓ crush desinstalado de %s%s\n", Green, dest, NC)
 		return
 	}
 
@@ -489,7 +498,7 @@ func handleUninstall() {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err == nil {
-			WriteLogf("  %s✓ compresor desinstalado de %s%s\n", Green, dest, NC)
+			WriteLogf("  %s✓ crush desinstalado de %s%s\n", Green, dest, NC)
 			return
 		}
 	}
@@ -500,7 +509,7 @@ func handleUninstall() {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err == nil {
-			WriteLogf("  %s✓ compresor desinstalado de %s%s\n", Green, dest, NC)
+			WriteLogf("  %s✓ crush desinstalado de %s%s\n", Green, dest, NC)
 			return
 		}
 	}
@@ -512,23 +521,29 @@ func handleUninstall() {
 func printHelp() {
 	w := func(c, s string) { fmt.Print(c, s, NC) }
 
-	w(BoldBlue, "COMPRESOR  Herramienta multi-formato de compresión y descompresión\n\n")
+	w(BoldBlue, "CRUSH  Herramienta multi-formato de compresión y descompresión\n\n")
 	w(BoldBlue, "Uso:\n")
-	w(Yellow, "  compresor -c -f FORMATO [opciones] archivo...\n")
-	w(Yellow, "  compresor -d [opciones] archivo...\n")
-	w(Yellow, "  compresor -l archivo...\n")
-	w(Yellow, "  compresor -t archivo...\n")
-	w(Yellow, "  compresor -r archivo...\n")
-	w(Yellow, "  compresor --install\n")
-	w(Yellow, "  compresor --install-deps\n")
-	w(Yellow, "  compresor --uninstall\n\n")
+	w(Yellow, "  crush -c -f FORMATO [opciones] archivo...\n")
+	w(Yellow, "  crush -d [opciones] archivo...\n")
+	w(Yellow, "  crush -l archivo...\n")
+	w(Yellow, "  crush -t archivo...\n")
+	w(Yellow, "  crush -r archivo...\n")
+	w(Yellow, "  crush --install\n")
+	w(Yellow, "  crush --install-deps\n")
+	w(Yellow, "  crush --uninstall\n\n")
 	w(BoldBlue, "Opciones de modo:\n")
-	w(Yellow, "  -c"); fmt.Print("                   Comprimir archivos\n")
-	w(Yellow, "  -d"); fmt.Print("                   Descomprimir archivos\n")
-	w(Yellow, "  -l"); fmt.Print("                   Listar contenido de archivo comprimido\n")
-	w(Yellow, "  -t"); fmt.Print("                   Verificar integridad de archivos comprimidos\n")
-	w(Yellow, "  -r"); fmt.Print("                   Leer contenido de archivo comprimido a stdout\n")
-	w(Yellow, "  -h"); fmt.Print("                   Mostrar esta ayuda\n\n")
+	w(Yellow, "  -c")
+	fmt.Print("                   Comprimir archivos\n")
+	w(Yellow, "  -d")
+	fmt.Print("                   Descomprimir archivos\n")
+	w(Yellow, "  -l")
+	fmt.Print("                   Listar contenido de archivo comprimido\n")
+	w(Yellow, "  -t")
+	fmt.Print("                   Verificar integridad de archivos comprimidos\n")
+	w(Yellow, "  -r")
+	fmt.Print("                   Leer contenido de archivo comprimido a stdout\n")
+	w(Yellow, "  -h")
+	fmt.Print("                   Mostrar esta ayuda\n\n")
 	w(BoldBlue, "Opciones generales:\n")
 
 	// Build format list ordered by compression ratio
@@ -540,33 +555,47 @@ func printHelp() {
 	fmt.Print(strings.Join(ordered, ", "))
 	fmt.Print("\n                       lrz ofrece la máxima compresión\n")
 
-	w(Yellow, "  -o DIRECTORIO"); fmt.Print("        Directorio de salida (por defecto: .)\n")
-	w(Yellow, "  -n"); fmt.Print("                   Modo simulacro (dry-run)\n")
-	w(Yellow, "  -k"); fmt.Print("                   Conservar archivos originales\n")
-	w(Yellow, "  -v"); fmt.Print("                   Modo verbose\n")
-	w(Yellow, "  -p"); fmt.Print("                   Mostrar barra de progreso\n")
-	w(Yellow, "  -force"); fmt.Print("               Sobrescribir archivos existentes\n")
-	w(Yellow, "  -quick"); fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
-	w(Yellow, "  -T N"); fmt.Print("                 Número de hilos (0 = auto)\n")
-	w(Yellow, "  -s N"); fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
-	w(Yellow, "  -opts \"opciones\""); fmt.Print("     Opciones adicionales para la herramienta de compresión\n")
-	w(Yellow, "  -exclude patrón"); fmt.Print("      Patrón de exclusión (se puede repetir)\n")
-	w(Yellow, "  --install"); fmt.Print("            Instalar compresor en el sistema + herramientas faltantes\n")
-	w(Yellow, "  --install-deps"); fmt.Print("        Instalar solo herramientas de compresión faltantes\n")
-	w(Yellow, "  --uninstall"); fmt.Print("          Desinstalar compresor del sistema\n\n")
+	w(Yellow, "  -o DIRECTORIO")
+	fmt.Print("        Directorio de salida (por defecto: .)\n")
+	w(Yellow, "  -n")
+	fmt.Print("                   Modo simulacro (dry-run)\n")
+	w(Yellow, "  -k")
+	fmt.Print("                   Conservar archivos originales\n")
+	w(Yellow, "  -v")
+	fmt.Print("                   Modo verbose\n")
+	w(Yellow, "  -p")
+	fmt.Print("                   Mostrar barra de progreso\n")
+	w(Yellow, "  -force")
+	fmt.Print("               Sobrescribir archivos existentes\n")
+	w(Yellow, "  -quick")
+	fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
+	w(Yellow, "  -T N")
+	fmt.Print("                 Número de hilos (0 = auto)\n")
+	w(Yellow, "  -s N")
+	fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
+	w(Yellow, "  -opts \"opciones\"")
+	fmt.Print("     Opciones adicionales para la herramienta de compresión\n")
+	w(Yellow, "  -exclude patrón")
+	fmt.Print("      Patrón de exclusión (se puede repetir)\n")
+	w(Yellow, "  --install")
+	fmt.Print("            Instalar crush en el sistema + herramientas faltantes\n")
+	w(Yellow, "  --install-deps")
+	fmt.Print("        Instalar solo herramientas de compresión faltantes\n")
+	w(Yellow, "  --uninstall")
+	fmt.Print("          Desinstalar crush del sistema\n\n")
 	w(BoldBlue, "Ejemplos:\n")
-	w(Yellow, "  compresor -c -f gz documento.txt\n")
-	w(Yellow, "  compresor -c -f xz -v -p archivo.tar\n")
-	w(Yellow, "  compresor -c -f zip -o /tmp/ varios_archivos.txt\n")
-	w(Yellow, "  compresor -c -f zst -s 10 archivo_grande.iso\n")
-	w(Yellow, "  compresor -d archivo.tar.gz\n")
-	w(Yellow, "  compresor -d -o /tmp/ archivo.zip\n")
-	w(Yellow, "  compresor -t *.tar.gz\n")
-	w(Yellow, "  compresor -l archivo.7z\n")
-	w(Yellow, "  compresor -r archivo.txt.gz | head\n")
-	w(Yellow, "  compresor --install\n")
-	w(Yellow, "  compresor --install-deps\n")
-	w(Yellow, "  compresor --uninstall\n")
+	w(Yellow, "  crush -c -f gz documento.txt\n")
+	w(Yellow, "  crush -c -f xz -v -p archivo.tar\n")
+	w(Yellow, "  crush -c -f zip -o /tmp/ varios_archivos.txt\n")
+	w(Yellow, "  crush -c -f zst -s 10 archivo_grande.iso\n")
+	w(Yellow, "  crush -d archivo.tar.gz\n")
+	w(Yellow, "  crush -d -o /tmp/ archivo.zip\n")
+	w(Yellow, "  crush -t *.tar.gz\n")
+	w(Yellow, "  crush -l archivo.7z\n")
+	w(Yellow, "  crush -r archivo.txt.gz | head\n")
+	w(Yellow, "  crush --install\n")
+	w(Yellow, "  crush --install-deps\n")
+	w(Yellow, "  crush --uninstall\n")
 }
 
 // multiFlag implements flag.Value for repeated string flags

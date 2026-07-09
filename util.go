@@ -329,7 +329,7 @@ func EstimateUncompressedSize(file string) int64 {
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.Contains(line, "Decompressed file size") {
 				fields := strings.Fields(line)
-			if len(fields) >= 2 {
+				if len(fields) >= 2 {
 					if size, err := strconv.ParseInt(fields[len(fields)-2], 10, 64); err == nil {
 						return size
 					}
@@ -386,16 +386,16 @@ func GetUniqueName(base, ext string) string {
 // --- Logging ---
 
 func SetupLogging() error {
-	logDir := "/var/log/compresor"
+	logDir := "/var/log/crush"
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		logDir = "/tmp/compresor"
+		logDir = "/tmp/crush"
 		if err := os.MkdirAll(logDir, 0755); err != nil {
 			return err
 		}
 	}
 
 	now := time.Now().Format("20060102_150405")
-	logPath := filepath.Join(logDir, "compresor_"+now+".log")
+	logPath := filepath.Join(logDir, "crush_"+now+".log")
 
 	f, err := os.Create(logPath)
 	if err != nil {
@@ -446,7 +446,7 @@ func hasTool(name string) bool {
 	return err == nil
 }
 
-// --- Pipeline: connect multiple commands like bash pipes ---
+// --- Pipeline: chain multiple commands ---
 
 func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	if len(cmds) == 0 {

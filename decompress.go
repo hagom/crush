@@ -111,18 +111,18 @@ func decompressFile(file string, opts DecompressOptions) error {
 		return err
 	}
 
+	elapsed := time.Since(startTime)
+
+	// Show decompression report — read size before potentially removing file
+	compressedSize := int64(0)
+	if fi, err := os.Stat(file); err == nil {
+		compressedSize = fi.Size()
+	}
+
 	if !opts.KeepOrig {
 		if err := os.Remove(file); err != nil {
 			WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, file, err, NC)
 		}
-	}
-
-	elapsed := time.Since(startTime)
-
-	// Show decompression report
-	compressedSize := int64(0)
-	if info, err := os.Stat(file); err == nil {
-		compressedSize = info.Size()
 	}
 	WriteLogf("\n")
 	WriteLogf("%s=== Reporte de Descompresión ===%s\n", Green, NC)
@@ -212,13 +212,14 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 				extractCmd.Stdout = os.Stdout
 				extractCmd.Stderr = os.Stderr
 				if err := extractCmd.Run(); err != nil {
+					os.Remove(tarName)
 					return fmt.Errorf("Error extrayendo tar de %s: %w", tarName, err)
 				}
 				if !opts.KeepOrig {
-						if err := os.Remove(tarName); err != nil {
-							WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, tarName, err, NC)
-						}
+					if err := os.Remove(tarName); err != nil {
+						WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, tarName, err, NC)
 					}
+				}
 			}
 		}
 	}
@@ -245,7 +246,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".7z"):
-		args := []string{"x", file, fmt.Sprintf("-o%s", dir)}
+		args := []string{"x", "-mmt=on", file, fmt.Sprintf("-o%s", dir)}
 		if opts.Force {
 			args = append(args, "-y")
 		}
@@ -255,7 +256,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".rar"):
-		args := []string{"x", file, fmt.Sprintf("%s/", dir)}
+		args := []string{"x", "-mt" + ncpuStr(), file, fmt.Sprintf("%s/", dir)}
 		if opts.Force {
 			args = append(args, "-y")
 		}

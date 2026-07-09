@@ -1,4 +1,4 @@
-BINARY = compresor
+BINARY = crush
 
 .PHONY: build test clean install
 

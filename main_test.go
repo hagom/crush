@@ -13,43 +13,43 @@ func TestReorderArgs(t *testing.T) {
 	}{
 		{
 			name: "combined short flags",
-			args: []string{"compresor", "-c", "-f", "gz", "file.txt", "-pkv"},
-			want: []string{"compresor", "-c", "-f", "gz", "-p", "-k", "-v", "file.txt"},
+			args: []string{"crush", "-c", "-f", "gz", "file.txt", "-pkv"},
+			want: []string{"crush", "-c", "-f", "gz", "-p", "-k", "-v", "file.txt"},
 		},
 		{
 			name: "flags after positional args",
-			args: []string{"compresor", "-c", "-f", "7z", "file.txt", "-k", "-v"},
-			want: []string{"compresor", "-c", "-f", "7z", "-k", "-v", "file.txt"},
+			args: []string{"crush", "-c", "-f", "7z", "file.txt", "-k", "-v"},
+			want: []string{"crush", "-c", "-f", "7z", "-k", "-v", "file.txt"},
 		},
 		{
 			name: "no args",
-			args: []string{"compresor"},
-			want: []string{"compresor"},
+			args: []string{"crush"},
+			want: []string{"crush"},
 		},
 		{
 			name: "no flags",
-			args: []string{"compresor", "file.txt"},
-			want: []string{"compresor", "file.txt"},
+			args: []string{"crush", "file.txt"},
+			want: []string{"crush", "file.txt"},
 		},
 		{
 			name: "combined with single flag",
-			args: []string{"compresor", "-c", "-f", "gz", "file.txt", "-pv"},
-			want: []string{"compresor", "-c", "-f", "gz", "-p", "-v", "file.txt"},
+			args: []string{"crush", "-c", "-f", "gz", "file.txt", "-pv"},
+			want: []string{"crush", "-c", "-f", "gz", "-p", "-v", "file.txt"},
 		},
 		{
 			name: "long flags untouched",
-			args: []string{"compresor", "--force", "file.txt"},
-			want: []string{"compresor", "--force", "file.txt"},
+			args: []string{"crush", "--force", "file.txt"},
+			want: []string{"crush", "--force", "file.txt"},
 		},
 		{
 			name: "flag with value preserved",
-			args: []string{"compresor", "-f", "gz", "-o", "/tmp/out", "file.txt"},
-			want: []string{"compresor", "-f", "gz", "-o", "/tmp/out", "file.txt"},
+			args: []string{"crush", "-f", "gz", "-o", "/tmp/out", "file.txt"},
+			want: []string{"crush", "-f", "gz", "-o", "/tmp/out", "file.txt"},
 		},
 		{
 			name: "thread flag with value",
-			args: []string{"compresor", "-c", "-f", "gz", "-T", "4", "file.txt"},
-			want: []string{"compresor", "-c", "-f", "gz", "-T", "4", "file.txt"},
+			args: []string{"crush", "-c", "-f", "gz", "-T", "4", "file.txt"},
+			want: []string{"crush", "-c", "-f", "gz", "-T", "4", "file.txt"},
 		},
 	}
 	for _, tt := range tests {

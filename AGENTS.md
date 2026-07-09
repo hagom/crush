@@ -1,4 +1,4 @@
-# AGENTS.md — compresor
+# AGENTS.md — crush
 
 ## Descripción
 
@@ -7,31 +7,31 @@ Soporta 13 formatos: gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br.
 
 ## Ramas
 
-- **main** — documentación (README.md, AGENTS.md, COMPRESOR.md)
+- **main** — versión Go. Desarrollo activo.
 
 ## Comandos
 
 ```bash
 # Compilar
-make build          # go build -o compresor .
-go build -o compresor .
+make build          # go build -o crush .
+go build -o crush .
 
 # Testear
 make test           # go test ./... -v
 go test ./... -v
 
 # Ejecutar
-./compresor -h
-./compresor -c -f gz archivo.txt
-./compresor -d archivo.tar.gz
+./crush -h
+./crush -c -f gz archivo.txt
+./crush -d archivo.tar.gz
 
 # Instalación / desinstalación
-./compresor --install             # binario + dependencias del sistema
-./compresor --install-deps         # solo dependencias
-./compresor --uninstall            # eliminar binario
+./crush --install             # binario + dependencias del sistema
+./crush --install-deps         # solo dependencias
+./crush --uninstall            # eliminar binario
 
 # Binario final (sin dependencias)
-make install        # install -m 755 compresor /usr/local/bin/
+make install        # install -m 755 crush /usr/local/bin/
 ```
 
 ## Convenciones de código
@@ -52,7 +52,7 @@ make install        # install -m 755 compresor /usr/local/bin/
 ## Estructura del código Go
 
 ```
-compresor/
+crush/
 ├── main.go        # CLI flags, dispatch (-c, -d, -l, -t, -r, --install)
 ├── format.go      # FormatInfo, ParseFormat, DetectFormat, ExtForFormat
 ├── compress.go    # DoCompress, compressItems, tar-pipe
@@ -66,19 +66,36 @@ compresor/
 
 ## Estado actual
 
-- Bash: completo. 59 tests en bats. 1144 líneas. Sin bugs conocidos. Flags: --install (bin + deps), --install-deps, --uninstall.
-- Go: migración 1:1 completa. 47 tests nativos pasando. ~2800 líneas.
-- Features implementadas en Go: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar (compresión + descompresión), colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall, detección de modos conflictivos, expansión de flags combinados (-ptkv).
+- Go: migración completa. 47 tests nativos pasando. ~2850 líneas.
+- Features implementadas: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar (compresión + descompresión), colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall, detección de modos conflictivos, expansión de flags combinados (-ptkv).
+- **Bugs conocidos: 6** (2 críticos, 1 grave, 3 medios). Ver `COMPRESOR.md`.
+
+## Fixes realizados (jul 2026)
+
+| Bug | Severidad | Archivo | Fix |
+|---|---|---|---|
+| Early return en loop de FromFile | CRÍTICO | `compress.go:51` | Movido `return outPath, nil` fuera del for loop |
+| zstd/bzip3 DirectFlags sin `-k` | CRÍTICO | `format.go:91,93,107,115` | Añadido `-k` a DirectFlags (tool borraba original antes que crush) |
+| lrzip PipeFlags sin `-k` | CRÍTICO | `format.go:97,103` | Añadido `-k` a PipeFlags (tool borraba original en modo pipe) |
+| KeepOrig ignorado en rutas relativas | GRAVE | `compress.go:208` | Lógica de borrado extraída a `removeFiles()` + `SkipCleanup` |
+| `-c -t` borra originales antes del test | GRAVE | `main.go:306-328` | Ahora testea primero, borra después si el test pasa |
+| Stat después de borrar en reporte | MEDIO | `decompress.go:124` | Movido `os.Stat` antes del `os.Remove` |
+| `.tar` intermedio no se limpiaba si fallaba | MEDIO | `decompress.go:215` | Añadido `os.Remove(tarName)` antes del return error |
 
 ## Próximos pasos
 
+- [ ] **FIX CRÍTICO**: `pkgmgr.go:174` — finalPkg nunca asignado, --install-deps no instala nada
+- [ ] **FIX CRÍTICO**: `pkgmgr.go:126` — isToolInstalled pasa query sin split
+- [ ] **FIX GRAVE**: `compress.go:275` — -p + pv produce archivos sin comprimir (antiguo; verificar si persiste)
+- [ ] **FIX MEDIO**: `format.go:100` — .tar.lz4/.tar.br mal detectados
+- [ ] **FIX MEDIO**: `decompress.go:338` — splitWriter.Close() puede panic
+- [ ] **FIX MEDIO**: `main.go:131` — logging muerto (SetupLogging/CloseLog no llamados)
 - [ ] Tests con mock de exec.Command (inyección de dependencias)
-- [ ] Benchmarks Bash vs Go
+- [ ] Benchmarks Go
 - [ ] Comando `--bench` para medir velocidad por formato
 - [ ] Compresión paralela de múltiples archivos
 - [ ] CI/CD (GitHub Actions)
 - [ ] Publicar binarios precompilados en releases
-- [ ] Instrucciones de contribución
 
 ## MCP Servers
 
@@ -92,7 +109,7 @@ Usar activamente en TODAS las tareas del proyecto, mínimo 2 por interacción. S
 - `batch_execute` para ejecutar múltiples comandos y auto-indexar su salida
 - `execute`/`execute_file` con python/shell para análisis de código sin cargarlo al contexto
 - `search` para recuperar secciones específicas de resultados indexados
-- Preferir sobre bash para comandos con salida >5KB
+- Preferir sobre comandos con salida >5KB
 
 ### memory
 - Almacenar hallazgos, bugs y relaciones como entidades/observaciones en el grafo de conocimiento
@@ -110,6 +127,22 @@ Usar activamente en TODAS las tareas del proyecto, mínimo 2 por interacción. S
 ### chrome-devtools, developer-knowledge, design-mcp, blender
 - NO relevantes para este proyecto. Omitir.
 
+## Skills disponibles
+
+### code-review-excellence
+- **Cuándo:** Revisar PRs, cambios grandes, o establecer estándares de review en el equipo.
+- **Qué aporta:** Metodología estructurada en 4 fases (contexto → alto nivel → línea por línea → resumen), técnicas de feedback (checklists, preguntas, sugerencias), plantillas, y checklist de seguridad/rendimiento/testing.
+- **Flujo:** Fase 1: entender contexto y PR → Fase 2: arquitectura y diseño → Fase 3: línea por línea (lógica, seguridad, rendimiento, mantenibilidad) → Fase 4: resumen y decisión (approve/comment/request changes).
+- **Severidad:** Usar 🔴 blocking, 🟡 important, 🟢 nit, 💡 suggestion, 📚 learning, 🎉 praise.
+
+### refactoring-patterns
+- **Cuándo:** Mejorar estructura interna sin cambiar comportamiento observable.
+- **Qué aporta:** Catálogo Fowler completo de code smells (5 familias: Bloaters, OO Abusers, Change Preventers, Dispensables, Couplers) con sus refactorings correspondientes (Extract Method, Replace Conditional with Polymorphism, etc.).
+- **Scoring:** 10/10 structural quality score basado en 8 preguntas de diagnóstico rápido.
+- **Flujo seguro:** tests (green) → aplicar una transformación pequeña → tests (green) → commit. Nunca refactorizar en rojo.
+- **Principio clave:** Rule of Three — tolera duplicación una vez, anótala dos, refactoriza a la tercera.
+- **NO usar para:** reescrituras completas, código sin tests, o código próximo a eliminarse.
+
 ## Comportamiento esperado
 
 Actuar como **equipo de desarrollo completo**. Sin necesidad de instrucciones explícitas por paso:
@@ -117,7 +150,7 @@ Actuar como **equipo de desarrollo completo**. Sin necesidad de instrucciones ex
 | Rol | Responsabilidad |
 |---|---|
 | **Arquitecto** | Decidir estructura, worktrees, ramas, orden de merges |
-| **Dev** | Implementar fixes y features en Go y/o Bash |
+| **Dev** | Implementar fixes y features en Go |
 | **Reviewer** | Encontrar bugs, revisar código, sugerir mejoras |
 | **Tester** | Agregar tests, verificar que `go test ./...` pase |
 | **DevOps** | Worktrees, merge strategy, cleanup |
@@ -126,11 +159,11 @@ Actuar como **equipo de desarrollo completo**. Sin necesidad de instrucciones ex
 **Flujo por omisión:** Planificar → Implementar → Testear → Revisar bugs → Mergear → Documentar.
 
 - **Trabajo en paralelo con worktrees descriptivos:** Por cada tarea (fix o feature), crear un worktree con nombre descriptivo (ej: `fix/mode-conflicts`, `feat/decompress-progress`). Todos los worktrees se trabajan en paralelo usando subagentes simultáneos para ahorrar tiempo. Al terminar cada uno, mergear a `main` y eliminar worktree + rama.
-  1. `git branch fix/algo main && git worktree add ../compresor-fix-algo fix/algo`
+  1. `git branch fix/algo main && git worktree add ../crush-fix-algo fix/algo`
   2. Lanzar subagentes simultáneos, cada uno trabajando en su worktree
   3. Verificar compilación y tests en cada worktree
   4. `git merge fix/algo --no-edit` en `main`
-  5. `git worktree remove ../compresor-fix-algo && git branch -d fix/algo`
+  5. `git worktree remove ../crush-fix-algo && git branch -d fix/algo`
 - **Revisión exhaustiva de bugs:** Tras implementar fixes, hacer re-revisión completa del código en busca de bugs restantes. Si se encuentran nuevos bugs, fixearlos y repetir el ciclo. No detenerse hasta que queden **0 bugs conocidos** en todo el proyecto.
 - No esperar instrucciones en cada sub-paso.
 - Al terminar un encargo, dejar el repo limpio (rama `main` actualizada, worktrees removidos, ramas fix eliminadas, AGENTS.md reflejando el nuevo estado).

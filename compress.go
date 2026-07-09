@@ -25,6 +25,7 @@ type CompressOptions struct {
 	FromFile        string
 	TarTool         string
 	TotalSize       int64
+	SkipCleanup     bool
 }
 
 func DoCompress(items []string, opts CompressOptions) (outPath string, err error) {
@@ -46,10 +47,9 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 					files = append(files, line)
 				} else {
 					files = append(files, filepath.Join(filepath.Dir(opts.FromFile), line))
-	}
-	}
-	return outPath, nil
-}
+				}
+			}
+		}
 	} else {
 		files = expandGlobs(items)
 	}
@@ -75,7 +75,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		baseName := strings.TrimSuffix(base, filepath.Ext(base))
 		outPath = filepath.Join(opts.OutputDir, GetUniqueName(baseName, ext))
 	} else {
-		baseName := "compresor_" + time.Now().Format("20060102_150405")
+		baseName := "crush_" + time.Now().Format("20060102_150405")
 		outPath = filepath.Join(opts.OutputDir, GetUniqueName(baseName, ext))
 	}
 
@@ -130,7 +130,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		estimated = totalSize + totalSize/10
 	default:
 		// Tar-pipe formats (gz, xz, bz2, bz3, zst, lz, lrz, lz4, br):
-		// ~10-25% typical. Same as Bash (20% for all non-tar).
+		// ~10-25% typical for tar-pipe formats.
 		estimated = totalSize * 20 / 100
 	}
 	if estimated < 1<<20 {
@@ -205,19 +205,18 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 	WriteLogf("%sHilos utilizados:%s  %s%d%s\n", Blue, NC, Bold, NCPU(), NC)
 	WriteLogf("%s=============================%s\n", Green, NC)
 
-		if !opts.KeepOrig {
-		removed := 0
-		for _, f := range filteredFiles {
-			if err := os.Remove(f); err == nil {
-				removed++
-			}
-		}
+	CompressCleanupFiles = filteredFiles
+	if !opts.KeepOrig && !opts.SkipCleanup {
+		removed := removeFiles(filteredFiles, opts.Verbose)
 		if removed > 0 {
 			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
 		}
 	}
 	return outPath, nil
 }
+
+var CompressCleanupFiles []string
+
 
 func compressModeDesc(f Format) string {
 	switch f {
@@ -406,7 +405,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		if err := pipeline(writer, os.Stderr, pipeCmds...); err != nil {
 			return fmt.Errorf("Error en pipeline de compresión: %w", err)
 		}
-	return nil
+		return nil
 	}
 
 	pipeCmds := []*exec.Cmd{tarCmd}
@@ -518,4 +517,22 @@ func fastOrSlow(opts CompressOptions, defaultLevel int) int {
 		return 1
 	}
 	return defaultLevel
+}
+
+func removeFiles(files []string, verbose bool) int {
+	removed := 0
+	for _, f := range files {
+		var err error
+		if fi, statErr := os.Stat(f); statErr == nil && fi.IsDir() {
+			err = os.RemoveAll(f)
+		} else {
+			err = os.Remove(f)
+		}
+		if err == nil {
+			removed++
+		} else if verbose {
+			WriteLogf("  %sNo se pudo eliminar: %s (%v)%s\n", Yellow, f, err, NC)
+		}
+	}
+	return removed
 }

@@ -407,7 +407,7 @@ func SetupLogging() error {
 }
 
 func WriteLog(s string) {
-	fmt.Print(s)
+	fmt.Fprint(os.Stderr, s)
 	if logFile != nil {
 		logFile.WriteString(s)
 	}
@@ -415,7 +415,7 @@ func WriteLog(s string) {
 
 func WriteLogf(format string, args ...interface{}) {
 	s := fmt.Sprintf(format, args...)
-	fmt.Print(s)
+	fmt.Fprint(os.Stderr, s)
 	if logFile != nil {
 		logFile.WriteString(s)
 	}
@@ -440,6 +440,14 @@ const (
 )
 
 // --- Helpers ---
+
+func effectiveThreads(ext string) int {
+	ext = strings.ToLower(ext)
+	if strings.HasSuffix(ext, ".lz4") || strings.HasSuffix(ext, ".br") {
+		return 1
+	}
+	return NCPU()
+}
 
 func hasTool(name string) bool {
 	_, err := exec.LookPath(name)

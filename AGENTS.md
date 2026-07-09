@@ -90,7 +90,6 @@ crush/
 
 ## Próximos pasos
 
-- [ ] **FIX MEDIO**: `util.go:409,416` — WriteLog/WriteLogf escribe a stdout en vez de stderr. Diagnóstico CLI debe ir a stderr para no romper pipes.
 - [ ] Tests con mock de exec.Command (inyección de dependencias)
 - [ ] Benchmarks Go
 - [ ] Comando `--bench` para medir velocidad por formato

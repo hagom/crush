@@ -131,7 +131,7 @@ func decompressFile(file string, opts DecompressOptions) error {
 	WriteLogf("%sTamaño Comprimido:%s  %s%s%s\n", Blue, NC, Red, FormatSize(compressedSize), NC)
 	WriteLogf("%sTamaño Descomprimido:%s %s%s%s\n", Blue, NC, Green, FormatSize(uncompressedSize), NC)
 	WriteLogf("%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
-	WriteLogf("%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, NCPU(), NC)
+	WriteLogf("%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file), NC)
 	WriteLogf("%s=============================%s\n", Green, NC)
 
 	return nil
@@ -246,6 +246,20 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 	switch {
 	case strings.HasSuffix(ext, ".zip"):
+		sevenz := sevenzBin()
+		if hasTool(sevenz) {
+			args := []string{"x", "-tzip", "-mmt=on", file}
+			if opts.Force {
+				args = append(args, "-aoa")
+			} else {
+				args = append(args, "-aos")
+			}
+			args = append(args, fmt.Sprintf("-o%s", dir))
+			cmd := exec.Command(sevenz, args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			return cmd.Run()
+		}
 		args := []string{}
 		if opts.Force {
 			args = append(args, "-o")

@@ -84,6 +84,8 @@ func TestDetectFormat(t *testing.T) {
 		{"file.tar.lz", false, true},
 		{"file.tlz", false, true},
 		{"file.tar.lrz", false, true},
+		{"file.tar.lz4", false, true},
+		{"file.tar.br", false, true},
 		{"file.tar", false, false},
 		{"file.gz", false, false},
 		{"file.xz", false, false},

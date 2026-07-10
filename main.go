@@ -663,6 +663,8 @@ func printHelp() {
 	fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
 	w(Yellow, "  -T N")
 	fmt.Print("                 Número de hilos (0 = auto)\n")
+	w(Yellow, "  -j N")
+	fmt.Print("                 Comprimir N archivos en paralelo (cada uno → salida independiente)\n")
 	w(Yellow, "  -s N")
 	fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
 	w(Yellow, "  -opts \"opciones\"")

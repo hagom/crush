@@ -136,7 +136,7 @@ func main() {
 	force := flag.Bool("force", false, "Sobrescribir archivos existentes")
 	quick := flag.Bool("quick", false, "Verificación rápida (no verificar cada archivo)")
 	threadCount := flag.Int("T", 0, "Número de hilos (0=auto)")
-	parallelCount := flag.Int("j", 1, "Comprimir N archivos en paralelo (cada uno produce salida independiente)")
+	parallelCount := flag.Int("j", 1, "Comprimir N archivos en paralelo (cada uno → salida independiente)")
 	splitSize := flag.Int("s", 0, "Dividir en partes de N MB (solo compresión)")
 	compressionOpts := flag.String("opts", "", "Opciones adicionales para la herramienta de compresión")
 
@@ -555,15 +555,11 @@ func doInstallCompletion(shell string) {
 
 	// Ensure parent directory exists
 	parentDir := filepath.Dir(dest)
-	cmd := exec.Command("sudo", "-S", "mkdir", "-p", parentDir)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	cmd := exec.Command("sudo", "mkdir", "-p", parentDir)
 	cmd.Stderr = os.Stderr
 	cmd.Run()
 
-	cmd = exec.Command("sudo", "-S", "install", "-m", "644", tmpPath, dest)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	cmd = exec.Command("sudo", "install", "-m", "644", tmpPath, dest)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		os.Remove(tmpPath)

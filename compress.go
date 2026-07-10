@@ -83,13 +83,24 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 
 	if opts.DryRun {
 		WriteLogf("%s[Simulacro] Comprimiendo %d archivo(s)%s\n", Blue, len(files), NC)
-		WriteLogf("%s[Simulacro] Salida: %s%s\n", Blue, outPath, NC)
-		if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
-			opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
-			opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br {
-			WriteLogf("%s[Simulacro] Formato: tar.%s (Multi-archivo → tar pipe)%s\n", Blue, opts.Format, NC)
+		if !singleItem && len(files) > 1 {
+			WriteLogf("%s[Simulacro] Modo: paralelo (%d archivos × %d núcleos)%s\n", Blue, len(files), NCPU(), NC)
+			if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
+				opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
+				opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br {
+				WriteLogf("%s[Simulacro] Formato: %s (1 archivo → 1 archivo comprimido)%s\n", Blue, opts.Format, NC)
+			} else {
+				WriteLogf("%s[Simulacro] Formato: %s%s\n", Blue, ext, NC)
+			}
 		} else {
-			WriteLogf("%s[Simulacro] Formato: %s%s\n", Blue, ext, NC)
+			WriteLogf("%s[Simulacro] Salida: %s%s\n", Blue, outPath, NC)
+			if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
+				opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
+				opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br {
+				WriteLogf("%s[Simulacro] Formato: tar.%s (Multi-archivo → tar pipe)%s\n", Blue, opts.Format, NC)
+			} else {
+				WriteLogf("%s[Simulacro] Formato: %s%s\n", Blue, ext, NC)
+			}
 		}
 		return "", nil
 	}
@@ -186,7 +197,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		if opts.Format == SevenZ {
 			parFormat = "7z"
 		}
-		WriteLogf("%sComprimiendo %d archivo(s) en paralelo (j=%d)...%s\n", Bold, len(filteredFiles), opts.Parallel, NC)
+		WriteLogf("%sComprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(filteredFiles), NC)
 		WriteLogf("  Formato: %s\n", parFormat)
 		WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
 		WriteLogf("\n")
@@ -473,7 +484,7 @@ func compressParallel(files []string, opts CompressOptions) error {
 	WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, ext, NC)
 	WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(files), NC)
 	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
-	WriteLogf("%sHilos:%s             %s%d (compresor) × %d (archivos)%s\n", Blue, NC, Bold, effectiveThreads(ext), opts.Parallel, NC)
+	WriteLogf("%sHilos:%s             %s%d (compresor) × %d archivos%s\n", Blue, NC, Bold, effectiveThreads(ext), len(files), NC)
 	if len(errors) > 0 {
 		WriteLogf("%sErrores:%s           %s%d%s\n", Blue, NC, Red, len(errors), NC)
 		for _, e := range errors {

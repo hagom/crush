@@ -46,6 +46,8 @@ make install        # install -m 755 crush /usr/local/bin/
 ## Filosofía del proyecto
 
 - **Siempre paralelizar** los compresores. Usar versiones multihilo (`pigz`, `lbzip2`/`pbzip2`, `plzip`, `bzip3 -j N`, `xz -T0`, `zstd -T0`, `lrzip -p N`, `7z -mmt=on`, `rar -mtN`) para aprovechar todos los núcleos del CPU.
+- **NUNCA agregar flags de paralelismo** (`-j`, `--parallel`, `--jobs`). El programa debe detectar automáticamente `NCPU()` y paralelizar archivos según la cantidad de núcleos disponibles.
+- **Siempre comprimir múltiples archivos en paralelo** cuando sean archivos individuales (no directorios). Cada archivo produce su propia salida comprimida.
 - **Sistemas target**: Debian (apt) y RedHat (dnf/yum). El instalador de dependencias debe priorizar estos gestores.
 - Si la versión paralela de un compresor no está disponible, caer en la versión serial (`gzip`, `bzip2`, etc.) como último recurso, nunca fallar.
 
@@ -73,7 +75,7 @@ crush/
 - [ ] Tests con mock de exec.Command (inyección de dependencias)
 - [ ] Benchmarks Go
 - [ ] Comando `--bench` para medir velocidad por formato
-- [x] Compresión paralela de múltiples archivos (`-j N`)
+- [x] Compresión paralela de múltiples archivos (auto NCPU)
 - [ ] CI/CD (GitHub Actions)
 - [ ] Publicar binarios precompilados en releases
 

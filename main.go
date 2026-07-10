@@ -28,7 +28,7 @@ var knownShortFlags = map[byte]bool{
 // takesValue reports whether a flag token consumes the next argument as its value.
 func flagTakesValue(a string) bool {
 	switch {
-	case a == "-f", a == "-o", a == "-T", a == "-j", a == "-s", a == "-opts":
+	case a == "-f", a == "-o", a == "-T", a == "-s", a == "-opts":
 		return true
 	case a == "-exclude" || strings.HasPrefix(a, "-exclude="):
 		return true
@@ -136,7 +136,6 @@ func main() {
 	force := flag.Bool("force", false, "Sobrescribir archivos existentes")
 	quick := flag.Bool("quick", false, "Verificación rápida (no verificar cada archivo)")
 	threadCount := flag.Int("T", 0, "Número de hilos (0=auto)")
-	parallelCount := flag.Int("j", 1, "Comprimir N archivos en paralelo (cada uno → salida independiente)")
 	splitSize := flag.Int("s", 0, "Dividir en partes de N MB (solo compresión)")
 	compressionOpts := flag.String("opts", "", "Opciones adicionales para la herramienta de compresión")
 
@@ -325,12 +324,12 @@ func main() {
 			os.Exit(1)
 		}
 
+		parallel := NCPU()
+		if parallel < 2 {
+			parallel = 2
+		}
 		// When -c -t, defer deletion until after the test to prevent data loss
 		skipCleanup := *testFlag && !*keepOrig
-		if *parallelCount < 1 {
-			fmt.Fprintln(os.Stderr, "Error: -j debe ser >= 1")
-			os.Exit(1)
-		}
 		opts := CompressOptions{
 			Format:          format,
 			DryRun:          *dryRun,
@@ -340,7 +339,7 @@ func main() {
 			Progress:        *progress,
 			KeepOrig:        *keepOrig || skipCleanup,
 			Threads:         *threadCount,
-			Parallel:        *parallelCount,
+			Parallel:        parallel,
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,
 		}
@@ -663,8 +662,6 @@ func printHelp() {
 	fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
 	w(Yellow, "  -T N")
 	fmt.Print("                 Número de hilos (0 = auto)\n")
-	w(Yellow, "  -j N")
-	fmt.Print("                 Comprimir N archivos en paralelo (cada uno → salida independiente)\n")
 	w(Yellow, "  -s N")
 	fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
 	w(Yellow, "  -opts \"opciones\"")

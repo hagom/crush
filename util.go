@@ -387,19 +387,20 @@ func GetUniqueName(base, ext string) string {
 
 func SetupLogging() error {
 	logDir := "/var/log/crush"
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		logDir = "/tmp/crush"
-		if err := os.MkdirAll(logDir, 0755); err != nil {
-			return err
-		}
-	}
+	os.MkdirAll(logDir, 0755)
 
 	now := time.Now().Format("20060102_150405")
 	logPath := filepath.Join(logDir, "crush_"+now+".log")
 
 	f, err := os.Create(logPath)
 	if err != nil {
-		return err
+		logDir = "/tmp/crush"
+		os.MkdirAll(logDir, 0755)
+		logPath = filepath.Join(logDir, "crush_"+now+".log")
+		f, err = os.Create(logPath)
+		if err != nil {
+			return err
+		}
 	}
 	logFile = f
 

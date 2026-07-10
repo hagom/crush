@@ -18,7 +18,6 @@ type CompressOptions struct {
 	OutputDir       string
 	SplitSize       int
 	KeepOrig        bool
-	Threads         int
 	Parallel        int
 	CompressionOpts string
 	ChunkSize       int
@@ -612,11 +611,7 @@ func compress7z(files []string, outPath string, opts CompressOptions) error {
 	args := []string{"a", "-mx=9", "-md=128m", "-ms=on"}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
-	if opts.Threads > 0 {
-		args = append(args, "-mmt"+fmt.Sprintf("%d", opts.Threads))
-	} else {
-		args = append(args, "-mmt=on")
-	}
+	args = append(args, "-mmt=on")
 	args = append(args, outPath)
 	args = append(args, "--")
 	args = append(args, files...)

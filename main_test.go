@@ -47,9 +47,9 @@ func TestReorderArgs(t *testing.T) {
 			want: []string{"crush", "-f", "gz", "-o", "/tmp/out", "file.txt"},
 		},
 		{
-			name: "thread flag with value",
-			args: []string{"crush", "-c", "-f", "gz", "-T", "4", "file.txt"},
-			want: []string{"crush", "-c", "-f", "gz", "-T", "4", "file.txt"},
+			name: "split flag with value",
+			args: []string{"crush", "-c", "-f", "gz", "-s", "10", "file.txt"},
+			want: []string{"crush", "-c", "-f", "gz", "-s", "10", "file.txt"},
 		},
 	}
 	for _, tt := range tests {

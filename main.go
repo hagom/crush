@@ -27,7 +27,7 @@ var knownShortFlags = map[byte]bool{
 // takesValue reports whether a flag token consumes the next argument as its value.
 func flagTakesValue(a string) bool {
 	switch {
-	case a == "-f", a == "-o", a == "-T", a == "-s", a == "-opts":
+	case a == "-f", a == "-o", a == "-s", a == "-opts":
 		return true
 	case a == "-exclude" || strings.HasPrefix(a, "-exclude="):
 		return true
@@ -133,7 +133,6 @@ func main() {
 	verbose := flag.Bool("v", false, "Modo verbose")
 	force := flag.Bool("force", false, "Sobrescribir archivos existentes")
 	quick := flag.Bool("quick", false, "Verificación rápida (no verificar cada archivo)")
-	threadCount := flag.Int("T", 0, "Número de hilos (0=auto)")
 	splitSize := flag.Int("s", 0, "Dividir en partes de N MB (solo compresión)")
 	compressionOpts := flag.String("opts", "", "Opciones adicionales para la herramienta de compresión")
 
@@ -335,7 +334,6 @@ func main() {
 			OutputDir:       *outputDir,
 			SplitSize:       *splitSize,
 			KeepOrig:        *keepOrig || skipCleanup,
-			Threads:         *threadCount,
 			Parallel:        parallel,
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,
@@ -654,8 +652,6 @@ func printHelp() {
 	fmt.Print("               Sobrescribir archivos existentes\n")
 	w(Yellow, "  -quick")
 	fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
-	w(Yellow, "  -T N")
-	fmt.Print("                 Número de hilos (0 = auto)\n")
 	w(Yellow, "  -s N")
 	fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
 	w(Yellow, "  -opts \"opciones\"")
@@ -677,8 +673,8 @@ func printHelp() {
 	w(Yellow, "  crush -c -f gz documento.txt\n")
 	w(Yellow, "  crush -c -f gz -t documento.txt\n")
 	fmt.Print("                       # comprimir y verificar integridad\n")
-	w(Yellow, "  crush -c -f zst -T 4 -v archivo.tar\n")
-	fmt.Print("                       # multihilo con 4 hilos\n")
+	w(Yellow, "  crush -c -f zst -v archivo.tar\n")
+	fmt.Print("                       # multihilo auto con todos los núcleos\n")
 	w(Yellow, "  crush -c -f xz -k -p documento.txt\n")
 	fmt.Print("                       # conservar original + barra de progreso\n")
 	w(Yellow, "  crush -c -f zip -exclude \"*.bak\" dir/\n")
@@ -742,13 +738,13 @@ _crush() {
             COMPREPLY=( $(compgen -f -- "${cur}") )
             return 0
             ;;
-        -T|-s)
+        -s)
             COMPREPLY=()
             return 0
             ;;
     esac
 
-    local opts="-c -d -l -t -r -h -v -k -p -n -f -o -T -s -opts
+    local opts="-c -d -l -t -r -h -v -k -n -f -o -s -opts
                  -exclude -force -quick --install --install-deps
                  --uninstall --completion"
 
@@ -800,7 +796,6 @@ _crush() {
         {-k,--keep}'[Conservar originales]' \
         {-p,--progress}'[Barra de progreso]' \
         {-n,--dry-run}'[Modo simulacro]' \
-        {-T,--threads}'[Número de hilos]:hilos:' \
         {-s,--split}'[Dividir en partes MB]:tamaño:' \
         '--opts[Opciones adicionales]:opciones:' \
         '--exclude[Patrón de exclusión]:patrón:' \
@@ -838,7 +833,6 @@ complete -c crush -s v -d "Modo verbose"
 complete -c crush -s k -d "Conservar originales"
 complete -c crush -s p -d "Barra de progreso"
 complete -c crush -s n -d "Modo simulacro"
-complete -c crush -s T -d "Número de hilos (0=auto)"
 complete -c crush -s s -d "Dividir en partes de N MB"
 complete -c crush -l opts -d "Opciones adicionales"
 complete -c crush -l exclude -d "Patrón de exclusión" -r

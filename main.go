@@ -110,6 +110,7 @@ func main() {
 	installFlag := flag.Bool("install", false, "Instalar crush en el sistema + herramientas faltantes")
 	installDepsFlag := flag.Bool("install-deps", false, "Instalar solo herramientas de compresión faltantes")
 	uninstallFlag := flag.Bool("uninstall", false, "Desinstalar crush del sistema")
+	completionFlag := flag.String("completion", "", "Generar script de autocompletado (bash|zsh|fish)")
 
 	formatStr := flag.String("f", "", "Formato de compresión (ver -h para lista ordenada por compresión)")
 	outputDir := flag.String("o", ".", "Directorio de salida")
@@ -136,6 +137,21 @@ func main() {
 	// Handle -h / no args
 	if *helpFlag || (flag.NFlag() == 0 && flag.NArg() == 0) {
 		printHelp()
+		return
+	}
+
+	if *completionFlag != "" {
+		switch *completionFlag {
+		case "bash":
+			fmt.Print(bashCompletion)
+		case "zsh":
+			fmt.Print(zshCompletion)
+		case "fish":
+			fmt.Print(fishCompletion)
+		default:
+			fmt.Fprintf(os.Stderr, "Error: shell no soportada: %s (use bash, zsh o fish)\n", *completionFlag)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -579,20 +595,40 @@ func printHelp() {
 	w(Yellow, "  --install-deps")
 	fmt.Print("        Instalar solo herramientas de compresión faltantes\n")
 	w(Yellow, "  --uninstall")
-	fmt.Print("          Desinstalar crush del sistema\n\n")
+	fmt.Print("          Desinstalar crush del sistema\n")
+	w(Yellow, "  --completion")
+	fmt.Print("       Generar script de autocompletado (bash|zsh|fish)\n\n")
 	w(BoldBlue, "Ejemplos:\n")
 	w(Yellow, "  crush -c -f gz documento.txt\n")
-	w(Yellow, "  crush -c -f xz -v -p archivo.tar\n")
-	w(Yellow, "  crush -c -f zip -o /tmp/ varios_archivos.txt\n")
+	w(Yellow, "  crush -c -f gz -t documento.txt\n")
+	fmt.Print("                       # comprimir y verificar integridad\n")
+	w(Yellow, "  crush -c -f zst -T 4 -v archivo.tar\n")
+	fmt.Print("                       # multihilo con 4 hilos\n")
+	w(Yellow, "  crush -c -f xz -k -p documento.txt\n")
+	fmt.Print("                       # conservar original + barra de progreso\n")
+	w(Yellow, "  crush -c -f zip -exclude \"*.bak\" dir/\n")
+	fmt.Print("                       # comprimir excluyendo archivos .bak\n")
+	w(Yellow, "  crush -c -f tar.gz -o /backup/ dir/\n")
+	fmt.Print("                       # comprimir directorio a ubicación específica\n")
 	w(Yellow, "  crush -c -f zst -s 10 archivo_grande.iso\n")
+	fmt.Print("                       # dividir en partes de 10 MB\n")
 	w(Yellow, "  crush -d archivo.tar.gz\n")
+	w(Yellow, "  crush -d -t archivo.7z\n")
+	fmt.Print("                       # testear antes de descomprimir\n")
 	w(Yellow, "  crush -d -o /tmp/ archivo.zip\n")
+	w(Yellow, "  crush -d -force archivo.7z\n")
+	fmt.Print("                       # sobrescribir archivos existentes\n")
 	w(Yellow, "  crush -t *.tar.gz\n")
 	w(Yellow, "  crush -l archivo.7z\n")
-	w(Yellow, "  crush -r archivo.txt.gz | head\n")
+	w(Yellow, "  crush -l *.7z\n")
+	fmt.Print("                       # listar múltiples archivos\n")
+	w(Yellow, "  crush -r archivo.txt.gz | grep error\n")
+	fmt.Print("                       # leer y filtrar contenido comprimido\n")
 	w(Yellow, "  crush --install\n")
 	w(Yellow, "  crush --install-deps\n")
 	w(Yellow, "  crush --uninstall\n")
+	w(Yellow, "  crush --completion bash > /etc/bash_completion.d/crush\n")
+	fmt.Print("                       # instalar autocompletado bash\n")
 }
 
 // multiFlag implements flag.Value for repeated string flags
@@ -609,3 +645,133 @@ func (m *multiFlag) Set(value string) error {
 	*m = append(*m, value)
 	return nil
 }
+
+const bashCompletion = `# bash completion for crush
+_crush() {
+    local cur prev word
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    local formats="gz xz bz2 bz3 zst lz lrz zip 7z rar lz4 br tar"
+
+    case "${prev}" in
+        -f)
+            COMPREPLY=( $(compgen -W "${formats}" -- "${cur}") )
+            return 0
+            ;;
+        --completion)
+            COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur}") )
+            return 0
+            ;;
+        -o|-opts|-exclude)
+            COMPREPLY=( $(compgen -f -- "${cur}") )
+            return 0
+            ;;
+        -T|-s)
+            COMPREPLY=()
+            return 0
+            ;;
+    esac
+
+    local opts="-c -d -l -t -r -h -v -k -p -n -f -o -T -s -opts
+                 -exclude -force -quick --install --install-deps
+                 --uninstall --completion"
+
+    if [[ ${cur} == -* ]]; then
+        COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+    else
+        COMPREPLY=( $(compgen -f -- "${cur}") )
+    fi
+}
+complete -F _crush crush
+`
+
+const zshCompletion = `#compdef crush
+
+_crush() {
+    local -a formats
+    formats=(
+        'gz:Gzip'
+        'xz:XZ'
+        'bz2:Bzip2'
+        'bz3:Bzip3'
+        'zst:Zstd'
+        'lz:Lzip'
+        'lrz:Lrzip'
+        'zip:Zip'
+        '7z:7-Zip'
+        'rar:RAR'
+        'lz4:LZ4'
+        'br:Brotli'
+        'tar:Tar'
+    )
+
+    _arguments \
+        '(-c -d -l -t -r)'{-c,--compress}'[Comprimir archivos]' \
+        '(-c -d -l -t -r)'{-d,--decompress}'[Descomprimir archivos]' \
+        '(-c -d -l -t -r)'{-l,--list}'[Listar contenido]' \
+        '(-c -d -l -t -r)'{-t,--test}'[Verificar integridad]' \
+        '(-c -d -l -t -r)'{-r,--read}'[Leer contenido a stdout]' \
+        '(-h --help)'{-h,--help}'[Mostrar ayuda]' \
+        '--install[Instalar crush + dependencias]' \
+        '--install-deps[Instalar solo dependencias]' \
+        '--uninstall[Desinstalar crush]' \
+        '--completion[Generar autocompletado]:shell:(bash zsh fish)' \
+        {-f,--format}'[Formato de compresión]:formato:->formats' \
+        {-o,--output}'[Directorio de salida]:directorio:_files -/' \
+        '--force[Sobrescribir existentes]' \
+        '--quick[Verificación rápida]' \
+        {-v,--verbose}'[Modo verbose]' \
+        {-k,--keep}'[Conservar originales]' \
+        {-p,--progress}'[Barra de progreso]' \
+        {-n,--dry-run}'[Modo simulacro]' \
+        {-T,--threads}'[Número de hilos]:hilos:' \
+        {-s,--split}'[Dividir en partes MB]:tamaño:' \
+        '--opts[Opciones adicionales]:opciones:' \
+        '--exclude[Patrón de exclusión]:patrón:' \
+        '*:archivo:_files'
+
+    case "$state" in
+        formats)
+            _describe -t formats "formato" formats
+            ;;
+    esac
+}
+
+_crush "$@"
+`
+
+const fishCompletion = `# fish completion for crush
+
+function __crush_formats
+    echo gz xz bz2 bz3 zst lz lrz zip 7z rar lz4 br tar
+end
+
+# Mode flags (mutually exclusive group)
+complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s c -d "Comprimir archivos"
+complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s d -d "Descomprimir archivos"
+complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s l -d "Listar contenido"
+complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s t -d "Verificar integridad"
+complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s r -d "Leer contenido a stdout"
+
+# General flags
+complete -c crush -s f -d "Formato de compresión" -xa "(__crush_formats)"
+complete -c crush -s o -d "Directorio de salida" -xa "(__fish_complete_directories)"
+complete -c crush -l force -d "Sobrescribir existentes"
+complete -c crush -l quick -d "Verificación rápida"
+complete -c crush -s v -d "Modo verbose"
+complete -c crush -s k -d "Conservar originales"
+complete -c crush -s p -d "Barra de progreso"
+complete -c crush -s n -d "Modo simulacro"
+complete -c crush -s T -d "Número de hilos (0=auto)"
+complete -c crush -s s -d "Dividir en partes de N MB"
+complete -c crush -l opts -d "Opciones adicionales"
+complete -c crush -l exclude -d "Patrón de exclusión" -r
+complete -c crush -l install -d "Instalar crush + dependencias"
+complete -c crush -l install-deps -d "Instalar solo dependencias"
+complete -c crush -l uninstall -d "Desinstalar crush"
+complete -c crush -l completion -d "Generar autocompletado" -xa "bash zsh fish"
+
+# Positional args: files
+complete -c crush -f -a "(__fish_complete_files)"
+`

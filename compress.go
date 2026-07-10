@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,7 @@ type CompressOptions struct {
 	Progress        bool
 	KeepOrig        bool
 	Threads         int
+	Parallel        int
 	CompressionOpts string
 	ChunkSize       int
 	Exclude         []string
@@ -169,6 +171,30 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		return "", fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
+	// Parallel compression mode: each file compressed independently
+	if opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 {
+		totalSize = 0
+		for _, f := range filteredFiles {
+			info, err := os.Stat(f)
+			if err == nil && !info.IsDir() {
+				totalSize += info.Size()
+			}
+		}
+		opts.TotalSize = totalSize
+
+		parFormat := opts.Format.String()
+		if opts.Format == SevenZ {
+			parFormat = "7z"
+		}
+		WriteLogf("%sComprimiendo %d archivo(s) en paralelo (j=%d)...%s\n", Bold, len(filteredFiles), opts.Parallel, NC)
+		WriteLogf("  Formato: %s\n", parFormat)
+		WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
+		WriteLogf("\n")
+
+		err = compressParallel(filteredFiles, opts)
+		return "", err
+	}
+
 	startTime := time.Now()
 
 	WriteLogf("%sComprimiendo %d archivo(s)...%s\n", Bold, len(filteredFiles), NC)
@@ -293,60 +319,191 @@ func compressItems(files []string, outPath string, opts CompressOptions) error {
 	}
 }
 
+func buildCompressCmd(opts CompressOptions) *exec.Cmd {
+	ext := opts.Format.String()
+	switch ext {
+	case "gz":
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		cmd := exec.Command("pigz", args...)
+		if !hasTool("pigz") {
+			cmd = exec.Command("gzip", args...)
+		}
+		return cmd
+	case "xz":
+		args := []string{"-c", "-T" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "-e"}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command("xz", args...)
+	case "bz2":
+		bin := bzip2Bin()
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command(bin, args...)
+	case "bz3":
+		args := []string{"-c", "-j" + ncpuStr()}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command("bzip3", args...)
+	case "zst":
+		args := []string{"-c", "-T0", fmt.Sprintf("-%d", fastOrSlow(opts, 19))}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command("zstd", args...)
+	case "lz":
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "--threads=" + ncpuStr()}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command("plzip", args...)
+	case "lz4":
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 1))}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command("lz4", args...)
+	case "br":
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 11))}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command("brotli", args...)
+	default:
+		return exec.Command("cat")
+	}
+}
+
+func compressSingleFile(file, outPath string, opts CompressOptions) error {
+	isTarBased := opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
+		opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
+		opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br
+
+	if isTarBased {
+		ext := opts.Format.String()
+		if ext == "lrz" {
+			args := []string{"-f", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath, file}
+			args = append(args, strings.Fields(opts.CompressionOpts)...)
+			cmd := exec.Command("lrzip", args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if opts.Verbose {
+				WriteLogf("  $ lrzip %s\n", strings.Join(args, " "))
+			}
+			return cmd.Run()
+		}
+
+		inFile, err := os.Open(file)
+		if err != nil {
+			return fmt.Errorf("Error abriendo %s: %w", file, err)
+		}
+		defer inFile.Close()
+
+		outFile, err := os.Create(outPath)
+		if err != nil {
+			return fmt.Errorf("Error creando %s: %w", outPath, err)
+		}
+		defer outFile.Close()
+
+		compressCmd := buildCompressCmd(opts)
+		compressCmd.Stdin = inFile
+		compressCmd.Stdout = outFile
+		compressCmd.Stderr = os.Stderr
+
+		if opts.Verbose {
+			WriteLogf("  $ %s %s < %s > %s\n", compressCmd.Path, strings.Join(compressCmd.Args[1:], " "), file, outPath)
+		}
+
+		return compressCmd.Run()
+	}
+
+	switch opts.Format {
+	case Zip:
+		return compressZip([]string{file}, outPath, opts)
+	case SevenZ:
+		return compress7z([]string{file}, outPath, opts)
+	case Tar:
+		return compressPlainTar([]string{file}, outPath, opts)
+	case Rar:
+		return compressRar([]string{file}, outPath, opts)
+	default:
+		return fmt.Errorf("formato no soportado para compresión: %s", opts.Format)
+	}
+}
+
+func compressParallel(files []string, opts CompressOptions) error {
+	ext := opts.Format.String()
+	sem := make(chan struct{}, opts.Parallel)
+	errCh := make(chan error, len(files))
+	outFiles := make([]string, 0, len(files))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	startTime := time.Now()
+
+	for _, f := range files {
+		wg.Add(1)
+		go func(file string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			base := filepath.Base(file)
+			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
+			outPath := filepath.Join(opts.OutputDir, GetUniqueName(baseNoExt, ext))
+
+			mu.Lock()
+			outFiles = append(outFiles, outPath)
+			mu.Unlock()
+
+			if opts.Verbose {
+				WriteLogf("  %s → %s\n", file, outPath)
+			}
+
+			err := compressSingleFile(file, outPath, opts)
+			if err != nil {
+				errCh <- fmt.Errorf("%s: %w", file, err)
+			}
+		}(f)
+	}
+
+	wg.Wait()
+	close(errCh)
+	close(sem)
+
+	var errors []error
+	for err := range errCh {
+		errors = append(errors, err)
+	}
+
+	elapsed := time.Since(startTime)
+
+	WriteLogf("\n")
+	WriteLogf("%s=== Reporte de Compresión Paralela ===%s\n", Green, NC)
+	WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, ext, NC)
+	WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(files), NC)
+	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
+	WriteLogf("%sHilos:%s             %s%d (compresor) × %d (archivos)%s\n", Blue, NC, Bold, effectiveThreads(ext), opts.Parallel, NC)
+	if len(errors) > 0 {
+		WriteLogf("%sErrores:%s           %s%d%s\n", Blue, NC, Red, len(errors), NC)
+		for _, e := range errors {
+			WriteLogf("  %s✗ %s%s\n", Red, e, NC)
+		}
+	} else {
+		WriteLogf("%s%s✓ Todos los archivos comprimidos exitosamente%s\n", Green, Bold, NC)
+	}
+	WriteLogf("%s=============================%s\n", Green, NC)
+
+	if len(errors) > 0 {
+		return fmt.Errorf("%d error(es) en compresión paralela", len(errors))
+	}
+
+	CompressCleanupFiles = files
+	if !opts.KeepOrig && !opts.SkipCleanup {
+		removed := removeFiles(files, opts.Verbose)
+		if removed > 0 {
+			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
+		}
+	}
+
+	return nil
+}
+
 func compressTarPipe(files []string, outPath string, opts CompressOptions) error {
-	var compressCmd *exec.Cmd
 	var pvCmd *exec.Cmd
 	ext := opts.Format.String()
 
-	switch ext {
-	case "gz":
-		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
-		args = append(args, optFlags...)
-		compressCmd = exec.Command("pigz", args...)
-		if !hasTool("pigz") {
-			compressCmd = exec.Command("gzip", args...)
-		}
-	case "xz":
-		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", "-T" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "-e"}
-		args = append(args, optFlags...)
-		compressCmd = exec.Command("xz", args...)
-	case "bz2":
-		bin := bzip2Bin()
-		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
-		args = append(args, optFlags...)
-		compressCmd = exec.Command(bin, args...)
-	case "bz3":
-		// bzip3 doesn't use numeric level flags like bzip2.
-		// Default block size (16 MiB) is maximum. Just use -j for threads.
-		args := []string{"-c", "-j" + ncpuStr()}
-		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		compressCmd = exec.Command("bzip3", args...)
-	case "zst":
-		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", "-T0", fmt.Sprintf("-%d", fastOrSlow(opts, 19))}
-		args = append(args, optFlags...)
-		compressCmd = exec.Command("zstd", args...)
-	case "lz":
-		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "--threads=" + ncpuStr()}
-		args = append(args, optFlags...)
-		compressCmd = exec.Command("plzip", args...)
-	case "lz4":
-		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 1))}
-		args = append(args, optFlags...)
-		compressCmd = exec.Command("lz4", args...)
-	case "br":
-		optFlags := strings.Fields(opts.CompressionOpts)
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 11))}
-		args = append(args, optFlags...)
-		compressCmd = exec.Command("brotli", args...)
-	default:
-		compressCmd = exec.Command("cat")
-	}
+	compressCmd := buildCompressCmd(opts)
 
 	if opts.Progress && hasTool("pv") {
 		pvArgs := []string{"-f", "-B", "256k"}

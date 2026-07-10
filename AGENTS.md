@@ -73,7 +73,7 @@ crush/
 - [ ] Tests con mock de exec.Command (inyección de dependencias)
 - [ ] Benchmarks Go
 - [ ] Comando `--bench` para medir velocidad por formato
-- [ ] Compresión paralela de múltiples archivos
+- [x] Compresión paralela de múltiples archivos (`-j N`)
 - [ ] CI/CD (GitHub Actions)
 - [ ] Publicar binarios precompilados en releases
 

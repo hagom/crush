@@ -100,6 +100,21 @@ func main() {
 	// and move all flags before positional args so flag.Parse catches them
 	os.Args = reorderArgs(os.Args)
 
+	// Detect --completion without value (auto-install mode) before flag.Parse
+	completionInstall := ""
+	for i := 1; i < len(os.Args); i++ {
+		a := os.Args[i]
+		if a == "--completion" || a == "-completion" {
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				completionInstall = os.Args[i+1]
+				break
+			}
+			completionInstall = "auto"
+			os.Args = append(os.Args[:i], os.Args[i+1:]...)
+			break
+		}
+	}
+
 	// Flags
 	compressFlag := flag.Bool("c", false, "Comprimir archivos")
 	decompressFlag := flag.Bool("d", false, "Descomprimir archivos")
@@ -110,7 +125,7 @@ func main() {
 	installFlag := flag.Bool("install", false, "Instalar crush en el sistema + herramientas faltantes")
 	installDepsFlag := flag.Bool("install-deps", false, "Instalar solo herramientas de compresión faltantes")
 	uninstallFlag := flag.Bool("uninstall", false, "Desinstalar crush del sistema")
-	completionFlag := flag.String("completion", "", "Generar script de autocompletado (bash|zsh|fish)")
+	completionFlag := flag.String("completion", "", "Instalar autocompletado (bash|zsh|fish, o auto-detectar)")
 
 	formatStr := flag.String("f", "", "Formato de compresión (ver -h para lista ordenada por compresión)")
 	outputDir := flag.String("o", ".", "Directorio de salida")
@@ -129,6 +144,14 @@ func main() {
 
 	flag.Parse()
 
+	if *completionFlag != "" {
+		completionInstall = *completionFlag
+	}
+	if completionInstall != "" {
+		doInstallCompletion(completionInstall)
+		return
+	}
+
 	defer CloseLog()
 	if err := SetupLogging(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error configurando logging: %v\n", err)
@@ -137,21 +160,6 @@ func main() {
 	// Handle -h / no args
 	if *helpFlag || (flag.NFlag() == 0 && flag.NArg() == 0) {
 		printHelp()
-		return
-	}
-
-	if *completionFlag != "" {
-		switch *completionFlag {
-		case "bash":
-			fmt.Print(bashCompletion)
-		case "zsh":
-			fmt.Print(zshCompletion)
-		case "fish":
-			fmt.Print(fishCompletion)
-		default:
-			fmt.Fprintf(os.Stderr, "Error: shell no soportada: %s (use bash, zsh o fish)\n", *completionFlag)
-			os.Exit(1)
-		}
 		return
 	}
 
@@ -491,6 +499,75 @@ func handleInstallDeps() {
 	}
 }
 
+func doInstallCompletion(shell string) {
+	if shell == "auto" {
+		shellPath := os.Getenv("SHELL")
+		switch {
+		case strings.HasSuffix(shellPath, "/bash"):
+			shell = "bash"
+		case strings.HasSuffix(shellPath, "/zsh"):
+			shell = "zsh"
+		case strings.HasSuffix(shellPath, "/fish"):
+			shell = "fish"
+		default:
+			fmt.Fprintf(os.Stderr, "Error: no se pudo detectar shell desde $SHELL (%s). Use: crush --completion bash|zsh|fish\n", shellPath)
+			os.Exit(1)
+		}
+	}
+
+	var script, dest string
+	switch shell {
+	case "bash":
+		script = bashCompletion
+		dest = "/etc/bash_completion.d/crush"
+	case "zsh":
+		script = zshCompletion
+		dest = "/usr/share/zsh/site-functions/_crush"
+	case "fish":
+		script = fishCompletion
+		dest = "/etc/fish/completions/crush.fish"
+	default:
+		fmt.Fprintf(os.Stderr, "Error: shell no soportada: %s (use bash, zsh o fish)\n", shell)
+		os.Exit(1)
+	}
+
+	WriteLogf("%sInstalando completado para %s...%s\n", Blue, shell, NC)
+
+	tmpFile, err := os.CreateTemp("", "crush-completion-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sError: no se pudo crear archivo temporal%s\n", Red, NC)
+		os.Exit(1)
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.WriteString(script); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		fmt.Fprintf(os.Stderr, "%sError escribiendo archivo temporal%s\n", Red, NC)
+		os.Exit(1)
+	}
+	tmpFile.Close()
+
+	// Ensure parent directory exists
+	parentDir := filepath.Dir(dest)
+	cmd := exec.Command("sudo", "-S", "mkdir", "-p", parentDir)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Run()
+
+	cmd = exec.Command("sudo", "-S", "install", "-m", "644", tmpPath, dest)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		os.Remove(tmpPath)
+		fmt.Fprintf(os.Stderr, "%sError: no se pudo instalar completado en %s%s\n", Red, dest, NC)
+		os.Exit(1)
+	}
+	os.Remove(tmpPath)
+	WriteLogf("  %s✓ Autocompletado para %s instalado en %s%s\n", Green, shell, dest, NC)
+}
+
 func handleUninstall() {
 	dest := "/usr/local/bin/crush"
 
@@ -597,7 +674,10 @@ func printHelp() {
 	w(Yellow, "  --uninstall")
 	fmt.Print("          Desinstalar crush del sistema\n")
 	w(Yellow, "  --completion")
-	fmt.Print("       Generar script de autocompletado (bash|zsh|fish)\n\n")
+	fmt.Print("       Instalar autocompletado para la shell actual\n")
+	w(Yellow, "  --completion bash|zsh|fish")
+	fmt.Print("\n")
+	fmt.Print("                       Instalar autocompletado para una shell específica\n\n")
 	w(BoldBlue, "Ejemplos:\n")
 	w(Yellow, "  crush -c -f gz documento.txt\n")
 	w(Yellow, "  crush -c -f gz -t documento.txt\n")
@@ -627,8 +707,8 @@ func printHelp() {
 	w(Yellow, "  crush --install\n")
 	w(Yellow, "  crush --install-deps\n")
 	w(Yellow, "  crush --uninstall\n")
-	w(Yellow, "  crush --completion bash > /etc/bash_completion.d/crush\n")
-	fmt.Print("                       # instalar autocompletado bash\n")
+	w(Yellow, "  crush --completion\n")
+	fmt.Print("                       # instalar autocompletado (auto-detectar shell)\n")
 }
 
 // multiFlag implements flag.Value for repeated string flags

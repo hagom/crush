@@ -13,8 +13,8 @@ func TestReorderArgs(t *testing.T) {
 	}{
 		{
 			name: "combined short flags",
-			args: []string{"crush", "-c", "-f", "gz", "file.txt", "-pkv"},
-			want: []string{"crush", "-c", "-f", "gz", "-p", "-k", "-v", "file.txt"},
+			args: []string{"crush", "-c", "-f", "gz", "file.txt", "-tkv"},
+			want: []string{"crush", "-c", "-f", "gz", "-t", "-k", "-v", "file.txt"},
 		},
 		{
 			name: "flags after positional args",
@@ -33,8 +33,8 @@ func TestReorderArgs(t *testing.T) {
 		},
 		{
 			name: "combined with single flag",
-			args: []string{"crush", "-c", "-f", "gz", "file.txt", "-pv"},
-			want: []string{"crush", "-c", "-f", "gz", "-p", "-v", "file.txt"},
+			args: []string{"crush", "-c", "-f", "gz", "file.txt", "-tv"},
+			want: []string{"crush", "-c", "-f", "gz", "-t", "-v", "file.txt"},
 		},
 		{
 			name: "long flags untouched",

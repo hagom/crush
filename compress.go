@@ -17,7 +17,6 @@ type CompressOptions struct {
 	Verbose         bool
 	OutputDir       string
 	SplitSize       int
-	Progress        bool
 	KeepOrig        bool
 	Threads         int
 	Parallel        int
@@ -516,7 +515,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 
 	compressCmd := buildCompressCmd(opts)
 
-	if opts.Progress && hasTool("pv") {
+	if hasTool("pv") {
 		pvArgs := []string{"-f", "-B", "256k"}
 		if opts.TotalSize > 0 {
 			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
@@ -561,7 +560,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		compressCmd = exec.Command("lrzip", args...)
 		pipeCmds := []*exec.Cmd{tarCmd}
-		if opts.Progress && hasTool("pv") {
+		if hasTool("pv") {
 			pvArgs := []string{"-f", "-B", "256k"}
 			if opts.TotalSize > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))

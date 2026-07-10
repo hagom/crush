@@ -15,7 +15,6 @@ type DecompressOptions struct {
 	Verbose   bool
 	OutputDir string
 	KeepOrig  bool
-	Progress  bool
 	Force     bool
 }
 
@@ -164,7 +163,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 
 	WriteLogf("  → %s/\n", dir)
 
-	if opts.Progress && hasTool("pv") {
+	if hasTool("pv") {
 		tarExtract := exec.Command("tar", "-xf", "-", "-C", dir)
 		// Build decompressor pipe: decompress -> pv -> tar -xf -
 		var decompCmd *exec.Cmd
@@ -301,7 +300,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 	case strings.HasSuffix(ext, ".lrz"):
 		outputPath := filepath.Join(dir, strings.TrimSuffix(filepath.Base(file), ".lrz"))
-		if opts.Progress && hasTool("pv") {
+		if hasTool("pv") {
 			pipeFlags := strings.Fields(info.PipeFlags)
 			decompCmd := exec.Command(info.Tool, pipeFlags...)
 			decompCmd.Args = append(decompCmd.Args, "--", file)
@@ -323,7 +322,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	default:
-		if opts.Progress && hasTool("pv") {
+		if hasTool("pv") {
 			pipeFlags := strings.Fields(info.PipeFlags)
 			decompCmd := exec.Command(info.Tool, pipeFlags...)
 			decompCmd.Args = append(decompCmd.Args, "--", file)

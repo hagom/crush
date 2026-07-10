@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// knownShortFlags lists single-dash short flags that can be combined (-ptkv).
+// knownShortFlags lists single-dash short flags that can be combined (-tkv).
 // Only single-character flags that take no argument belong here.
 var knownShortFlags = map[byte]bool{
 	'c': true,
@@ -21,7 +21,6 @@ var knownShortFlags = map[byte]bool{
 	'h': true,
 	'k': true,
 	'v': true,
-	'p': true,
 	'n': true,
 }
 
@@ -39,7 +38,7 @@ func flagTakesValue(a string) bool {
 	}
 }
 
-// reorderArgs expands combined short flags (-ptkv → -p -t -k -v) and moves
+// reorderArgs expands combined short flags (-tkv → -t -k -v) and moves
 // all flags before positional arguments so flag.Parse can see them.
 // Flag-value pairs (-f 7z) are kept together.
 func reorderArgs(args []string) []string {
@@ -56,7 +55,7 @@ func reorderArgs(args []string) []string {
 		}
 		a := args[i]
 		if len(a) > 2 && a[0] == '-' && a[1] != '-' && !flagTakesValue(a) {
-			// Potential combined short flags: -ptkv
+			// Potential combined short flags: -tkv
 			allKnown := true
 			for j := 1; j < len(a); j++ {
 				if !knownShortFlags[a[j]] {
@@ -96,7 +95,7 @@ func main() {
 		}
 	}
 
-	// Reorder args: expand combined short flags (-ptkv → -p -t -k -v)
+	// Reorder args: expand combined short flags (-tkv → -t -k -v)
 	// and move all flags before positional args so flag.Parse catches them
 	os.Args = reorderArgs(os.Args)
 
@@ -132,7 +131,6 @@ func main() {
 	dryRun := flag.Bool("n", false, "Modo simulacro (no ejecutar)")
 	keepOrig := flag.Bool("k", false, "Conservar archivos originales")
 	verbose := flag.Bool("v", false, "Modo verbose")
-	progress := flag.Bool("p", false, "Mostrar barra de progreso")
 	force := flag.Bool("force", false, "Sobrescribir archivos existentes")
 	quick := flag.Bool("quick", false, "Verificación rápida (no verificar cada archivo)")
 	threadCount := flag.Int("T", 0, "Número de hilos (0=auto)")
@@ -336,7 +334,6 @@ func main() {
 			Verbose:         *verbose,
 			OutputDir:       *outputDir,
 			SplitSize:       *splitSize,
-			Progress:        *progress,
 			KeepOrig:        *keepOrig || skipCleanup,
 			Threads:         *threadCount,
 			Parallel:        parallel,
@@ -379,7 +376,6 @@ func main() {
 			Verbose:   *verbose,
 			OutputDir: *outputDir,
 			KeepOrig:  *keepOrig,
-			Progress:  *progress,
 			Force:     *force,
 		}
 		if err := DoDecompress(files, opts); err != nil {
@@ -654,8 +650,6 @@ func printHelp() {
 	fmt.Print("                   Conservar archivos originales\n")
 	w(Yellow, "  -v")
 	fmt.Print("                   Modo verbose\n")
-	w(Yellow, "  -p")
-	fmt.Print("                   Mostrar barra de progreso\n")
 	w(Yellow, "  -force")
 	fmt.Print("               Sobrescribir archivos existentes\n")
 	w(Yellow, "  -quick")

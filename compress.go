@@ -79,6 +79,10 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		outPath = filepath.Join(opts.OutputDir, GetUniqueName(baseName, ext))
 	}
 
+	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
+		return "", fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
+	}
+
 	if opts.DryRun {
 		WriteLogf("%s[Simulacro] Comprimiendo %d archivo(s)%s\n", Blue, len(files), NC)
 		if !singleItem && len(files) > 1 {
@@ -438,6 +442,9 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 
 func compressParallel(files []string, opts CompressOptions) error {
 	ext := opts.Format.String()
+	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
+		return fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
+	}
 	sem := make(chan struct{}, opts.Parallel)
 	errCh := make(chan error, len(files))
 	outFiles := make([]string, 0, len(files))

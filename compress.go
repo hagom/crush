@@ -33,7 +33,6 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		return "", fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
 	}
 
-	// Resolve input items
 	var files []string
 	if opts.FromFile != "" {
 		lines, err := ReadFileLines(opts.FromFile)
@@ -58,7 +57,6 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		return "", fmt.Errorf("No se encontraron archivos válidos")
 	}
 
-	// Handle directory as single item (one .tar.* or .zip etc)
 	singleItem := false
 	if len(files) == 1 {
 		info, err := os.Stat(files[0])
@@ -67,7 +65,6 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		}
 	}
 
-	// Build output path
 	ext := ExtForFormat(opts.Format)
 
 	if singleItem {
@@ -107,7 +104,6 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		return "", nil
 	}
 
-	// Check disk space
 	totalSize := int64(0)
 	for _, f := range files {
 		info, err := os.Stat(f)
@@ -156,7 +152,6 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		return "", err
 	}
 
-	// Check exclude patterns
 	excludeFunc := func(name string) bool {
 		for _, pat := range opts.Exclude {
 			if matched, _ := filepath.Match(pat, filepath.Base(name)); matched {
@@ -184,7 +179,6 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		return "", fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
-	// Parallel compression mode: each file compressed independently
 	if opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 {
 		totalSize = 0
 		for _, f := range filteredFiles {
@@ -227,7 +221,6 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 
 	elapsed := time.Since(startTime)
 
-	// Show results
 	origSize := totalSize
 	finalSize := int64(0)
 	if info, err := os.Stat(outPath); err == nil {
@@ -535,7 +528,6 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		pvCmd = exec.Command("pv", pvArgs...)
 	}
 
-	// Split support
 	if opts.SplitSize > 0 {
 		outPath = outPath + ".part"
 	}
@@ -552,7 +544,6 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		writer = newSplitWriter(outFile, opts.SplitSize, outPath)
 	}
 
-	// Build tar pipe
 	tarArgs := []string{"-cf", "-"}
 	for _, excl := range opts.Exclude {
 		tarArgs = append(tarArgs, "--exclude="+excl)
@@ -701,9 +692,6 @@ func compressRar(files []string, outPath string, opts CompressOptions) error {
 func fastOrSlow(opts CompressOptions, defaultLevel int) int {
 	if strings.Contains(opts.CompressionOpts, "-fast") ||
 		strings.Contains(opts.CompressionOpts, "--fast") {
-		if defaultLevel > 3 {
-			return 1
-		}
 		return 1
 	}
 	return defaultLevel

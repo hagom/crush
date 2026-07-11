@@ -593,20 +593,35 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 }
 
 func compressZip(files []string, outPath string, opts CompressOptions) error {
-	sevenz := sevenzBin()
-	args := []string{"a", "-tzip", "-mx=9", "-mmt=on"}
-	optFlags := strings.Fields(opts.CompressionOpts)
-	args = append(args, optFlags...)
-	args = append(args, outPath)
-	args = append(args, "--")
+	if hasTool(sevenzBin()) {
+		sevenz := sevenzBin()
+		args := []string{"a", "-tzip", "-mx=9", "-mmt=on"}
+		optFlags := strings.Fields(opts.CompressionOpts)
+		args = append(args, optFlags...)
+		args = append(args, outPath)
+		args = append(args, "--")
+		args = append(args, files...)
+
+		cmd := exec.Command(sevenz, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if opts.Verbose {
+			WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
+		}
+
+		return cmd.Run()
+	}
+
+	args := []string{"-r", "-9", outPath}
 	args = append(args, files...)
 
-	cmd := exec.Command(sevenz, args...)
+	cmd := exec.Command("zip", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if opts.Verbose {
-		WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
+		WriteLogf("  $ zip %s\n", strings.Join(args, " "))
 	}
 
 	return cmd.Run()

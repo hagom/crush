@@ -357,9 +357,13 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("zstd", args...)
 	case "lz":
+		tool := "plzip"
+		if !hasTool("plzip") {
+			tool = "lzip"
+		}
 		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "--threads=" + ncpuStr()}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command("plzip", args...)
+		return exec.Command(tool, args...)
 	case "lz4":
 		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 1))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
@@ -368,6 +372,8 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 11))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("brotli", args...)
+	case "lrz":
+		return exec.Command("false")
 	default:
 		return exec.Command("cat")
 	}

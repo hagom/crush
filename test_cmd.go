@@ -129,6 +129,12 @@ func TestFile(file string, opts TestOptions) (string, error) {
 	case strings.HasSuffix(ext, ".rar"):
 		return testWith(file, rarBin(), "t", "--", file)
 
+	case strings.HasSuffix(ext, ".lz4"):
+		return testWith(file, "lz4", "-t", "--", file)
+
+	case strings.HasSuffix(ext, ".br"):
+		return testWith(file, "brotli", "-t", "--", file)
+
 	default:
 		return "", fmt.Errorf("formato no reconocido: %s", file)
 	}

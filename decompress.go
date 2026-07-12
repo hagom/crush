@@ -25,25 +25,8 @@ func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
 	pipeFlags := strings.Fields(info.PipeFlags)
 	decompCmd := exec.Command(info.Tool, pipeFlags...)
 	decompCmd.Stdin = r
-
-	if hasTool("pv") {
-		pipeR, pipeW := io.Pipe()
-		decompCmd.Stdout = pipeW
-		pvCmd := exec.Command("pv", "-f", "-B", "256k")
-		pvCmd.Stdin = pipeR
-		pvCmd.Stdout = w
-
-		if err := decompCmd.Start(); err != nil {
-			return fmt.Errorf("Error iniciando descompresor: %w", err)
-		}
-		if err := pvCmd.Run(); err != nil {
-			return fmt.Errorf("Error en pipeline de descompresión: %w", err)
-		}
-		pipeW.Close()
-		return decompCmd.Wait()
-	}
-
 	decompCmd.Stdout = w
+	decompCmd.Stderr = os.Stderr
 	return decompCmd.Run()
 }
 

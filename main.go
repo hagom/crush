@@ -147,6 +147,12 @@ func main() {
 
 	flag.Parse()
 
+	// Detect stdin pipe mode (needed before -f/-n warnings)
+	stdinIsPipe := false
+	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
+		stdinIsPipe = true
+	}
+
 	if *completionFlag != "" {
 		completionInstall = *completionFlag
 	}
@@ -229,8 +235,8 @@ func main() {
 		}
 	}
 
-	// -f solo tiene sentido con -c
-	if *formatStr != "" && !*compressFlag {
+	// -f solo tiene sentido con -c (excepto en modo pipe stdin)
+	if *formatStr != "" && !*compressFlag && !stdinIsPipe {
 		fmt.Fprintln(os.Stderr, "Warning: -f solo tiene efecto con -c (ignorado)")
 	}
 	// -s solo tiene sentido con -c
@@ -258,12 +264,6 @@ func main() {
 	if *installDepsFlag {
 		handleInstallDeps()
 		return
-	}
-
-	// Detect stdin pipe mode
-	stdinIsPipe := false
-	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
-		stdinIsPipe = true
 	}
 
 	// Get files from args or stdin

@@ -30,27 +30,9 @@ type CompressOptions struct {
 
 func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
 	compressCmd := buildCompressCmd(opts)
-	compressCmd.Stderr = os.Stderr
-
-	if hasTool("pv") {
-		pvCmd := exec.Command("pv", "-f", "-B", "256k")
-		pvCmd.Stdin = r
-		pipeR, pipeW := io.Pipe()
-		pvCmd.Stdout = pipeW
-		compressCmd.Stdin = pipeR
-
-		if err := pvCmd.Start(); err != nil {
-			return fmt.Errorf("Error iniciando pv: %w", err)
-		}
-		compressCmd.Stdout = w
-		compressErr := compressCmd.Run()
-		pvCmd.Wait()
-		pipeW.Close()
-		return compressErr
-	}
-
 	compressCmd.Stdin = r
 	compressCmd.Stdout = w
+	compressCmd.Stderr = os.Stderr
 	return compressCmd.Run()
 }
 

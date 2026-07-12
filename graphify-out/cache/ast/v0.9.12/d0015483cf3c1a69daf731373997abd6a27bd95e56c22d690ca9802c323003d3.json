@@ -1,0 +1,1 @@
+{"nodes": [{"id": "pkg_crush", "label": "crush", "file_type": "code", "type": "package", "ecosystem": "go", "source_file": "go.mod", "source_location": "L1"}], "edges": []}

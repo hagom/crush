@@ -87,6 +87,17 @@ Usar activamente en TODAS las tareas del proyecto, mínimo 2 por interacción. S
 - `codegraph_explore` para entender flujos y relaciones entre símbolos ANTES de grep/read
 - Ejecutar `codegraph init` en el repo si no hay `.codegraph/`
 
+### graphify
+- Grafo de conocimiento del proyecto en `graphify-out/` con 141 nodos, 361 edges, 9 comunidades
+- `graphify query "<pregunta>"` para navegar el grafo (BFS/DFS)
+- `graphify path "NodoA" "NodoB"` para camino más corto entre conceptos
+- `graphify explain "Nodo"` para explicación de un nodo
+- `graphify-out/graph.html` — visualización interactiva (abrir en navegador)
+- `graphify-out/GRAPH_REPORT.md` — reporte completo con god nodes, comunidades y preguntas sugeridas
+- God nodes principales: `WriteLogf()` (21 edges), `DoCompress()` (20), `main()` (18)
+- Las 9 comunidades: Compression Primitives (0.46), Format Parsing (0.42), Tool Detection (0.24), Compression Core (0.23), Package Management (0.22), CLI & Logging (0.20), Decompression Pipeline (0.18), Utilities & Helpers (0.13)
+- Para re-indexar: `python3 -m graphify.cli .` (solo después de cambios grandes en la estructura)
+
 ### context-compress
 - `batch_execute` para ejecutar múltiples comandos y auto-indexar su salida
 - `execute`/`execute_file` con python/shell para análisis de código sin cargarlo al contexto

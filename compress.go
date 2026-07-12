@@ -28,6 +28,32 @@ type CompressOptions struct {
 	SkipCleanup     bool
 }
 
+func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
+	compressCmd := buildCompressCmd(opts)
+	compressCmd.Stderr = os.Stderr
+
+	if hasTool("pv") {
+		pvCmd := exec.Command("pv", "-f", "-B", "256k")
+		pvCmd.Stdin = r
+		pipeR, pipeW := io.Pipe()
+		pvCmd.Stdout = pipeW
+		compressCmd.Stdin = pipeR
+
+		if err := pvCmd.Start(); err != nil {
+			return fmt.Errorf("Error iniciando pv: %w", err)
+		}
+		compressCmd.Stdout = w
+		compressErr := compressCmd.Run()
+		pvCmd.Wait()
+		pipeW.Close()
+		return compressErr
+	}
+
+	compressCmd.Stdin = r
+	compressCmd.Stdout = w
+	return compressCmd.Run()
+}
+
 func DoCompress(items []string, opts CompressOptions) (outPath string, err error) {
 	if len(items) == 0 {
 		return "", fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
@@ -370,7 +396,9 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("brotli", args...)
 	case "lrz":
-		return exec.Command("false")
+		args := []string{"-z", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-o", "-"}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command("lrzip", args...)
 	default:
 		return exec.Command("cat")
 	}
@@ -408,9 +436,37 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 		defer outFile.Close()
 
 		compressCmd := buildCompressCmd(opts)
+		compressCmd.Stderr = os.Stderr
+
+		if hasTool("pv") {
+			pvArgs := []string{"-f", "-B", "256k"}
+			if fi, statErr := os.Stat(file); statErr == nil {
+				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", fi.Size()))
+			}
+			pvCmd := exec.Command("pv", pvArgs...)
+			pvCmd.Stdin = inFile
+
+			r, w := io.Pipe()
+			pvCmd.Stdout = w
+			compressCmd.Stdin = r
+
+			if err := pvCmd.Start(); err != nil {
+				return fmt.Errorf("Error iniciando pv: %w", err)
+			}
+			compressCmd.Stdout = outFile
+
+			if opts.Verbose {
+				WriteLogf("  $ %s | %s %s > %s\n", file, compressCmd.Path, strings.Join(compressCmd.Args[1:], " "), outPath)
+			}
+
+			compressErr := compressCmd.Run()
+			pvCmd.Wait()
+			w.Close()
+			return compressErr
+		}
+
 		compressCmd.Stdin = inFile
 		compressCmd.Stdout = outFile
-		compressCmd.Stderr = os.Stderr
 
 		if opts.Verbose {
 			WriteLogf("  $ %s %s < %s > %s\n", compressCmd.Path, strings.Join(compressCmd.Args[1:], " "), file, outPath)

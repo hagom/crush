@@ -24,6 +24,8 @@ var knownShortFlags = map[byte]bool{
 	'n': true,
 }
 
+var Version = "dev" // set at build time: go build -ldflags="-X main.Version=x.y.z"
+
 // takesValue reports whether a flag token consumes the next argument as its value.
 func flagTakesValue(a string) bool {
 	switch {
@@ -87,10 +89,14 @@ func reorderArgs(args []string) []string {
 }
 
 func main() {
-	// Handle --help / -help before flag.Parse (flag pkg intercepts --help)
+	// Handle --help / -help / --version before flag.Parse
 	for _, arg := range os.Args[1:] {
 		if arg == "--help" || arg == "-help" {
 			printHelp()
+			return
+		}
+		if arg == "--version" || arg == "-version" {
+			fmt.Printf("crush version %s\n", Version)
 			return
 		}
 	}
@@ -231,6 +237,10 @@ func main() {
 	if *splitSize > 0 && !*compressFlag {
 		fmt.Fprintln(os.Stderr, "Warning: -s solo tiene efecto con -c (ignorado)")
 	}
+	// -n solo tiene sentido con -c o -d
+	if *dryRun && !*compressFlag && !*decompressFlag {
+		fmt.Fprintln(os.Stderr, "Warning: -n solo tiene efecto con -c o -d (ignorado)")
+	}
 
 	// Handle --uninstall
 	if *uninstallFlag {
@@ -250,10 +260,18 @@ func main() {
 		return
 	}
 
+	// Detect stdin pipe mode
+	stdinIsPipe := false
+	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
+		stdinIsPipe = true
+	}
+
 	// Get files from args or stdin
 	var files []string
 	if flag.NArg() > 0 {
 		files = flag.Args()
+	} else if stdinIsPipe && (*compressFlag || *decompressFlag) {
+		// Read from stdin pipe
 	} else if *compressFlag || *decompressFlag {
 		fmt.Fprintln(os.Stderr, "Error: debe especificar archivos como argumentos")
 		os.Exit(1)
@@ -310,7 +328,8 @@ func main() {
 	// Handle -c (compress), optionally followed by -t (test)
 	if *compressFlag {
 		if *formatStr == "" {
-			fmt.Fprintf(os.Stderr, "Error: debe especificar formato con -f (ej: -f gz)\n")
+				fmt.Fprintf(os.Stderr, "Error: debe especificar formato con -f\n")
+				fmt.Fprintf(os.Stderr, "Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br\n")
 			printHelp()
 			os.Exit(1)
 		}
@@ -338,10 +357,18 @@ func main() {
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,
 		}
-		outPath, err := DoCompress(files, opts)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		var outPath string
+		if stdinIsPipe {
+			if err := compressStream(os.Stdin, os.Stdout, opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			outPath, err = DoCompress(files, opts)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		if *testFlag && outPath != "" {
 			WriteLogf("\n%sVerificando integridad del archivo comprimido...%s\n", Bold, NC)
@@ -376,9 +403,29 @@ func main() {
 			KeepOrig:  *keepOrig,
 			Force:     *force,
 		}
-		if err := DoDecompress(files, opts); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		if stdinIsPipe {
+			if *formatStr == "" && len(files) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: modo pipe requiere -f FORMATO (ej: -f gz)")
+				os.Exit(1)
+			}
+			if len(files) == 0 {
+				f, _ := ParseFormat(*formatStr)
+				info := FormatInfoFromFormat(f)
+				if err := decompressStream(os.Stdin, os.Stdout, info); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				if err := DoDecompress(files, opts); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			}
+		} else {
+			if err := DoDecompress(files, opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		return
 	}
@@ -692,6 +739,9 @@ func printHelp() {
 	w(Yellow, "  crush --install-deps\n")
 	w(Yellow, "  crush --uninstall\n")
 	w(Yellow, "  crush --completion                                      # instalar autocompletado (auto-detectar shell)\n")
+	w(Yellow, "  cat archivo.txt | crush -c -f gz > archivo.txt.gz       # compresión desde stdin\n")
+	w(Yellow, "  cat archivo.txt.gz | crush -d -f gz > archivo.txt      # descompresión desde stdin\n")
+	w(Yellow, "  crush --version                                         # mostrar versión\n")
 }
 
 // multiFlag implements flag.Value for repeated string flags
@@ -716,7 +766,7 @@ _crush() {
 
     local formats="gz xz bz2 bz3 zst lz lrz zip 7z rar lz4 br tar"
     local short="-c -d -l -t -r -h -v -k -n -f -o -s -force -quick -opts -exclude"
-    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion"
+    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version"
 
     case "${prev}" in
         -f|--format)
@@ -777,6 +827,7 @@ _crush() {
         '--install[Instalar crush + dependencias]' \
         '--install-deps[Instalar solo dependencias]' \
         '--uninstall[Desinstalar crush]' \
+        '--version[Mostrar versión]' \
         '--completion[Generar autocompletado]:shell:(bash zsh fish)' \
         {-f,--format}'[Formato de compresión]:formato:->formats' \
         {-o,--output}'[Directorio de salida]:directorio:_files -/' \
@@ -828,6 +879,7 @@ complete -c crush -s install -l install -d "Instalar crush + dependencias"
 complete -c crush -s install-deps -l install-deps -d "Instalar solo dependencias"
 complete -c crush -s uninstall -l uninstall -d "Desinstalar crush"
 complete -c crush -s completion -l completion -d "Generar autocompletado" -xa "bash zsh fish"
+complete -c crush -s version -l version -d "Mostrar versión"
 
 # Positional args: files
 complete -c crush -f -a "(__fish_complete_files)"

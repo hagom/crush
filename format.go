@@ -76,6 +76,31 @@ func ParseFormat(s string) (Format, error) {
 	return 0, fmt.Errorf("formato no soportado: %s", s)
 }
 
+func FormatInfoFromFormat(f Format) FormatInfo {
+	switch f {
+	case Gz:
+		return FormatInfo{Tool: "pigz", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+	case Xz:
+		return FormatInfo{Tool: "xz", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
+	case Bz2:
+		return FormatInfo{Tool: bzip2Bin(), PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+	case Bz3:
+		return FormatInfo{Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -kj " + ncpuStr(), IsTar: false, TestFlag: "-t"}
+	case Zst:
+		return FormatInfo{Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
+	case Lz:
+		return FormatInfo{Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: false, TestFlag: "-t"}
+	case Lrz:
+		return FormatInfo{Tool: "lrzip", PipeFlags: "-d -k -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
+	case Lz4:
+		return FormatInfo{Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+	case Br:
+		return FormatInfo{Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+	default:
+		return FormatInfo{}
+	}
+}
+
 func DetectFormat(filename string) (FormatInfo, error) {
 	ext := strings.ToLower(filename)
 

@@ -18,6 +18,35 @@ type DecompressOptions struct {
 	Force     bool
 }
 
+func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
+	if info.Tool == "" {
+		return fmt.Errorf("formato no soportado para pipe")
+	}
+	pipeFlags := strings.Fields(info.PipeFlags)
+	decompCmd := exec.Command(info.Tool, pipeFlags...)
+	decompCmd.Stdin = r
+
+	if hasTool("pv") {
+		pipeR, pipeW := io.Pipe()
+		decompCmd.Stdout = pipeW
+		pvCmd := exec.Command("pv", "-f", "-B", "256k")
+		pvCmd.Stdin = pipeR
+		pvCmd.Stdout = w
+
+		if err := decompCmd.Start(); err != nil {
+			return fmt.Errorf("Error iniciando descompresor: %w", err)
+		}
+		if err := pvCmd.Run(); err != nil {
+			return fmt.Errorf("Error en pipeline de descompresión: %w", err)
+		}
+		pipeW.Close()
+		return decompCmd.Wait()
+	}
+
+	decompCmd.Stdout = w
+	return decompCmd.Run()
+}
+
 func DoDecompress(files []string, opts DecompressOptions) error {
 	if len(files) == 0 {
 		return fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
@@ -184,7 +213,11 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		case strings.HasSuffix(ext, ".tar.zst") || strings.HasSuffix(ext, ".tzst"):
 			decompCmd = exec.Command("zstd", "-dc", "-T0", "--", file)
 		case strings.HasSuffix(ext, ".tar.lz") || strings.HasSuffix(ext, ".tlz"):
-			decompCmd = exec.Command("plzip", "-dc", "--threads="+ncpuStr(), "--", file)
+			if hasTool("plzip") {
+				decompCmd = exec.Command("plzip", "-dc", "--threads="+ncpuStr(), "--", file)
+			} else {
+				decompCmd = exec.Command("lzip", "-dc", "--", file)
+			}
 		case strings.HasSuffix(ext, ".tar.lrz"):
 			decompCmd = exec.Command("lrzip", "-d", "-p", ncpuStr(), "-o", "-", "--", file)
 		case strings.HasSuffix(ext, ".tar.lz4"):

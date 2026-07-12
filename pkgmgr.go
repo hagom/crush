@@ -309,6 +309,8 @@ func CompressRead(f *os.File) ([]byte, error) {
 		cmd = exec.Command("lz4", "-dc", "--", f.Name())
 	case strings.HasSuffix(info.Name(), ".br"):
 		cmd = exec.Command("brotli", "-dc", "--", f.Name())
+	case strings.HasSuffix(info.Name(), ".lrz"):
+		cmd = exec.Command("lrzip", "-d", "-k", "-p", ncpuStr(), "-o", "-", "--", f.Name())
 	case strings.HasSuffix(info.Name(), ".zip"):
 		cmd = exec.Command("unzip", "-p", "--", f.Name())
 	case strings.HasSuffix(info.Name(), ".7z"):
@@ -353,6 +355,10 @@ func ListCompressed(f *os.File) error {
 		cmd = exec.Command("tar", "--lzip", "-tf", fpath)
 	case strings.HasSuffix(name, ".tar.lrz"):
 		cmd = exec.Command("tar", "-I", "lrzip -d -p 1 -o -", "-tf", fpath)
+	case strings.HasSuffix(name, ".tar.lz4"):
+		cmd = exec.Command("tar", "-I", "lz4 -dc", "-tf", fpath)
+	case strings.HasSuffix(name, ".tar.br"):
+		cmd = exec.Command("tar", "-I", "brotli -dc", "-tf", fpath)
 	case strings.HasSuffix(name, ".tar"):
 		cmd = exec.Command("tar", "-tf", fpath)
 	case strings.HasSuffix(name, ".gz"):

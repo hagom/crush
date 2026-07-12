@@ -96,6 +96,12 @@ func TestFile(file string, opts TestOptions) (string, error) {
 	case strings.HasSuffix(ext, ".tar.lrz"):
 		return testWith(file, "lrzip", "-t", "-p", ncpuStr(), "--", file)
 
+	case strings.HasSuffix(ext, ".tar.lz4"):
+		return testWith(file, "lz4", "-t", "--", file)
+
+	case strings.HasSuffix(ext, ".tar.br"):
+		return testWith(file, "brotli", "-t", "--", file)
+
 	case strings.HasSuffix(ext, ".tar"):
 		return testWith(file, "tar", "-tf", "--", file)
 

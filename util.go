@@ -366,7 +366,14 @@ func EstimateUncompressedSize(file string) int64 {
 
 // --- Filename ---
 
+var (
+	uniqueNameMu sync.Mutex
+)
+
 func GetUniqueName(base, ext string) string {
+	uniqueNameMu.Lock()
+	defer uniqueNameMu.Unlock()
+
 	if strings.HasSuffix(base, "."+ext) {
 		base = strings.TrimSuffix(base, "."+ext)
 	}

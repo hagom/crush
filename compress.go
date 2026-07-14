@@ -257,7 +257,6 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 
 var CompressCleanupFiles []string
 
-
 func compressModeDesc(f Format) string {
 	switch f {
 	case Gz:

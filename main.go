@@ -328,8 +328,8 @@ func main() {
 	// Handle -c (compress), optionally followed by -t (test)
 	if *compressFlag {
 		if *formatStr == "" {
-				fmt.Fprintf(os.Stderr, "Error: debe especificar formato con -f\n")
-				fmt.Fprintf(os.Stderr, "Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br\n")
+			fmt.Fprintf(os.Stderr, "Error: debe especificar formato con -f\n")
+			fmt.Fprintf(os.Stderr, "Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br\n")
 			printHelp()
 			os.Exit(1)
 		}
@@ -409,7 +409,11 @@ func main() {
 				os.Exit(1)
 			}
 			if len(files) == 0 {
-				f, _ := ParseFormat(*formatStr)
+				f, err := ParseFormat(*formatStr)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
 				info := FormatInfoFromFormat(f)
 				if err := decompressStream(os.Stdin, os.Stdout, info); err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)

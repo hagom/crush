@@ -69,3 +69,41 @@ func TestFastOrSlow(t *testing.T) {
 		t.Errorf("fastOrSlow with opts = %d, want 6", lvl)
 	}
 }
+
+func TestCompressParallel(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	f2 := filepath.Join(tmpDir, "file2.txt")
+	if err := os.WriteFile(f1, []byte("contenido uno"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("contenido dos"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		Parallel:  2,
+		KeepOrig:  true, // no borrar originales en test
+	}
+
+	outPaths, err := DoCompress([]string{f1, f2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress en paralelo falló: %v", err)
+	}
+
+	if len(outPaths) != 2 {
+		t.Errorf("Esperaba 2 archivos de salida, obtuvo %d: %v", len(outPaths), outPaths)
+	}
+
+	for _, path := range outPaths {
+		if filepath.Ext(path) != ".gz" {
+			t.Errorf("Extensión incorrecta para %s, esperaba .gz", path)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("El archivo de salida %s no existe: %v", path, err)
+		}
+	}
+}
+

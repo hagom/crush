@@ -357,22 +357,22 @@ func main() {
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,
 		}
-		var outPath string
+		var outPaths []string
 		if stdinIsPipe {
 			if err := compressStream(os.Stdin, os.Stdout, opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 		} else {
-			outPath, err = DoCompress(files, opts)
+			outPaths, err = DoCompress(files, opts)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 		}
-		if *testFlag && outPath != "" {
+		if *testFlag && len(outPaths) > 0 {
 			WriteLogf("\n%sVerificando integridad del archivo comprimido...%s\n", Bold, NC)
-			if err := DoTest([]string{outPath}, TestOptions{Verbose: *verbose, Quick: *quick}); err != nil {
+			if err := DoTest(outPaths, TestOptions{Verbose: *verbose, Quick: *quick}); err != nil {
 				os.Exit(1)
 			}
 			// Test passed — now delete originals if user didn't request -k

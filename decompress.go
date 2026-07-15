@@ -90,6 +90,12 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 }
 
 func decompressFile(file string, opts DecompressOptions) error {
+	absFile, err := filepath.Abs(file)
+	if err != nil {
+		return fmt.Errorf("error obteniendo ruta absoluta de %s: %w", file, err)
+	}
+	file = absFile
+
 	info, err := DetectFormat(file)
 	if err != nil {
 		return err

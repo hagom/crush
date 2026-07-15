@@ -36,16 +36,17 @@ func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
 	return compressCmd.Run()
 }
 
-func DoCompress(items []string, opts CompressOptions) (outPath string, err error) {
+func DoCompress(items []string, opts CompressOptions) (outPaths []string, err error) {
+	var outPath string
 	if len(items) == 0 {
-		return "", fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
+		return nil, fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
 	}
 
 	var files []string
 	if opts.FromFile != "" {
 		lines, err := ReadFileLines(opts.FromFile)
 		if err != nil {
-			return "", fmt.Errorf("Error leyendo archivo de lista: %w", err)
+			return nil, fmt.Errorf("Error leyendo archivo de lista: %w", err)
 		}
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
@@ -62,7 +63,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 	}
 
 	if len(files) == 0 {
-		return "", fmt.Errorf("No se encontraron archivos válidos")
+		return nil, fmt.Errorf("No se encontraron archivos válidos")
 	}
 
 	singleItem := false
@@ -85,7 +86,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 	}
 
 	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
-		return "", fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
+		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
 	}
 
 	if opts.DryRun {
@@ -109,7 +110,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 				WriteLogf("%s[Simulacro] Formato: %s%s\n", Blue, ext, NC)
 			}
 		}
-		return "", nil
+		return nil, nil
 	}
 
 	totalSize := int64(0)
@@ -157,7 +158,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 	}
 
 	if err := CheckDiskSpace(estimated, opts.OutputDir); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	excludeFunc := func(name string) bool {
@@ -184,7 +185,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 	}
 
 	if len(filteredFiles) == 0 {
-		return "", fmt.Errorf("Todos los archivos fueron excluidos")
+		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
 	if opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 {
@@ -206,8 +207,8 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 		WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
 		WriteLogf("\n")
 
-		err = compressParallel(filteredFiles, opts)
-		return "", err
+		outPaths, err = compressParallel(filteredFiles, opts)
+		return outPaths, err
 	}
 
 	startTime := time.Now()
@@ -224,7 +225,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 	opts.TotalSize = totalSize
 	err = compressItems(filteredFiles, outPath, opts)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	elapsed := time.Since(startTime)
@@ -252,7 +253,7 @@ func DoCompress(items []string, opts CompressOptions) (outPath string, err error
 			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
 		}
 	}
-	return outPath, nil
+	return []string{outPath}, nil
 }
 
 var CompressCleanupFiles []string
@@ -427,14 +428,16 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 			pvCmd := exec.Command("pv", pvArgs...)
 			pvCmd.Stdin = inFile
 
-			r, w := io.Pipe()
-			pvCmd.Stdout = w
-			compressCmd.Stdin = r
+			var err error
+			compressCmd.Stdin, err = pvCmd.StdoutPipe()
+			if err != nil {
+				return fmt.Errorf("Error creando pipe para pv: %w", err)
+			}
+			compressCmd.Stdout = outFile
 
 			if err := pvCmd.Start(); err != nil {
 				return fmt.Errorf("Error iniciando pv: %w", err)
 			}
-			compressCmd.Stdout = outFile
 
 			if opts.Verbose {
 				WriteLogf("  $ %s | %s %s > %s\n", file, compressCmd.Path, strings.Join(compressCmd.Args[1:], " "), outPath)
@@ -442,7 +445,6 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 
 			compressErr := compressCmd.Run()
 			pvCmd.Wait()
-			w.Close()
 			return compressErr
 		}
 
@@ -470,10 +472,10 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 	}
 }
 
-func compressParallel(files []string, opts CompressOptions) error {
+func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	ext := opts.Format.String()
 	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
-		return fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
+		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
 	}
 	sem := make(chan struct{}, opts.Parallel)
 	errCh := make(chan error, len(files))
@@ -537,7 +539,7 @@ func compressParallel(files []string, opts CompressOptions) error {
 	WriteLogf("%s=============================%s\n", Green, NC)
 
 	if len(errors) > 0 {
-		return fmt.Errorf("%d error(es) en compresión paralela", len(errors))
+		return outFiles, fmt.Errorf("%d error(es) en compresión paralela", len(errors))
 	}
 
 	CompressCleanupFiles = files
@@ -548,7 +550,7 @@ func compressParallel(files []string, opts CompressOptions) error {
 		}
 	}
 
-	return nil
+	return outFiles, nil
 }
 
 func compressTarPipe(files []string, outPath string, opts CompressOptions) error {

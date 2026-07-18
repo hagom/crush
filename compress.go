@@ -310,12 +310,13 @@ func expandGlobs(items []string) []string {
 	return result
 }
 
-func compressItems(files []string, outPath string, opts CompressOptions) error {
-	isTarBased := opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
-		opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
-		opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br
+func isTarBased(f Format) bool {
+	return f == Gz || f == Xz || f == Bz2 || f == Bz3 || f == Zst ||
+		f == Lz || f == Lrz || f == Lz4 || f == Br
+}
 
-	if isTarBased {
+func compressItems(files []string, outPath string, opts CompressOptions) error {
+	if isTarBased(opts.Format) {
 		return compressTarPipe(files, outPath, opts)
 	}
 
@@ -387,11 +388,7 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 }
 
 func compressSingleFile(file, outPath string, opts CompressOptions) error {
-	isTarBased := opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
-		opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
-		opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br
-
-	if isTarBased {
+	if isTarBased(opts.Format) {
 		ext := opts.Format.String()
 		if ext == "lrz" {
 			args := []string{"-f", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath, file}

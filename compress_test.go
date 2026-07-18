@@ -106,4 +106,3 @@ func TestCompressParallel(t *testing.T) {
 		}
 	}
 }
-

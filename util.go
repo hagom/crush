@@ -90,12 +90,10 @@ func NCPU() int {
 
 func bzip2Bin() string {
 	bzip2Once.Do(func() {
-		if lookupPath("lbzip2") {
+		if hasTool("lbzip2") {
 			bzip2Cache = "lbzip2"
-		} else if lookupPath("pbzip2") {
+		} else if hasTool("pbzip2") {
 			bzip2Cache = "pbzip2"
-		} else if lookupPath("bzip2") {
-			bzip2Cache = "bzip2"
 		} else {
 			bzip2Cache = "bzip2"
 		}
@@ -105,11 +103,11 @@ func bzip2Bin() string {
 
 func sevenzBin() string {
 	sevenzOnce.Do(func() {
-		if lookupPath("7zz") {
+		if hasTool("7zz") {
 			sevenzCache = "7zz"
-		} else if lookupPath("7z") {
+		} else if hasTool("7z") {
 			sevenzCache = "7z"
-		} else if lookupPath("7za") {
+		} else if hasTool("7za") {
 			sevenzCache = "7za"
 		} else {
 			sevenzCache = "7z"
@@ -120,20 +118,15 @@ func sevenzBin() string {
 
 func rarBin() string {
 	rarOnce.Do(func() {
-		if lookupPath("rar") {
+		if hasTool("rar") {
 			rarCache = "rar"
-		} else if lookupPath("unrar") {
+		} else if hasTool("unrar") {
 			rarCache = "unrar"
 		} else {
 			rarCache = "rar"
 		}
 	})
 	return rarCache
-}
-
-func lookupPath(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
 }
 
 // --- Memory ---

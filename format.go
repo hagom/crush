@@ -101,57 +101,57 @@ func FormatInfoFromFormat(f Format) FormatInfo {
 	}
 }
 
-func DetectFormat(filename string) (FormatInfo, error) {
-	ext := strings.ToLower(filename)
+var knownTarSuffixes = []struct {
+	suffix string
+	format Format
+}{
+	{".tar.gz", Gz}, {".tgz", Gz},
+	{".tar.xz", Xz}, {".txz", Xz},
+	{".tar.bz2", Bz2}, {".tbz2", Bz2},
+	{".tar.bz3", Bz3},
+	{".tar.zst", Zst}, {".tzst", Zst},
+	{".tar.lz", Lz}, {".tlz", Lz},
+	{".tar.lrz", Lrz}, {".tar.lz4", Lz4}, {".tar.br", Br},
+}
 
-	var info FormatInfo
-	switch {
-	case strings.HasSuffix(ext, ".tar.gz") || strings.HasSuffix(ext, ".tgz"):
-		info = FormatInfo{Tool: "pigz", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar.xz") || strings.HasSuffix(ext, ".txz"):
-		info = FormatInfo{Tool: "xz", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar.bz2") || strings.HasSuffix(ext, ".tbz2"):
-		info = FormatInfo{Tool: bzip2Bin(), PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar.bz3"):
-		info = FormatInfo{Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -kj " + ncpuStr(), IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar.zst") || strings.HasSuffix(ext, ".tzst"):
-		info = FormatInfo{Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar.lz") || strings.HasSuffix(ext, ".tlz"):
-		info = FormatInfo{Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar.lrz"):
-		info = FormatInfo{Tool: "lrzip", PipeFlags: "-d -k -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar.lz4"):
-		info = FormatInfo{Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar.br"):
-		info = FormatInfo{Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: true, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".lrz"):
-		info = FormatInfo{Tool: "lrzip", PipeFlags: "-d -k -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".lz4"):
-		info = FormatInfo{Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".zst"):
-		info = FormatInfo{Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".xz"):
-		info = FormatInfo{Tool: "xz", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".gz"):
-		info = FormatInfo{Tool: "pigz", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".bz2"):
-		info = FormatInfo{Tool: bzip2Bin(), PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".bz3"):
-		info = FormatInfo{Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -kj " + ncpuStr(), IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".lz"):
-		info = FormatInfo{Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".zip"):
-		info = FormatInfo{Tool: "unzip", PipeFlags: "-o", DirectFlags: "-o", IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".7z"):
-		info = FormatInfo{Tool: sevenzBin(), PipeFlags: "x -mmt=on", DirectFlags: "x -mmt=on", IsTar: false, TestFlag: "t"}
-	case strings.HasSuffix(ext, ".rar"):
-		info = FormatInfo{Tool: rarBin(), PipeFlags: "x -mt" + ncpuStr(), DirectFlags: "x -mt" + ncpuStr(), IsTar: false, TestFlag: "t"}
-	case strings.HasSuffix(ext, ".br"):
-		info = FormatInfo{Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
-	case strings.HasSuffix(ext, ".tar"):
-		info = FormatInfo{Tool: "tar", PipeFlags: "-xf", DirectFlags: "-xf", IsTar: false, TestFlag: "-tf"}
-	default:
-		return info, fmt.Errorf("formato no reconocido: %s", filename)
+func ParseFormatFromExt(filename string) (Format, bool) {
+	lower := strings.ToLower(filename)
+	for _, entry := range knownTarSuffixes {
+		if strings.HasSuffix(lower, entry.suffix) {
+			return entry.format, true
+		}
 	}
-	return info, nil
+	ext := lower[strings.LastIndex(lower, ".")+1:]
+	f, err := ParseFormat(ext)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
+func DetectFormat(filename string) (FormatInfo, error) {
+	ext, ok := ParseFormatFromExt(filename)
+	if !ok {
+		return FormatInfo{}, fmt.Errorf("formato no reconocido: %s", filename)
+	}
+	fi := FormatInfoFromFormat(ext)
+	lower := strings.ToLower(filename)
+	fi.IsTar = strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") ||
+		strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".txz") ||
+		strings.HasSuffix(lower, ".tar.bz2") || strings.HasSuffix(lower, ".tbz2") ||
+		strings.HasSuffix(lower, ".tar.bz3") || strings.HasSuffix(lower, ".tar.zst") ||
+		strings.HasSuffix(lower, ".tzst") || strings.HasSuffix(lower, ".tar.lz") ||
+		strings.HasSuffix(lower, ".tlz") || strings.HasSuffix(lower, ".tar.lrz") ||
+		strings.HasSuffix(lower, ".tar.lz4") || strings.HasSuffix(lower, ".tar.br")
+	switch ext {
+	case Zip:
+		fi = FormatInfo{Tool: "unzip", PipeFlags: "-o", DirectFlags: "-o", TestFlag: "-t"}
+	case SevenZ:
+		fi = FormatInfo{Tool: sevenzBin(), PipeFlags: "x -mmt=on", DirectFlags: "x -mmt=on", TestFlag: "t"}
+	case Rar:
+		fi = FormatInfo{Tool: rarBin(), PipeFlags: "x -mt" + ncpuStr(), DirectFlags: "x -mt" + ncpuStr(), TestFlag: "t"}
+	case Tar:
+		fi = FormatInfo{Tool: "tar", PipeFlags: "-xf", DirectFlags: "-xf", TestFlag: "-tf"}
+	}
+	return fi, nil
 }

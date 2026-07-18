@@ -148,23 +148,15 @@ func isToolInstalled(mgr *PkgManager, pkg string) bool {
 		return false
 	}
 	fields := strings.Fields(mgr.Query)
-	switch mgr.Name {
-	case "apt-get":
+	if mgr.Name == "apt-get" {
 		raw, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
 		if err != nil {
 			return false
 		}
 		return strings.Contains(raw, "install ok installed")
-	case "pacman":
-		_, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
-		return err == nil
-	case "apk":
-		_, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
-		return err == nil
-	default:
-		_, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
-		return err == nil
 	}
+	_, err := runCmdWithOutput(fields[0], append(fields[1:], pkg)...)
+	return err == nil
 }
 
 func contains(list []string, item string) bool {

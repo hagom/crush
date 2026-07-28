@@ -112,6 +112,12 @@ func decompressFile(file string, opts DecompressOptions) error {
 		return fmt.Errorf("Error creando directorio de salida: %w", err)
 	}
 
+	if needed := EstimateUncompressedSize(file); needed > 0 {
+		if err := CheckDiskSpace(needed*110/100, dir); err != nil {
+			return err
+		}
+	}
+
 	if info.IsTar {
 		err = decompressTar(file, dir, info, opts)
 	} else {
@@ -162,18 +168,10 @@ func getDirSize(dir string) int64 {
 
 func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions) error {
 	if info.Tool == "" {
-		return fmt.Errorf("No se detectó herramienta para: %s", file)
-	}
-
-	// Check disk space first
-	needed := EstimateUncompressedSize(file)
-	if needed > 0 {
-		if err := CheckDiskSpace(needed*110/100, dir); err != nil {
-			return err
+			return fmt.Errorf("No se detectó herramienta para: %s", file)
 		}
-	}
 
-	WriteLogf("  → %s/\n", dir)
+		WriteLogf("  → %s/\n", dir)
 
 	if hasTool("pv") {
 		tarExtract := exec.Command("tar", "-xf", "-", "-C", dir)
@@ -212,8 +210,8 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		}
 
 		pvArgs := []string{"-f", "-B", "256k"}
-		if needed > 0 {
-			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", needed))
+		if size := EstimateUncompressedSize(file); size > 0 {
+			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
 		}
 		pvCmd := exec.Command("pv", pvArgs...)
 

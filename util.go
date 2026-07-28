@@ -229,11 +229,12 @@ func GetAvailBytes(dir string) int64 {
 	return 0
 }
 
-func CheckDiskSpace(needed int64, dir string) error {
+func CheckDiskSpace(needed int64, dir string, op string) error {
 	avail := GetAvailBytes(dir)
 	if avail < needed {
-		return fmt.Errorf("Espacio insuficiente. Necesario: %s, Disponible: %s",
-			FormatSize(needed), FormatSize(avail))
+		delta := needed - avail
+		return fmt.Errorf("Espacio insuficiente para %s: libera %s. Necesario: %s, Disponible: %s",
+			op, FormatSize(delta), FormatSize(needed), FormatSize(avail))
 	}
 	return nil
 }

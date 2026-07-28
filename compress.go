@@ -157,7 +157,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		estimated = 1 << 20 // at least 1MB
 	}
 
-	if err := CheckDiskSpace(estimated, opts.OutputDir); err != nil {
+	if err := CheckDiskSpace(estimated, opts.OutputDir, "comprimir"); err != nil {
 		return nil, err
 	}
 

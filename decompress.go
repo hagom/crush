@@ -113,7 +113,7 @@ func decompressFile(file string, opts DecompressOptions) error {
 	}
 
 	if needed := EstimateUncompressedSize(file); needed > 0 {
-		if err := CheckDiskSpace(needed*110/100, dir); err != nil {
+		if err := CheckDiskSpace(needed*110/100, dir, "descomprimir"); err != nil {
 			return err
 		}
 	}

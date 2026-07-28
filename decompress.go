@@ -112,7 +112,8 @@ func decompressFile(file string, opts DecompressOptions) error {
 		return fmt.Errorf("Error creando directorio de salida: %w", err)
 	}
 
-	if needed := EstimateUncompressedSize(file); needed > 0 {
+	needed := EstimateUncompressedSize(file)
+	if needed > 0 {
 		if err := CheckDiskSpace(needed*110/100, dir, "descomprimir"); err != nil {
 			return err
 		}
@@ -135,7 +136,12 @@ func decompressFile(file string, opts DecompressOptions) error {
 		compressedSize = fi.Size()
 	}
 
-	uncompressedSize := getDirSize(dir)
+	uncompressedSize := needed
+	if uncompressedSize == 0 {
+		if fi, err := os.Stat(file); err == nil {
+			uncompressedSize = fi.Size() * 4
+		}
+	}
 
 	if !opts.KeepOrig {
 		if err := os.Remove(file); err != nil {
@@ -152,18 +158,6 @@ func decompressFile(file string, opts DecompressOptions) error {
 	WriteLogf("%s=============================%s\n", Green, NC)
 
 	return nil
-}
-
-func getDirSize(dir string) int64 {
-	var total int64
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		total += info.Size()
-		return nil
-	})
-	return total
 }
 
 func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions) error {

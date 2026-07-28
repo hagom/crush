@@ -66,13 +66,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, fmt.Errorf("No se encontraron archivos válidos")
 	}
 
-	singleItem := false
-	if len(files) == 1 {
-		info, err := os.Stat(files[0])
-		if err == nil && info.IsDir() {
-			singleItem = true
-		}
-	}
+	singleItem := len(files) == 1
 
 	ext := ExtForFormat(opts.Format)
 

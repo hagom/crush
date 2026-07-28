@@ -288,16 +288,19 @@ func EstimateUncompressedSize(file string) int64 {
 
 	case strings.HasSuffix(f, ".zip"):
 		cmd := exec.Command("unzip", "-l", "--", file)
-		out, _ := cmd.Output()
-		lines := strings.Split(string(out), "\n")
-		if len(lines) >= 3 {
-			fields := strings.Fields(lines[len(lines)-1])
-			if len(fields) >= 1 {
-				if size, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
-					return size
+			out, _ := cmd.Output()
+			lines := strings.Split(string(out), "\n")
+			for len(lines) > 0 && lines[len(lines)-1] == "" {
+				lines = lines[:len(lines)-1]
+			}
+			if len(lines) >= 3 {
+				fields := strings.Fields(lines[len(lines)-1])
+				if len(fields) >= 1 {
+					if size, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
+						return size
+					}
 				}
 			}
-		}
 
 	case strings.HasSuffix(f, ".7z"):
 		cmd := exec.Command(sevenzBin(), "l", "-slt", "--", file)

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type TestOptions struct {
@@ -18,8 +19,7 @@ func DoTest(files []string, opts TestOptions) error {
 		return fmt.Errorf("No se especificaron archivos para verificar")
 	}
 
-	var successes, failures, warnings int
-
+	var allFiles []string
 	for _, pattern := range files {
 		matches, err := filepath.Glob(pattern)
 		if err != nil || len(matches) == 0 {
@@ -27,35 +27,63 @@ func DoTest(files []string, opts TestOptions) error {
 				matches = []string{pattern}
 			} else {
 				WriteLogf("%s✗ No encontrado: %s%s\n", Red, pattern, NC)
-				failures++
 				continue
 			}
 		}
-
-		for _, file := range matches {
-			info, err := os.Stat(file)
+		for _, m := range matches {
+			info, err := os.Stat(m)
 			if err != nil {
 				WriteLogf("%s✗ Error: %s%s\n", Red, err, NC)
-				failures++
 				continue
 			}
 			if info.IsDir() {
-				WriteLogf("%s✗ Es un directorio: %s%s\n", Red, file, NC)
-				failures++
+				WriteLogf("%s✗ Es un directorio: %s%s\n", Red, m, NC)
 				continue
 			}
+			allFiles = append(allFiles, m)
+		}
+	}
 
-			result, err := TestFile(file, opts)
-			if err != nil {
-				WriteLogf("%s✗ %s: %s%s\n", Red, file, err, NC)
-				failures++
-			} else if result == "OK" {
-				WriteLogf("%s✓ %s%s\n", Green, file, NC)
-				successes++
-			} else if result == "WARNING" {
-				WriteLogf("%s⚠ %s%s\n", Yellow, file, NC)
-				warnings++
-			}
+	if len(allFiles) == 0 {
+		return fmt.Errorf("No hay archivos válidos para verificar")
+	}
+
+	type testResult struct {
+		file   string
+		status string
+		err    error
+	}
+
+	sem := make(chan struct{}, NCPU())
+	resultCh := make(chan testResult, len(allFiles))
+	var wg sync.WaitGroup
+
+	for _, f := range allFiles {
+		wg.Add(1)
+		go func(file string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			status, err := TestFile(file, opts)
+			resultCh <- testResult{file, status, err}
+		}(f)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	var successes, failures, warnings int
+	for r := range resultCh {
+		switch {
+		case r.err != nil:
+			WriteLogf("%s✗ %s: %s%s\n", Red, r.file, r.err, NC)
+			failures++
+		case r.status == "OK":
+			WriteLogf("%s✓ %s%s\n", Green, r.file, NC)
+			successes++
+		case r.status == "WARNING":
+			WriteLogf("%s⚠ %s%s\n", Yellow, r.file, NC)
+			warnings++
 		}
 	}
 

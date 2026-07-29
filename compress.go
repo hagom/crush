@@ -35,7 +35,7 @@ func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
 	compressCmd := buildCompressCmd(opts)
 	compressCmd.Stdin = r
 	compressCmd.Stdout = w
-	compressCmd.Stderr = os.Stderr
+	compressCmd.Stderr = stderrFor(opts.Progress)
 	return compressCmd.Run()
 }
 
@@ -408,7 +408,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 			args = append(args, strings.Fields(opts.CompressionOpts)...)
 			cmd := exec.Command("lrzip", args...)
 			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
+			cmd.Stderr = stderrFor(opts.Progress)
 			if opts.Verbose {
 				WriteLogf("  $ lrzip %s\n", strings.Join(args, " "))
 			}
@@ -432,7 +432,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 		defer outFile.Close()
 
 		compressCmd := buildCompressCmd(opts)
-		compressCmd.Stderr = os.Stderr
+		compressCmd.Stderr = stderrFor(opts.Progress)
 
 		if opts.Progress == nil && hasTool("pv") {
 			pvArgs := []string{"-f", "-B", "256k"}
@@ -679,7 +679,7 @@ func compressZip(files []string, outPath string, opts CompressOptions) error {
 
 		cmd := exec.Command(sevenz, args...)
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFor(opts.Progress)
 
 		if opts.Verbose {
 			WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
@@ -697,7 +697,7 @@ func compressZip(files []string, outPath string, opts CompressOptions) error {
 
 	cmd := exec.Command("zip", args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderrFor(opts.Progress)
 
 	if opts.Verbose {
 		WriteLogf("  $ zip %s\n", strings.Join(args, " "))
@@ -722,7 +722,7 @@ func compress7z(files []string, outPath string, opts CompressOptions) error {
 
 	cmd := exec.Command(sevenz, args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderrFor(opts.Progress)
 
 	if opts.Verbose {
 		WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
@@ -746,7 +746,7 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions) erro
 
 	cmd := exec.Command("tar", args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderrFor(opts.Progress)
 
 	if opts.Verbose {
 		WriteLogf("  $ tar %s\n", strings.Join(args, " "))
@@ -773,7 +773,7 @@ func compressRar(files []string, outPath string, opts CompressOptions) error {
 
 	cmd := exec.Command(rar, args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderrFor(opts.Progress)
 
 	if opts.Verbose {
 		WriteLogf("  $ %s %s\n", rar, strings.Join(args, " "))

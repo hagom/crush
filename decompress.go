@@ -289,7 +289,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		cmd := exec.Command(info.Tool, args...)
 		cmd.Dir = dir
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFor(opts.Progress)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 		}
@@ -301,7 +301,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			if _, err := os.Stat(tarName); err == nil {
 				extractCmd := exec.Command("tar", "-xf", tarName, "-C", dir)
 				extractCmd.Stdout = os.Stdout
-				extractCmd.Stderr = os.Stderr
+				extractCmd.Stderr = stderrFor(opts.Progress)
 				if err := extractCmd.Run(); err != nil {
 					os.Remove(tarName)
 					return fmt.Errorf("Error extrayendo tar de %s: %w", tarName, err)
@@ -334,7 +334,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			args = append(args, fmt.Sprintf("-o%s", dir))
 			cmd := exec.Command(sevenz, args...)
 			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
+			cmd.Stderr = stderrFor(opts.Progress)
 			return cmd.Run()
 		}
 		args := []string{}
@@ -347,7 +347,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		args = append(args, file, dirFlag, dir)
 		cmd := exec.Command("unzip", args...)
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".7z"):
@@ -357,7 +357,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		}
 		cmd := exec.Command(info.Tool, args...)
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".rar"):
@@ -367,13 +367,13 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		}
 		cmd := exec.Command(info.Tool, args...)
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".tar"):
 		cmd := exec.Command("tar", "-xf", file, "-C", dir)
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".lrz"):
@@ -396,7 +396,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-k", "--", file, "-o", outputPath}
 		cmd := exec.Command("lrzip", args...)
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	default:
@@ -425,7 +425,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		cmd.Args = append(cmd.Args, "--", file)
 		cmd.Dir = dir
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 	}
 }

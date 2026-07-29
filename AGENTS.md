@@ -76,6 +76,7 @@ crush/
 - [ ] Benchmarks Go
 - [ ] Comando `--bench` para medir velocidad por formato
 - [x] Compresión paralela de múltiples archivos (auto NCPU)
+- [x] Barra de progreso con ProgressTracker (byte-level en pipe, per-file en archivos)
 - [ ] CI/CD (GitHub Actions)
 - [ ] Publicar binarios precompilados en releases
 

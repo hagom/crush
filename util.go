@@ -27,7 +27,8 @@ var (
 	rarOnce  sync.Once
 	rarCache string
 
-	logFile *os.File
+	logFile  *os.File
+	nullFile *os.File
 )
 
 func ncpuStr() string {
@@ -460,6 +461,24 @@ func effectiveThreads(ext string) int {
 		return 1
 	}
 	return NCPU()
+}
+
+func stderrFor(pt *ProgressTracker) *os.File {
+	if pt == nil {
+		return os.Stderr
+	}
+	return getNullFile()
+}
+
+func getNullFile() *os.File {
+	if nullFile == nil {
+		f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			return os.Stderr
+		}
+		nullFile = f
+	}
+	return nullFile
 }
 
 func hasTool(name string) bool {

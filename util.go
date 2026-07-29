@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -464,6 +465,157 @@ func effectiveThreads(ext string) int {
 func hasTool(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+type ProgressTracker struct {
+	total       int64
+	current     atomic.Int64
+	filesTotal  int
+	filesDone   atomic.Int64
+	currentFile atomic.Value
+	startTime   time.Time
+	ticker      *time.Ticker
+	done        chan struct{}
+	stderrIsTTY bool
+	started     atomic.Bool
+}
+
+func NewProgressTracker(total int64, filesTotal int) *ProgressTracker {
+	pt := &ProgressTracker{
+		total:       total,
+		filesTotal:  filesTotal,
+		startTime:   time.Now(),
+		done:        make(chan struct{}),
+		stderrIsTTY: isTerminal(),
+	}
+	pt.currentFile.Store("")
+	return pt
+}
+
+func (pt *ProgressTracker) Add(n int64) {
+	pt.current.Add(n)
+}
+
+func (pt *ProgressTracker) FileDone(name string) {
+	pt.filesDone.Add(1)
+	pt.currentFile.Store(name)
+}
+
+func (pt *ProgressTracker) SetCurrentFile(name string) {
+	pt.currentFile.Store(name)
+}
+
+func (pt *ProgressTracker) Start() {
+	if !pt.stderrIsTTY || pt.started.Swap(true) {
+		return
+	}
+	pt.ticker = time.NewTicker(100 * time.Millisecond)
+	go func() {
+		for {
+			select {
+			case <-pt.ticker.C:
+				pt.render()
+			case <-pt.done:
+				pt.ticker.Stop()
+				return
+			}
+		}
+	}()
+}
+
+func (pt *ProgressTracker) Stop() {
+	if pt.started.Load() {
+		pt.ticker.Stop()
+	}
+	close(pt.done)
+	if pt.stderrIsTTY {
+		pt.renderFinal()
+	}
+}
+
+func (pt *ProgressTracker) render() {
+	if !pt.stderrIsTTY {
+		return
+	}
+	current := pt.current.Load()
+	done := pt.filesDone.Load()
+	elapsed := time.Since(pt.startTime)
+
+	var pct float64
+	if pt.total > 0 {
+		pct = float64(current) * 100 / float64(pt.total)
+		if pct > 100 {
+			pct = 100
+		}
+	} else {
+		pct = float64(done) * 100 / float64(pt.filesTotal)
+	}
+
+	barWidth := 20
+	filled := int(pct / 100 * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
+	}
+	var bar string
+	if filled >= barWidth {
+		bar = strings.Repeat("=", barWidth)
+	} else if filled > 0 {
+		bar = strings.Repeat("=", filled-1) + ">" + strings.Repeat(" ", barWidth-filled)
+	} else {
+		bar = strings.Repeat(" ", barWidth)
+	}
+
+	line := fmt.Sprintf("\r[%s] %5.1f%%  %d/%d archivos", bar, pct, done, pt.filesTotal)
+
+	if current > 0 && elapsed.Seconds() > 0 {
+		speed := float64(current) / elapsed.Seconds()
+		line += fmt.Sprintf("  %s/s", FormatSize(int64(speed)))
+	}
+
+	if pt.total > 0 && current > 0 {
+		remaining := time.Duration(float64(elapsed) / float64(current) * float64(pt.total-current))
+		line += fmt.Sprintf("  %v restantes", remaining.Round(time.Second))
+	}
+
+	if f := pt.currentFile.Load().(string); f != "" {
+		line += "  " + f
+	}
+
+	line += strings.Repeat(" ", 10)
+	os.Stderr.WriteString(line)
+}
+
+func (pt *ProgressTracker) renderFinal() {
+	current := pt.current.Load()
+	done := pt.filesDone.Load()
+	elapsed := time.Since(pt.startTime)
+
+	line := fmt.Sprintf("\r%s 100%%  %d/%d archivos", Green, done, pt.filesTotal)
+	if current > 0 && elapsed.Seconds() > 0 {
+		speed := float64(current) / elapsed.Seconds()
+		line += fmt.Sprintf("  %s/s", FormatSize(int64(speed)))
+	}
+	line += fmt.Sprintf("  %v  completado%s\n", elapsed.Round(time.Second), NC)
+	os.Stderr.WriteString(line)
+}
+
+func isTerminal() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+type countingWriter struct {
+	w  io.Writer
+	pt *ProgressTracker
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.pt.Add(int64(n))
+	return n, err
 }
 
 // --- Pipeline: chain multiple commands ---

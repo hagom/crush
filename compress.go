@@ -28,6 +28,7 @@ type CompressOptions struct {
 	SkipCleanup     bool
 	Combine         bool
 	ThreadLimit     int
+	Progress        *ProgressTracker
 }
 
 func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
@@ -187,6 +188,15 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if len(filteredFiles) == 0 {
 		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
 	}
+
+	filesTotal := 1
+	if !opts.Combine && len(filteredFiles) > 1 {
+		filesTotal = len(filteredFiles)
+	}
+	opts.Progress = NewProgressTracker(totalSize, filesTotal)
+	pt := opts.Progress
+	pt.Start()
+	defer pt.Stop()
 
 	if opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 && !opts.Combine {
 		totalSize = 0
@@ -388,6 +398,9 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 }
 
 func compressSingleFile(file, outPath string, opts CompressOptions) error {
+	if opts.Progress != nil {
+		opts.Progress.SetCurrentFile(file)
+	}
 	if isTarBased(opts.Format) {
 		ext := opts.Format.String()
 		if ext == "lrz" {
@@ -399,7 +412,11 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 			if opts.Verbose {
 				WriteLogf("  $ lrzip %s\n", strings.Join(args, " "))
 			}
-			return cmd.Run()
+			err := cmd.Run()
+			if err == nil && opts.Progress != nil {
+				opts.Progress.FileDone(outPath)
+			}
+			return err
 		}
 
 		inFile, err := os.Open(file)
@@ -417,7 +434,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 		compressCmd := buildCompressCmd(opts)
 		compressCmd.Stderr = os.Stderr
 
-		if hasTool("pv") {
+		if opts.Progress == nil && hasTool("pv") {
 			pvArgs := []string{"-f", "-B", "256k"}
 			if fi, statErr := os.Stat(file); statErr == nil {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", fi.Size()))
@@ -442,6 +459,9 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 
 			compressErr := compressCmd.Run()
 			pvCmd.Wait()
+			if compressErr == nil && opts.Progress != nil {
+				opts.Progress.FileDone(outPath)
+			}
 			return compressErr
 		}
 
@@ -452,7 +472,11 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 			WriteLogf("  $ %s %s < %s > %s\n", compressCmd.Path, strings.Join(compressCmd.Args[1:], " "), file, outPath)
 		}
 
-		return compressCmd.Run()
+		err = compressCmd.Run()
+		if err == nil && opts.Progress != nil {
+			opts.Progress.FileDone(outPath)
+		}
+		return err
 	}
 
 	switch opts.Format {
@@ -562,7 +586,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 
 	compressCmd := buildCompressCmd(opts)
 
-	if hasTool("pv") {
+	if opts.Progress == nil && hasTool("pv") {
 		pvArgs := []string{"-f", "-B", "256k"}
 		if opts.TotalSize > 0 {
 			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
@@ -586,6 +610,10 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		writer = newSplitWriter(outFile, opts.SplitSize, outPath)
 	}
 
+	if opts.Progress != nil {
+		writer = &countingWriter{w: writer, pt: opts.Progress}
+	}
+
 	tarArgs := []string{"-cf", "-"}
 	for _, excl := range opts.Exclude {
 		tarArgs = append(tarArgs, "--exclude="+excl)
@@ -605,7 +633,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		compressCmd = exec.Command("lrzip", args...)
 		pipeCmds := []*exec.Cmd{tarCmd}
-		if hasTool("pv") {
+		if opts.Progress == nil && hasTool("pv") {
 			pvArgs := []string{"-f", "-B", "256k"}
 			if opts.TotalSize > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
@@ -617,6 +645,9 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 		if err := pipeline(writer, os.Stderr, pipeCmds...); err != nil {
 			return fmt.Errorf("Error en pipeline de compresión: %w", err)
 		}
+		if opts.Progress != nil {
+			opts.Progress.FileDone(outPath)
+		}
 		return nil
 	}
 
@@ -627,6 +658,10 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 	pipeCmds = append(pipeCmds, compressCmd)
 	if err := pipeline(writer, os.Stderr, pipeCmds...); err != nil {
 		return fmt.Errorf("Error en pipeline de compresión: %w", err)
+	}
+
+	if opts.Progress != nil {
+		opts.Progress.FileDone(outPath)
 	}
 
 	return nil
@@ -650,7 +685,11 @@ func compressZip(files []string, outPath string, opts CompressOptions) error {
 			WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
 		}
 
-		return cmd.Run()
+		err := cmd.Run()
+		if err == nil && opts.Progress != nil {
+			opts.Progress.FileDone(outPath)
+		}
+		return err
 	}
 
 	args := []string{"-r", "-9", outPath}
@@ -664,7 +703,11 @@ func compressZip(files []string, outPath string, opts CompressOptions) error {
 		WriteLogf("  $ zip %s\n", strings.Join(args, " "))
 	}
 
-	return cmd.Run()
+	err := cmd.Run()
+	if err == nil && opts.Progress != nil {
+		opts.Progress.FileDone(outPath)
+	}
+	return err
 }
 
 func compress7z(files []string, outPath string, opts CompressOptions) error {
@@ -685,7 +728,11 @@ func compress7z(files []string, outPath string, opts CompressOptions) error {
 		WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
 	}
 
-	return cmd.Run()
+	err := cmd.Run()
+	if err == nil && opts.Progress != nil {
+		opts.Progress.FileDone(outPath)
+	}
+	return err
 }
 
 func compressPlainTar(files []string, outPath string, opts CompressOptions) error {
@@ -705,7 +752,11 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions) erro
 		WriteLogf("  $ tar %s\n", strings.Join(args, " "))
 	}
 
-	return cmd.Run()
+	err := cmd.Run()
+	if err == nil && opts.Progress != nil {
+		opts.Progress.FileDone(outPath)
+	}
+	return err
 }
 
 func compressRar(files []string, outPath string, opts CompressOptions) error {
@@ -728,7 +779,11 @@ func compressRar(files []string, outPath string, opts CompressOptions) error {
 		WriteLogf("  $ %s %s\n", rar, strings.Join(args, " "))
 	}
 
-	return cmd.Run()
+	err := cmd.Run()
+	if err == nil && opts.Progress != nil {
+		opts.Progress.FileDone(outPath)
+	}
+	return err
 }
 
 func fastOrSlow(opts CompressOptions, defaultLevel int) int {

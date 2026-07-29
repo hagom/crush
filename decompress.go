@@ -19,6 +19,7 @@ type DecompressOptions struct {
 	Force       bool
 	Parallel    int
 	ThreadLimit int
+	Progress    *ProgressTracker
 }
 
 func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
@@ -73,6 +74,17 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	if len(allFiles) == 0 {
 		return fmt.Errorf("No se encontraron archivos válidos")
 	}
+
+	var totalSize int64
+	for _, f := range allFiles {
+		if fi, err := os.Stat(f); err == nil {
+			totalSize += fi.Size()
+		}
+	}
+	opts.Progress = NewProgressTracker(totalSize, len(allFiles))
+	pt := opts.Progress
+	pt.Start()
+	defer pt.Stop()
 
 	if opts.Parallel < 1 {
 		opts.Parallel = NCPU()
@@ -140,6 +152,10 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 }
 
 func decompressFile(file string, opts DecompressOptions) error {
+	if opts.Progress != nil {
+		opts.Progress.SetCurrentFile(file)
+	}
+
 	info, err := DetectFormat(file)
 	if err != nil {
 		return err
@@ -207,6 +223,10 @@ func decompressFile(file string, opts DecompressOptions) error {
 	WriteLogf("%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file), NC)
 	WriteLogf("%s=============================%s\n", Green, NC)
 
+	if opts.Progress != nil {
+		opts.Progress.FileDone(file)
+	}
+
 	return nil
 }
 
@@ -217,7 +237,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 
 		WriteLogf("  → %s/\n", dir)
 
-	if hasTool("pv") {
+	if opts.Progress == nil && hasTool("pv") {
 		tarExtract := exec.Command("tar", "-xf", "-", "-C", dir)
 		// Build decompressor pipe: decompress -> pv -> tar -xf -
 		var decompCmd *exec.Cmd
@@ -358,7 +378,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 	case strings.HasSuffix(ext, ".lrz"):
 		outputPath := filepath.Join(dir, strings.TrimSuffix(filepath.Base(file), ".lrz"))
-		if hasTool("pv") {
+		if opts.Progress == nil && hasTool("pv") {
 			pipeFlags := strings.Fields(info.PipeFlags)
 			decompCmd := exec.Command(info.Tool, pipeFlags...)
 			decompCmd.Args = append(decompCmd.Args, "--", file)
@@ -380,7 +400,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	default:
-		if hasTool("pv") {
+		if opts.Progress == nil && hasTool("pv") {
 			pipeFlags := strings.Fields(info.PipeFlags)
 			decompCmd := exec.Command(info.Tool, pipeFlags...)
 			decompCmd.Args = append(decompCmd.Args, "--", file)

@@ -22,6 +22,7 @@ var knownShortFlags = map[byte]bool{
 	'k': true,
 	'v': true,
 	'n': true,
+	'C': true,
 }
 
 var Version = "dev" // set at build time: go build -ldflags="-X main.Version=x.y.z"
@@ -139,6 +140,7 @@ func main() {
 	verbose := flag.Bool("v", false, "Modo verbose")
 	force := flag.Bool("force", false, "Sobrescribir archivos existentes")
 	quick := flag.Bool("quick", false, "Verificación rápida (no verificar cada archivo)")
+	combineFlag := flag.Bool("C", false, "Combinar múltiples archivos en un solo archivo comprimido")
 	splitSize := flag.Int("s", 0, "Dividir en partes de N MB (solo compresión)")
 	compressionOpts := flag.String("opts", "", "Opciones adicionales para la herramienta de compresión")
 
@@ -246,6 +248,11 @@ func main() {
 	// -n solo tiene sentido con -c o -d
 	if *dryRun && !*compressFlag && !*decompressFlag {
 		fmt.Fprintln(os.Stderr, "Warning: -n solo tiene efecto con -c o -d (ignorado)")
+	}
+	// -C requiere -o
+	if *combineFlag && *outputDir == "." {
+		fmt.Fprintln(os.Stderr, "Error: -C requiere -o DIRECTORIO")
+		os.Exit(1)
 	}
 
 	// Handle --uninstall
@@ -356,6 +363,7 @@ func main() {
 			Parallel:        parallel,
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,
+			Combine:         *combineFlag,
 		}
 		var outPaths []string
 		if stdinIsPipe {
@@ -396,12 +404,17 @@ func main() {
 			WriteLogf("%s✓ Integridad verificada, descomprimiendo...%s\n\n", Green, NC)
 		}
 
+		parallel := NCPU()
+		if parallel < 2 {
+			parallel = 2
+		}
 		opts := DecompressOptions{
 			DryRun:    *dryRun,
 			Verbose:   *verbose,
 			OutputDir: *outputDir,
 			KeepOrig:  *keepOrig,
 			Force:     *force,
+			Parallel:  parallel,
 		}
 		if stdinIsPipe {
 			if *formatStr == "" && len(files) == 0 {
@@ -710,6 +723,8 @@ func printHelp() {
 	fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
 	w(Yellow, "  -opts \"opciones\"")
 	fmt.Print("     Opciones adicionales para la herramienta de compresión\n")
+	w(Yellow, "  -C")
+	fmt.Print("                   Combinar múltiples archivos en un solo archivo comprimido\n")
 	w(Yellow, "  -exclude patrón")
 	fmt.Print("      Patrón de exclusión (se puede repetir)\n")
 	w(Yellow, "  --install")
@@ -730,6 +745,7 @@ func printHelp() {
 	w(Yellow, "  crush -c -f xz -k documento.txt                       # conservar original con barra de progreso\n")
 	w(Yellow, "  crush -c -f zip -exclude \"*.bak\" dir/                  # comprimir excluyendo archivos .bak\n")
 	w(Yellow, "  crush -c -f tar.gz -o /backup/ dir/                   # comprimir directorio a ubicación específica\n")
+	w(Yellow, "  crush -c -C -f 7z file1.txt file2.txt file3.txt       # combinar múltiples archivos en un solo 7z\n")
 	w(Yellow, "  crush -c -f zst -s 10 archivo_grande.iso              # dividir en partes de 10 MB\n")
 	w(Yellow, "  crush -d archivo.tar.gz\n")
 	w(Yellow, "  crush -d -t archivo.7z                                 # testear antes de descomprimir\n")

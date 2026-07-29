@@ -33,6 +33,13 @@ func ncpuStr() string {
 	return strconv.Itoa(NCPU())
 }
 
+func threadStr(limit int) string {
+	if limit > 0 {
+		return strconv.Itoa(limit)
+	}
+	return ncpuStr()
+}
+
 func NCPU() int {
 	ncpuOnce.Do(func() {
 		// getconf _NPROCESSORS_ONLN

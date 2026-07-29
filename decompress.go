@@ -7,15 +7,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 type DecompressOptions struct {
-	DryRun    bool
-	Verbose   bool
-	OutputDir string
-	KeepOrig  bool
-	Force     bool
+	DryRun      bool
+	Verbose     bool
+	OutputDir   string
+	KeepOrig    bool
+	Force       bool
+	Parallel    int
+	ThreadLimit int
 }
 
 func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
@@ -35,8 +38,6 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		return fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
 	}
 
-	var successes, errors int
-
 	if opts.DryRun {
 		for _, file := range files {
 			WriteLogf("%s[Simulacro] Descomprimiendo: %s%s\n", Blue, file, NC)
@@ -44,33 +45,79 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		return nil
 	}
 
+	var allFiles []string
 	for _, file := range files {
 		matches, err := filepath.Glob(file)
 		if err != nil || len(matches) == 0 {
-			// Try literal
 			if _, err := os.Stat(file); err == nil {
-				matches = []string{file}
+				allFiles = append(allFiles, file)
 			} else {
 				WriteLogf("%s✗ No encontrado: %s%s\n", Red, file, NC)
-				errors++
-				continue
 			}
+			continue
 		}
-
 		for _, match := range matches {
 			info, err := os.Stat(match)
 			if err != nil {
 				WriteLogf("%s✗ Error: %s%s\n", Red, err, NC)
-				errors++
 				continue
 			}
 			if info.IsDir() {
 				WriteLogf("%s✗ Es un directorio: %s%s\n", Red, match, NC)
-				errors++
 				continue
 			}
+			allFiles = append(allFiles, match)
+		}
+	}
 
-			err = decompressFile(match, opts)
+	if len(allFiles) == 0 {
+		return fmt.Errorf("No se encontraron archivos válidos")
+	}
+
+	if opts.Parallel < 1 {
+		opts.Parallel = NCPU()
+	}
+
+	results := make(chan error, len(allFiles))
+	var successes, errors int
+
+	if len(allFiles) == 1 {
+		err := decompressFile(allFiles[0], opts)
+		if err != nil {
+			WriteLogf("%s✗ %s%s\n", Red, err, NC)
+			errors++
+		} else {
+			successes++
+		}
+	} else {
+		numWorkers := len(allFiles)
+		if numWorkers > opts.Parallel {
+			numWorkers = opts.Parallel
+		}
+		opts.ThreadLimit = max(1, NCPU()/numWorkers)
+
+		WriteLogf("%sDescomprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(allFiles), NC)
+		WriteLogf("  Hilos: %d × %d concurrentes\n", opts.ThreadLimit, numWorkers)
+		WriteLogf("\n")
+
+		sem := make(chan struct{}, numWorkers)
+		var wg sync.WaitGroup
+		startTime := time.Now()
+
+		for _, file := range allFiles {
+			wg.Add(1)
+			go func(f string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				results <- decompressFile(f, opts)
+			}(file)
+		}
+
+		wg.Wait()
+		close(results)
+
+		for err := range results {
 			if err != nil {
 				WriteLogf("%s✗ %s%s\n", Red, err, NC)
 				errors++
@@ -78,6 +125,9 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 				successes++
 			}
 		}
+
+		elapsed := time.Since(startTime)
+		WriteLogf("\n%sTiempo total: %v%s\n", Bold, elapsed.Round(time.Second), NC)
 	}
 
 	WriteLogf("\n")
@@ -175,26 +225,26 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		switch {
 		case strings.HasSuffix(ext, ".tar.gz") || strings.HasSuffix(ext, ".tgz"):
 			if hasTool("pigz") {
-				decompCmd = exec.Command("pigz", "-dc", "--", file)
+				decompCmd = exec.Command("pigz", "-dc", "-p", threadStr(opts.ThreadLimit), "--", file)
 			} else {
 				decompCmd = exec.Command("gzip", "-dc", "--", file)
 			}
 		case strings.HasSuffix(ext, ".tar.xz") || strings.HasSuffix(ext, ".txz"):
-			decompCmd = exec.Command("xz", "-dc", "-T0", "--", file)
+			decompCmd = exec.Command("xz", "-dc", "-T"+threadStr(opts.ThreadLimit), "--", file)
 		case strings.HasSuffix(ext, ".tar.bz2") || strings.HasSuffix(ext, ".tbz2"):
 			decompCmd = exec.Command(bzip2Bin(), "-dc", "--", file)
 		case strings.HasSuffix(ext, ".tar.bz3"):
-			decompCmd = exec.Command("bzip3", "-dc", "-j", ncpuStr(), "--", file)
+			decompCmd = exec.Command("bzip3", "-dc", "-j", threadStr(opts.ThreadLimit), "--", file)
 		case strings.HasSuffix(ext, ".tar.zst") || strings.HasSuffix(ext, ".tzst"):
-			decompCmd = exec.Command("zstd", "-dc", "-T0", "--", file)
+			decompCmd = exec.Command("zstd", "-dc", "-T"+threadStr(opts.ThreadLimit), "--", file)
 		case strings.HasSuffix(ext, ".tar.lz") || strings.HasSuffix(ext, ".tlz"):
 			if hasTool("plzip") {
-				decompCmd = exec.Command("plzip", "-dc", "--threads="+ncpuStr(), "--", file)
+				decompCmd = exec.Command("plzip", "-dc", "--threads="+threadStr(opts.ThreadLimit), "--", file)
 			} else {
 				decompCmd = exec.Command("lzip", "-dc", "--", file)
 			}
 		case strings.HasSuffix(ext, ".tar.lrz"):
-			decompCmd = exec.Command("lrzip", "-d", "-p", ncpuStr(), "-o", "-", "--", file)
+			decompCmd = exec.Command("lrzip", "-d", "-p", threadStr(opts.ThreadLimit), "-o", "-", "--", file)
 		case strings.HasSuffix(ext, ".tar.lz4"):
 			decompCmd = exec.Command("lz4", "-dc", "--", file)
 		case strings.HasSuffix(ext, ".tar.br"):
@@ -255,7 +305,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 	case strings.HasSuffix(ext, ".zip"):
 		sevenz := sevenzBin()
 		if hasTool(sevenz) {
-			args := []string{"x", "-tzip", "-mmt=on", file}
+			args := []string{"x", "-tzip", "-mmt=" + threadStr(opts.ThreadLimit), file}
 			if opts.Force {
 				args = append(args, "-aoa")
 			} else {
@@ -281,7 +331,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".7z"):
-		args := []string{"x", "-mmt=on", file, fmt.Sprintf("-o%s", dir)}
+		args := []string{"x", "-mmt=" + threadStr(opts.ThreadLimit), file, fmt.Sprintf("-o%s", dir)}
 		if opts.Force {
 			args = append(args, "-y")
 		}
@@ -291,7 +341,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".rar"):
-		args := []string{"x", "-mt" + ncpuStr(), file, fmt.Sprintf("%s/", dir)}
+		args := []string{"x", "-mt" + threadStr(opts.ThreadLimit), file, fmt.Sprintf("%s/", dir)}
 		if opts.Force {
 			args = append(args, "-y")
 		}
@@ -323,7 +373,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			}
 			return pipeline(outFile, os.Stderr, decompCmd, exec.Command("pv", pvArgs...))
 		}
-		args := []string{"-d", "-p", ncpuStr(), "-k", "--", file, "-o", outputPath}
+		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-k", "--", file, "-o", outputPath}
 		cmd := exec.Command("lrzip", args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

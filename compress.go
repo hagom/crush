@@ -26,6 +26,8 @@ type CompressOptions struct {
 	TarTool         string
 	TotalSize       int64
 	SkipCleanup     bool
+	Combine         bool
+	ThreadLimit     int
 }
 
 func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
@@ -86,7 +88,11 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if opts.DryRun {
 		WriteLogf("%s[Simulacro] Comprimiendo %d archivo(s)%s\n", Blue, len(files), NC)
 		if !singleItem && len(files) > 1 {
-			WriteLogf("%s[Simulacro] Modo: paralelo (%d archivos × %d núcleos)%s\n", Blue, len(files), NCPU(), NC)
+			mode := "paralelo"
+			if opts.Combine {
+				mode = "combinado"
+			}
+			WriteLogf("%s[Simulacro] Modo: %s (%d archivos × %d núcleos)%s\n", Blue, mode, len(files), NCPU(), NC)
 			if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
 				opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
 				opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br {
@@ -182,7 +188,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
-	if opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 {
+	if opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 && !opts.Combine {
 		totalSize = 0
 		for _, f := range filteredFiles {
 			info, err := os.Stat(f)
@@ -340,7 +346,7 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		}
 		return cmd
 	case "xz":
-		args := []string{"-c", "-T" + ncpuStr(), fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "-e"}
+		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "-e"}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("xz", args...)
 	case "bz2":
@@ -349,11 +355,11 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command(bin, args...)
 	case "bz3":
-		args := []string{"-c", "-j" + ncpuStr()}
+		args := []string{"-c", "-j" + threadStr(opts.ThreadLimit)}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("bzip3", args...)
 	case "zst":
-		args := []string{"-c", "-T0", fmt.Sprintf("-%d", fastOrSlow(opts, 19))}
+		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), fmt.Sprintf("-%d", fastOrSlow(opts, 19))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("zstd", args...)
 	case "lz":
@@ -361,7 +367,7 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		if !hasTool("plzip") {
 			tool = "lzip"
 		}
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "--threads=" + ncpuStr()}
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "--threads=" + threadStr(opts.ThreadLimit)}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command(tool, args...)
 	case "lz4":
@@ -373,7 +379,7 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("brotli", args...)
 	case "lrz":
-		args := []string{"-z", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-o", "-"}
+		args := []string{"-z", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-o", "-"}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("lrzip", args...)
 	default:
@@ -385,7 +391,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions) error {
 	if isTarBased(opts.Format) {
 		ext := opts.Format.String()
 		if ext == "lrz" {
-			args := []string{"-f", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath, file}
+			args := []string{"-f", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath, file}
 			args = append(args, strings.Fields(opts.CompressionOpts)...)
 			cmd := exec.Command("lrzip", args...)
 			cmd.Stdout = os.Stdout
@@ -474,6 +480,12 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
+	numWorkers := len(files)
+	if numWorkers > opts.Parallel {
+		numWorkers = opts.Parallel
+	}
+	opts.ThreadLimit = max(1, NCPU()/numWorkers)
+
 	startTime := time.Now()
 
 	for _, f := range files {
@@ -518,7 +530,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, ext, NC)
 	WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(files), NC)
 	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
-	WriteLogf("%sHilos:%s             %s%d (compresor) × %d archivos%s\n", Blue, NC, Bold, effectiveThreads(ext), len(files), NC)
+	WriteLogf("%sHilos:%s             %s%d × %d concurrentes%s\n", Blue, NC, Bold, opts.ThreadLimit, numWorkers, NC)
 	if len(errors) > 0 {
 		WriteLogf("%sErrores:%s           %s%d%s\n", Blue, NC, Red, len(errors), NC)
 		for _, e := range errors {
@@ -589,7 +601,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 
 	// For lrzip which writes directly to file instead of stdout
 	if ext == "lrz" {
-		args := []string{"-f", "-p", ncpuStr(), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath}
+		args := []string{"-f", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		compressCmd = exec.Command("lrzip", args...)
 		pipeCmds := []*exec.Cmd{tarCmd}
@@ -623,7 +635,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions) error
 func compressZip(files []string, outPath string, opts CompressOptions) error {
 	if hasTool(sevenzBin()) {
 		sevenz := sevenzBin()
-		args := []string{"a", "-tzip", "-mx=9", "-mmt=on"}
+		args := []string{"a", "-tzip", "-mx=9", "-mmt=" + threadStr(opts.ThreadLimit)}
 		optFlags := strings.Fields(opts.CompressionOpts)
 		args = append(args, optFlags...)
 		args = append(args, outPath)
@@ -660,7 +672,7 @@ func compress7z(files []string, outPath string, opts CompressOptions) error {
 	args := []string{"a", "-mx=9", "-md=128m", "-ms=on"}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
-	args = append(args, "-mmt=on")
+	args = append(args, "-mmt="+threadStr(opts.ThreadLimit))
 	args = append(args, outPath)
 	args = append(args, "--")
 	args = append(args, files...)
@@ -698,7 +710,7 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions) erro
 
 func compressRar(files []string, outPath string, opts CompressOptions) error {
 	rar := rarBin()
-	args := []string{"a", "-m" + fmt.Sprintf("%d", fastOrSlow(opts, 5)), "-mt" + ncpuStr()}
+	args := []string{"a", "-m" + fmt.Sprintf("%d", fastOrSlow(opts, 5)), "-mt" + threadStr(opts.ThreadLimit)}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
 	if !opts.KeepOrig {

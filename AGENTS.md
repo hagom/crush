@@ -68,8 +68,8 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 47 tests nativos pasando. ~2850 líneas.
-- Features implementadas: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar (compresión + descompresión), colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall, detección de modos conflictivos, expansión de flags combinados (-ptkv).
+- Go: migración completa. 47 tests nativos pasando. ~3100 líneas.
+- Features implementadas: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar estilo docker pull (global + per-file con barras, porcentajes, ETA, velocidad), colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall, detección de modos conflictivos, expansión de flags combinados (-ptkv).
 ## Próximos pasos
 
 - [ ] Tests con mock de exec.Command (inyección de dependencias)

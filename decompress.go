@@ -83,22 +83,36 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	}
 	opts.Progress = NewProgressTracker(totalSize, len(allFiles))
 	pt := opts.Progress
-	pt.Start()
-	defer pt.Stop()
 
 	if opts.Parallel < 1 {
 		opts.Parallel = NCPU()
 	}
 
+	fps := make([]*FileProgress, len(allFiles))
+	for i, f := range allFiles {
+		fi, err := os.Stat(f)
+		var sz int64
+		if err == nil {
+			sz = fi.Size()
+		}
+		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz, Status: "waiting"}
+	}
+	opts.Progress.SetFiles(fps)
+
 	results := make(chan error, len(allFiles))
 	var successes, errors int
 
 	if len(allFiles) == 1 {
-		err := decompressFile(allFiles[0], opts)
+		pt.Start()
+		defer pt.Stop()
+
+		err := decompressFile(allFiles[0], opts, fps[0])
 		if err != nil {
+			fps[0].Status = "error"
 			WriteLogf("%s✗ %s%s\n", Red, err, NC)
 			errors++
 		} else {
+			fps[0].Status = "done"
 			successes++
 		}
 	} else {
@@ -112,18 +126,28 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		WriteLogf("  Hilos: %d × %d concurrentes\n", opts.ThreadLimit, numWorkers)
 		WriteLogf("\n")
 
+		pt.Start()
+		defer pt.Stop()
+
 		sem := make(chan struct{}, numWorkers)
 		var wg sync.WaitGroup
 		startTime := time.Now()
 
-		for _, file := range allFiles {
+		for i, file := range allFiles {
+			fp := fps[i]
 			wg.Add(1)
-			go func(f string) {
+			go func(f string, fp *FileProgress) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				results <- decompressFile(f, opts)
-			}(file)
+				err := decompressFile(f, opts, fp)
+				if err != nil {
+					fp.Status = "error"
+				} else {
+					fp.Status = "done"
+				}
+				results <- err
+			}(file, fp)
 		}
 
 		wg.Wait()
@@ -151,9 +175,13 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	return nil
 }
 
-func decompressFile(file string, opts DecompressOptions) error {
+func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error {
 	if opts.Progress != nil {
 		opts.Progress.SetCurrentFile(file)
+	}
+	if fp != nil {
+		fp.Status = "active"
+		fp.Start = time.Now()
 	}
 
 	info, err := DetectFormat(file)
@@ -186,9 +214,9 @@ func decompressFile(file string, opts DecompressOptions) error {
 	}
 
 	if info.IsTar {
-		err = decompressTar(file, dir, info, opts)
+		err = decompressTar(file, dir, info, opts, fp)
 	} else {
-		err = decompressSingle(file, dir, info, opts)
+		err = decompressSingle(file, dir, info, opts, fp)
 	}
 
 	if err != nil {
@@ -214,14 +242,15 @@ func decompressFile(file string, opts DecompressOptions) error {
 			WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, file, err, NC)
 		}
 	}
-	WriteLogf("\n")
-	WriteLogf("%s=== Reporte de Descompresión ===%s\n", Green, NC)
-	WriteLogf("%sArchivo Origen:%s     %s%s%s\n", Blue, NC, Yellow, file, NC)
-	WriteLogf("%sTamaño Comprimido:%s  %s%s%s\n", Blue, NC, Red, FormatSize(compressedSize), NC)
-	WriteLogf("%sTamaño Descomprimido:%s %s%s%s\n", Blue, NC, Green, FormatSize(uncompressedSize), NC)
-	WriteLogf("%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
-	WriteLogf("%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file), NC)
-	WriteLogf("%s=============================%s\n", Green, NC)
+	var report strings.Builder
+	fmt.Fprintf(&report, "\n%s=== Reporte de Descompresión ===%s\n", Green, NC)
+	fmt.Fprintf(&report, "%sArchivo Origen:%s     %s%s%s\n", Blue, NC, Yellow, file, NC)
+	fmt.Fprintf(&report, "%sTamaño Comprimido:%s  %s%s%s\n", Blue, NC, Red, FormatSize(compressedSize), NC)
+	fmt.Fprintf(&report, "%sTamaño Descomprimido:%s %s%s%s\n", Blue, NC, Green, FormatSize(uncompressedSize), NC)
+	fmt.Fprintf(&report, "%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
+	fmt.Fprintf(&report, "%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file), NC)
+	fmt.Fprintf(&report, "%s=============================%s\n", Green, NC)
+	WriteLog(report.String())
 
 	if opts.Progress != nil {
 		opts.Progress.FileDone(file)
@@ -230,7 +259,7 @@ func decompressFile(file string, opts DecompressOptions) error {
 	return nil
 }
 
-func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions) error {
+func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
 	if info.Tool == "" {
 			return fmt.Errorf("No se detectó herramienta para: %s", file)
 		}
@@ -288,7 +317,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		args = append(args, "--", file)
 		cmd := exec.Command(info.Tool, args...)
 		cmd.Dir = dir
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
@@ -300,7 +329,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			tarName := base + ".tar"
 			if _, err := os.Stat(tarName); err == nil {
 				extractCmd := exec.Command("tar", "-xf", tarName, "-C", dir)
-				extractCmd.Stdout = os.Stdout
+				extractCmd.Stdout = stdoutFor(opts.Progress)
 				extractCmd.Stderr = stderrFor(opts.Progress)
 				if err := extractCmd.Run(); err != nil {
 					os.Remove(tarName)
@@ -318,14 +347,14 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 	return nil
 }
 
-func decompressSingle(file string, dir string, info FormatInfo, opts DecompressOptions) error {
+func decompressSingle(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
 	ext := strings.ToLower(file)
 
 	switch {
 	case strings.HasSuffix(ext, ".zip"):
 		sevenz := sevenzBin()
 		if hasTool(sevenz) {
-			args := []string{"x", "-tzip", "-mmt=" + threadStr(opts.ThreadLimit), file}
+			args := []string{"x", "-tzip", "-bsp1", "-mmt=" + threadStr(opts.ThreadLimit), file}
 			if opts.Force {
 				args = append(args, "-aoa")
 			} else {
@@ -333,7 +362,9 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			}
 			args = append(args, fmt.Sprintf("-o%s", dir))
 			cmd := exec.Command(sevenz, args...)
-			cmd.Stdout = os.Stdout
+			if fi, err := os.Stat(file); err == nil {
+				return runWithProgress(cmd, opts.Progress, fi.Size(), fp)
+			}
 			cmd.Stderr = stderrFor(opts.Progress)
 			return cmd.Run()
 		}
@@ -346,33 +377,39 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		dirFlag := "-d"
 		args = append(args, file, dirFlag, dir)
 		cmd := exec.Command("unzip", args...)
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".7z"):
-		args := []string{"x", "-mmt=" + threadStr(opts.ThreadLimit), file, fmt.Sprintf("-o%s", dir)}
+		args := []string{"x", "-bsp1", "-y", "-mmt=" + threadStr(opts.ThreadLimit), file, fmt.Sprintf("-o%s", dir)}
 		if opts.Force {
-			args = append(args, "-y")
+			args = append(args, "-aoa")
+		} else {
+			args = append(args, "-aos")
 		}
 		cmd := exec.Command(info.Tool, args...)
-		cmd.Stdout = os.Stdout
+		if fi, err := os.Stat(file); err == nil {
+			return runWithProgress(cmd, opts.Progress, fi.Size(), fp)
+		}
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".rar"):
-		args := []string{"x", "-mt" + threadStr(opts.ThreadLimit), file, fmt.Sprintf("%s/", dir)}
+		args := []string{"x", "-y", "-mt" + threadStr(opts.ThreadLimit), file, fmt.Sprintf("%s/", dir)}
 		if opts.Force {
-			args = append(args, "-y")
+			args = append(args, "-o+")
+		} else {
+			args = append(args, "-o-")
 		}
 		cmd := exec.Command(info.Tool, args...)
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".tar"):
 		cmd := exec.Command("tar", "-xf", file, "-C", dir)
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
@@ -395,7 +432,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		}
 		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-k", "--", file, "-o", outputPath}
 		cmd := exec.Command("lrzip", args...)
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
@@ -424,7 +461,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		cmd := exec.Command(info.Tool, directArgs...)
 		cmd.Args = append(cmd.Args, "--", file)
 		cmd.Dir = dir
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 	}

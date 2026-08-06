@@ -240,6 +240,9 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	opts.TotalSize = totalSize
 	err = compressItems(filteredFiles, outPath, opts)
 	if err != nil {
+		if rmErr := os.Remove(outPath); rmErr == nil {
+			WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, outPath, NC)
+		}
 		return nil, err
 	}
 
@@ -566,6 +569,9 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			err := compressSingleFile(file, outPath, opts, fp)
 			if err != nil {
 				fp.Status = "error"
+				if rmErr := os.Remove(outPath); rmErr == nil {
+					WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, outPath, NC)
+				}
 				errCh <- fmt.Errorf("%s: %w", file, err)
 			} else {
 				fp.Status = "done"

@@ -175,6 +175,115 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	return nil
 }
 
+func listArchiveOutputs(file string, dir string, info FormatInfo) []string {
+	lower := strings.ToLower(file)
+	if strings.HasSuffix(lower, ".tar") ||
+		strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") ||
+		strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".txz") ||
+		strings.HasSuffix(lower, ".tar.bz2") || strings.HasSuffix(lower, ".tbz2") ||
+		strings.HasSuffix(lower, ".tar.zst") || strings.HasSuffix(lower, ".tzst") ||
+		strings.HasSuffix(lower, ".tar.lz") || strings.HasSuffix(lower, ".tlz") ||
+		strings.HasSuffix(lower, ".tar.lz4") {
+		if members, ok := listTarMembers(file); ok {
+			return resolveOutputs(members, dir)
+		}
+		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
+		return nil
+	}
+	if strings.HasSuffix(lower, ".tar.bz3") || strings.HasSuffix(lower, ".tar.br") ||
+		strings.HasSuffix(lower, ".tar.lrz") {
+		WriteLogf("  %s⚠ No se puede listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
+		return nil
+	}
+	if strings.HasSuffix(lower, ".7z") || strings.HasSuffix(lower, ".zip") {
+		if members, ok := listSevenZipMembers(file); ok {
+			return resolveOutputs(members, dir)
+		}
+		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
+		return nil
+	}
+	if strings.HasSuffix(lower, ".rar") {
+		if members, ok := listRarMembers(file); ok {
+			return resolveOutputs(members, dir)
+		}
+		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
+		return nil
+	}
+	return []string{filepath.Join(dir, stripCompressionExt(filepath.Base(file)))}
+}
+
+func listTarMembers(file string) ([]string, bool) {
+	cmd := exec.Command("tar", "-tf", file)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	_ = cmd.Run()
+	var members []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			members = append(members, line)
+		}
+	}
+	return members, len(members) > 0
+}
+
+func listSevenZipMembers(file string) ([]string, bool) {
+	sevenz := sevenzBin()
+	if !hasTool(sevenz) {
+		return nil, false
+	}
+	cmd := exec.Command(sevenz, "l", "-ba", "-slt", "--", file)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	_ = cmd.Run()
+	var members []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Path = ") {
+			members = append(members, strings.TrimPrefix(line, "Path = "))
+		}
+	}
+	return members, len(members) > 0
+}
+
+func listRarMembers(file string) ([]string, bool) {
+	tool := rarBin()
+	if !hasTool(tool) {
+		return nil, false
+	}
+	cmd := exec.Command(tool, "lb", file)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	_ = cmd.Run()
+	var members []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			members = append(members, line)
+		}
+	}
+	return members, len(members) > 0
+}
+
+func resolveOutputs(members []string, dir string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, m := range members {
+		p := strings.TrimSuffix(m, "/")
+		if p == "" || strings.Contains(p, "..") || filepath.IsAbs(p) {
+			continue
+		}
+		full := filepath.Join(dir, p)
+		if seen[full] {
+			continue
+		}
+		seen[full] = true
+		out = append(out, full)
+	}
+	return out
+}
+
 func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error {
 	if opts.Progress != nil {
 		opts.Progress.SetCurrentFile(file)
@@ -213,6 +322,14 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		}
 	}
 
+	outputs := listArchiveOutputs(file, dir, info)
+	preExisting := make(map[string]bool, len(outputs))
+	for _, o := range outputs {
+		if _, err := os.Stat(o); err == nil {
+			preExisting[o] = true
+		}
+	}
+
 	if info.IsTar {
 		err = decompressTar(file, dir, info, opts, fp)
 	} else {
@@ -220,6 +337,14 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	}
 
 	if err != nil {
+		for _, o := range outputs {
+			if preExisting[o] {
+				continue
+			}
+			if rmErr := os.RemoveAll(o); rmErr == nil {
+				WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, o, NC)
+			}
+		}
 		return err
 	}
 

@@ -500,11 +500,23 @@ func stdoutFor(pt *ProgressTracker) io.Writer {
 	return getNullFile()
 }
 
-func stderrFor(pt *ProgressTracker) *os.File {
+func stderrFor(pt *ProgressTracker) io.Writer {
 	if pt == nil {
 		return os.Stderr
 	}
-	return getNullFile()
+	return &bytes.Buffer{}
+}
+
+func augmentErr(cmd *exec.Cmd, err error) error {
+	if err == nil {
+		return nil
+	}
+	if b, ok := cmd.Stderr.(*bytes.Buffer); ok {
+		if s := strings.TrimSpace(b.String()); s != "" {
+			return fmt.Errorf("%w: %s", err, s)
+		}
+	}
+	return err
 }
 
 func getNullFile() *os.File {
@@ -600,7 +612,7 @@ func runWithProgress(cmd *exec.Cmd, pt *ProgressTracker, fileSize int64, fp *Fil
 	if pt == nil || fileSize == 0 {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = stderrFor(pt)
-		return cmd.Run()
+		return augmentErr(cmd, cmd.Run())
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -611,7 +623,7 @@ func runWithProgress(cmd *exec.Cmd, pt *ProgressTracker, fileSize int64, fp *Fil
 		return err
 	}
 	trackProgress(stdout, pt, fileSize, fp)
-	return cmd.Wait()
+	return augmentErr(cmd, cmd.Wait())
 }
 
 type ProgressTracker struct {

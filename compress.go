@@ -37,7 +37,7 @@ func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
 	compressCmd.Stdin = r
 	compressCmd.Stdout = w
 	compressCmd.Stderr = stderrFor(opts.Progress)
-	return compressCmd.Run()
+	return augmentErr(compressCmd, compressCmd.Run())
 }
 
 func DoCompress(items []string, opts CompressOptions) (outPaths []string, err error) {
@@ -418,7 +418,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 			if opts.Verbose {
 				WriteLogf("  $ lrzip %s\n", strings.Join(args, " "))
 			}
-			err := cmd.Run()
+			err := augmentErr(cmd, cmd.Run())
 			if err == nil && opts.Progress != nil {
 				opts.Progress.FileDone(outPath)
 				if fp != nil {
@@ -473,7 +473,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 				WriteLogf("  $ %s | %s %s > %s\n", file, compressCmd.Path, strings.Join(compressCmd.Args[1:], " "), outPath)
 			}
 
-			compressErr := compressCmd.Run()
+			compressErr := augmentErr(compressCmd, compressCmd.Run())
 			pvCmd.Wait()
 			if compressErr == nil && opts.Progress != nil {
 				opts.Progress.FileDone(outPath)
@@ -488,7 +488,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 			WriteLogf("  $ %s %s < %s > %s\n", compressCmd.Path, strings.Join(compressCmd.Args[1:], " "), file, outPath)
 		}
 
-		err = compressCmd.Run()
+		err = augmentErr(compressCmd, compressCmd.Run())
 		if err == nil && opts.Progress != nil {
 			opts.Progress.FileDone(outPath)
 		}
@@ -600,16 +600,23 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	}
 	WriteLogf("%s=============================%s\n", Green, NC)
 
-	if len(errors) > 0 {
-		return outFiles, fmt.Errorf("%d error(es) en compresión paralela", len(errors))
+	successFiles := make([]string, 0, len(files))
+	for i, fp := range fps {
+		if fp.Status == "done" {
+			successFiles = append(successFiles, files[i])
+		}
 	}
 
-	CompressCleanupFiles = files
+	CompressCleanupFiles = successFiles
 	if !opts.KeepOrig && !opts.SkipCleanup {
-		removed := removeFiles(files, opts.Verbose)
+		removed := removeFiles(successFiles, opts.Verbose)
 		if removed > 0 {
 			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
 		}
+	}
+
+	if len(errors) > 0 {
+		return outFiles, fmt.Errorf("%d error(es) en compresión paralela", len(errors))
 	}
 
 	return outFiles, nil
@@ -737,7 +744,7 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 		WriteLogf("  $ zip %s\n", strings.Join(args, " "))
 	}
 
-	err := cmd.Run()
+	err := augmentErr(cmd, cmd.Run())
 	if err == nil && opts.Progress != nil {
 		opts.Progress.FileDone(outPath)
 	}
@@ -785,7 +792,7 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions, fp *
 		WriteLogf("  $ tar %s\n", strings.Join(args, " "))
 	}
 
-	err := cmd.Run()
+	err := augmentErr(cmd, cmd.Run())
 	if err == nil && opts.Progress != nil {
 		opts.Progress.FileDone(outPath)
 	}
@@ -812,7 +819,7 @@ func compressRar(files []string, outPath string, opts CompressOptions, fp *FileP
 		WriteLogf("  $ %s %s\n", rar, strings.Join(args, " "))
 	}
 
-	err := cmd.Run()
+	err := augmentErr(cmd, cmd.Run())
 	if err == nil && opts.Progress != nil {
 		opts.Progress.FileDone(outPath)
 	}

@@ -106,3 +106,41 @@ func TestCompressParallel(t *testing.T) {
 		}
 	}
 }
+
+func TestCompressParallelCleanupOnError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 no bloquea la lectura como root")
+	}
+	tmpDir := t.TempDir()
+	good := filepath.Join(tmpDir, "good.txt")
+	if err := os.WriteFile(good, []byte("contenido bueno"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(tmpDir, "bad.txt")
+	if err := os.WriteFile(bad, []byte("no legible"), 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(bad, 0644) })
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		Parallel:  2,
+		KeepOrig:  false,
+	}
+
+	_, err := DoCompress([]string{good, bad}, opts)
+	if err == nil {
+		t.Fatal("Esperaba error por la entrada ilegible, no hubo")
+	}
+
+	if _, statErr := os.Stat(good); !os.IsNotExist(statErr) {
+		t.Errorf("El original exitoso %s debería eliminarse aunque otro falle", good)
+	}
+	if _, statErr := os.Stat(bad); statErr != nil {
+		t.Errorf("El original fallido %s no debería eliminarse: %v", bad, statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "good.gz")); statErr != nil {
+		t.Errorf("El archivo comprimido de %s debería existir: %v", good, statErr)
+	}
+}

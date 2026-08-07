@@ -449,9 +449,10 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 	} else {
 		// Decompress the compression layer, writing the tar into dir
 		tarName := filepath.Join(dir, filepath.Base(stripTarExt(file))+".tar")
-		pipeFlags := strings.Fields(info.PipeFlags)
-		decompCmd := exec.Command(info.Tool, pipeFlags...)
-		decompCmd.Args = append(decompCmd.Args, "--", file)
+		decompCmd, closer := pipeCmdFor(info, file)
+		if closer != nil {
+			defer closer.Close()
+		}
 		tarFile, err := os.Create(tarName)
 		if err != nil {
 			return fmt.Errorf("Error creando tar temporal: %w", err)
@@ -479,6 +480,23 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 	}
 
 	return nil
+}
+
+// pipeCmdFor construye el comando de descompresión por pipe. lz4 detecta el
+// formato por la extensión del nombre (case-sensitive), así que con .LZ4 debe
+// leer por stdin (magic). El io.Closer devuelto cierra el archivo si se abrió.
+func pipeCmdFor(info FormatInfo, file string) (*exec.Cmd, io.Closer) {
+	cmd := exec.Command(info.Tool, strings.Fields(info.PipeFlags)...)
+	if info.Tool == "lz4" {
+		in, err := os.Open(file)
+		if err != nil {
+			return cmd, nil
+		}
+		cmd.Stdin = in
+		return cmd, in
+	}
+	cmd.Args = append(cmd.Args, "--", file)
+	return cmd, nil
 }
 
 func decompressSingle(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
@@ -572,9 +590,10 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 	default:
 		if opts.Progress == nil && hasTool("pv") {
-			pipeFlags := strings.Fields(info.PipeFlags)
-			decompCmd := exec.Command(info.Tool, pipeFlags...)
-			decompCmd.Args = append(decompCmd.Args, "--", file)
+			decompCmd, closer := pipeCmdFor(info, file)
+			if closer != nil {
+				defer closer.Close()
+			}
 			outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
 			outFile, err := os.Create(outputPath)
 			if err != nil {
@@ -591,9 +610,10 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			}
 			return nil
 		}
-		pipeFlags := strings.Fields(info.PipeFlags)
-		decompCmd := exec.Command(info.Tool, pipeFlags...)
-		decompCmd.Args = append(decompCmd.Args, "--", file)
+		decompCmd, closer := pipeCmdFor(info, file)
+		if closer != nil {
+			defer closer.Close()
+		}
 		outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
 		outFile, err := os.Create(outputPath)
 		if err != nil {

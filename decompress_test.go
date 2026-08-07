@@ -122,6 +122,38 @@ func TestDecompressPreExistingKept(t *testing.T) {
 	}
 }
 
+func TestPipeCmdForLz4UpperExt(t *testing.T) {
+	tmp := t.TempDir()
+	lz4File := filepath.Join(tmp, "x.tar.LZ4")
+	if err := os.WriteFile(lz4File, []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd, closer := pipeCmdFor(FormatInfo{Tool: "lz4", PipeFlags: "-dc"}, lz4File)
+	if closer != nil {
+		defer closer.Close()
+	}
+	for _, a := range cmd.Args {
+		if strings.Contains(a, "LZ4") {
+			t.Fatalf("lz4 no debe recibir el archivo por nombre (extensión mayúscula): %v", cmd.Args)
+		}
+	}
+	if cmd.Stdin == nil {
+		t.Fatal("lz4 debe leer el archivo por stdin (magic), no por extensión")
+	}
+
+	gzFile := filepath.Join(tmp, "x.gz")
+	if err := os.WriteFile(gzFile, []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd2, c2 := pipeCmdFor(FormatInfo{Tool: "gzip", PipeFlags: "-dc"}, gzFile)
+	if c2 != nil {
+		defer c2.Close()
+	}
+	if cmd2.Stdin != nil {
+		t.Fatal("gzip debe recibir el archivo por nombre")
+	}
+}
+
 func TestDecompressRelativeOutputDir(t *testing.T) {
 	if !hasTool("tar") {
 		t.Skip("tar no disponible")

@@ -77,10 +77,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if singleItem {
 		base := filepath.Base(files[0])
 		baseName := strings.TrimSuffix(base, filepath.Ext(base))
-		outPath = filepath.Join(opts.OutputDir, GetUniqueName(baseName, ext))
+		outPath = GetUniqueName(filepath.Join(opts.OutputDir, baseName), ext)
 	} else {
 		baseName := "crush_" + time.Now().Format("20060102_150405")
-		outPath = filepath.Join(opts.OutputDir, GetUniqueName(baseName, ext))
+		outPath = GetUniqueName(filepath.Join(opts.OutputDir, baseName), ext)
 	}
 
 	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
@@ -554,7 +554,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 
 			base := filepath.Base(file)
 			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-			outPath := filepath.Join(opts.OutputDir, GetUniqueName(baseNoExt, ext))
+			outPath := GetUniqueName(filepath.Join(opts.OutputDir, baseNoExt), ext)
 
 			fp.OutPath = outPath
 

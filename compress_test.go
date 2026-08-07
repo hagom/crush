@@ -56,6 +56,49 @@ func TestCompressModeDesc(t *testing.T) {
 	}
 }
 
+func TestCompressUniqueNameWithOutputDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	if err := os.Mkdir("src", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("src/a.txt", []byte("contenido a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{Format: Gz, OutputDir: "out", KeepOrig: true}
+
+	first, err := DoCompress([]string{"src/a.txt"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0] != "out/a.tar.gz" {
+		t.Fatalf("primera compresión outPath = %v", first)
+	}
+
+	second, err := DoCompress([]string{"src/a.txt"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0] != "out/a_1.tar.gz" {
+		t.Fatalf("segunda compresión outPath = %v (debería evitar colisión)", second)
+	}
+
+	for _, want := range []string{"out/a.tar.gz", "out/a_1.tar.gz"} {
+		if _, statErr := os.Stat(want); statErr != nil {
+			t.Errorf("Esperaba %s: %v", want, statErr)
+		}
+	}
+}
+
 func TestFastOrSlow(t *testing.T) {
 	opts := CompressOptions{CompressionOpts: ""}
 	lvl := fastOrSlow(opts, 6)

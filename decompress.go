@@ -437,34 +437,33 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 	} else {
-		// Direct tool invocation — decompress the compression layer
-		args := strings.Fields(info.DirectFlags)
-		args = append(args, "--", file)
-		cmd := exec.Command(info.Tool, args...)
-		cmd.Dir = dir
-		cmd.Stdout = stdoutFor(opts.Progress)
-		cmd.Stderr = stderrFor(opts.Progress)
-		if err := cmd.Run(); err != nil {
+		// Decompress the compression layer, writing the tar into dir
+		tarName := filepath.Join(dir, filepath.Base(stripTarExt(file))+".tar")
+		pipeFlags := strings.Fields(info.PipeFlags)
+		decompCmd := exec.Command(info.Tool, pipeFlags...)
+		decompCmd.Args = append(decompCmd.Args, "--", file)
+		tarFile, err := os.Create(tarName)
+		if err != nil {
+			return fmt.Errorf("Error creando tar temporal: %w", err)
+		}
+		defer func() {
+			tarFile.Close()
+			if !opts.KeepOrig {
+				os.Remove(tarName)
+			}
+		}()
+		decompCmd.Stdout = tarFile
+		decompCmd.Stderr = stderrFor(opts.Progress)
+		if err := decompCmd.Run(); err != nil {
 			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 		}
 
-		// For tar-based archives, extract the resulting tar
 		if info.IsTar {
-			base := stripTarExt(file)
-			tarName := base + ".tar"
-			if _, err := os.Stat(tarName); err == nil {
-				extractCmd := exec.Command("tar", "-xf", tarName, "-C", dir)
-				extractCmd.Stdout = stdoutFor(opts.Progress)
-				extractCmd.Stderr = stderrFor(opts.Progress)
-				if err := extractCmd.Run(); err != nil {
-					os.Remove(tarName)
-					return fmt.Errorf("Error extrayendo tar de %s: %w", tarName, err)
-				}
-				if !opts.KeepOrig {
-					if err := os.Remove(tarName); err != nil {
-						WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, tarName, err, NC)
-					}
-				}
+			extractCmd := exec.Command("tar", "-xf", tarName, "-C", dir)
+			extractCmd.Stdout = stdoutFor(opts.Progress)
+			extractCmd.Stderr = stderrFor(opts.Progress)
+			if err := extractCmd.Run(); err != nil {
+				return fmt.Errorf("Error extrayendo tar de %s: %w", tarName, err)
 			}
 		}
 	}
@@ -582,13 +581,21 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			}
 			return nil
 		}
-		directArgs := strings.Fields(info.DirectFlags)
-		cmd := exec.Command(info.Tool, directArgs...)
-		cmd.Args = append(cmd.Args, "--", file)
-		cmd.Dir = dir
-		cmd.Stdout = stdoutFor(opts.Progress)
-		cmd.Stderr = stderrFor(opts.Progress)
-		return cmd.Run()
+		pipeFlags := strings.Fields(info.PipeFlags)
+		decompCmd := exec.Command(info.Tool, pipeFlags...)
+		decompCmd.Args = append(decompCmd.Args, "--", file)
+		outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
+		outFile, err := os.Create(outputPath)
+		if err != nil {
+			return fmt.Errorf("Error creando archivo de salida: %w", err)
+		}
+		defer outFile.Close()
+		decompCmd.Stdout = outFile
+		decompCmd.Stderr = stderrFor(opts.Progress)
+		if err := decompCmd.Run(); err != nil {
+			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
+		}
+		return nil
 	}
 }
 

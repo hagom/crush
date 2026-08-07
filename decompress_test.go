@@ -122,6 +122,51 @@ func TestDecompressPreExistingKept(t *testing.T) {
 	}
 }
 
+func TestDecompressRelativeOutputDir(t *testing.T) {
+	if !hasTool("tar") {
+		t.Skip("tar no disponible")
+	}
+	tmpDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	src := "source.txt"
+	if err := os.WriteFile(src, []byte(strings.Repeat("contenido repetido ", 1000)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	makeGz(t, src, "data.txt.gz")
+	if err := os.Mkdir("content", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("content/a.txt", []byte("aaaa"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("tar", "-cf", "data.tar", "content").Run(); err != nil {
+		t.Fatal(err)
+	}
+	makeGz(t, "data.tar", "data.tar.gz")
+	os.Remove("data.tar")
+
+	err = DoDecompress([]string{"data.txt.gz", "data.tar.gz"}, DecompressOptions{OutputDir: "out", KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoDecompress con -o relativo = %v", err)
+	}
+
+	for _, want := range []string{"out/data.txt", "out/content/a.txt"} {
+		if fi, statErr := os.Stat(want); statErr != nil {
+			t.Errorf("Salida esperada %s no existe: %v", want, statErr)
+		} else if fi.Size() == 0 {
+			t.Errorf("Salida %s vacía", want)
+		}
+	}
+}
+
 func TestDecompressTarCleanupOnError(t *testing.T) {
 	if !hasTool("tar") {
 		t.Skip("tar no disponible")

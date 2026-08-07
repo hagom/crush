@@ -359,7 +359,7 @@ func ListCompressed(f *os.File) error {
 			cmd = exec.Command("gzip", "-l", fpath)
 		}
 	case strings.HasSuffix(name, ".bz2"):
-		cmd = exec.Command(bzip2Bin(), "-l", fpath)
+		cmd = exec.Command(bzip2Bin(), "-tv", fpath)
 	case strings.HasSuffix(name, ".xz"):
 		cmd = exec.Command("xz", "-l", fpath)
 	case strings.HasSuffix(name, ".zst"):

@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -60,6 +62,38 @@ func TestContains(t *testing.T) {
 func TestIsToolInstalled(t *testing.T) {
 	if isToolInstalled(nil, "pigz") {
 		t.Error("isToolInstalled(nil, pigz) = true, want false")
+	}
+}
+
+func TestListCompressedBz2(t *testing.T) {
+	bin := bzip2Bin()
+	if !hasTool(bin) {
+		t.Skip("bzip2 no instalado")
+	}
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "data.txt")
+	if err := os.WriteFile(src, []byte("contenido de prueba"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "-f", src)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(filepath.Join(tmp, "data.txt.bz2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	err = ListCompressed(f)
+	os.Stdout = old
+	w.Close()
+	r.Close()
+	if err != nil {
+		t.Fatalf("ListCompressed(.bz2): %v", err)
 	}
 }
 

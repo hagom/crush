@@ -373,7 +373,7 @@ func ListCompressed(f *os.File) error {
 	case strings.HasSuffix(name, ".lz"):
 		cmd = exec.Command("plzip", "-l", fpath)
 	case strings.HasSuffix(name, ".lz4"):
-		cmd = exec.Command("lz4", "-l", fpath)
+		cmd = exec.Command("lz4", "--list", fpath)
 	case strings.HasSuffix(name, ".br"):
 		fmt.Printf("Compressed: %s (%s)\n", name, FormatSize(info.Size()))
 		return nil

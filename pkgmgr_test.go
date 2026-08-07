@@ -97,6 +97,36 @@ func TestListCompressedBz2(t *testing.T) {
 	}
 }
 
+func TestListCompressedLz4(t *testing.T) {
+	if !hasTool("lz4") {
+		t.Skip("lz4 no instalado")
+	}
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "data.txt")
+	if err := os.WriteFile(src, []byte("contenido de prueba"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("lz4", "-q", src).Run(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(filepath.Join(tmp, "data.txt.lz4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	err = ListCompressed(f)
+	os.Stdout = old
+	w.Close()
+	r.Close()
+	if err != nil {
+		t.Fatalf("ListCompressed(.lz4): %v", err)
+	}
+}
+
 func TestListCompressed(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "*.unknown")
 	if err != nil {

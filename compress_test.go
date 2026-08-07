@@ -166,6 +166,29 @@ func TestCompressMissingToolNoOutput(t *testing.T) {
 	}
 }
 
+func TestCompressParallelNoBorraPreexistente(t *testing.T) {
+	tmp := t.TempDir()
+	preexist := filepath.Join(tmp, "missing.gz.part")
+	if err := os.WriteFile(preexist, []byte("previo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmp,
+		SplitSize: 1,
+		Parallel:  2,
+		KeepOrig:  true,
+		Progress:  NewProgressTracker(0, 1),
+	}
+	_, err := compressParallel([]string{filepath.Join(tmp, "missing.txt")}, opts)
+	if err == nil {
+		t.Fatal("esperaba error por archivo fuente inexistente")
+	}
+	if _, statErr := os.Stat(preexist); statErr != nil {
+		t.Fatalf("archivo preexistente fue eliminado como 'salida parcial': %v", statErr)
+	}
+}
+
 func TestFastOrSlow(t *testing.T) {
 	opts := CompressOptions{CompressionOpts: ""}
 	lvl := fastOrSlow(opts, 6)

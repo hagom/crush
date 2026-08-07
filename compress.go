@@ -115,6 +115,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, nil
 	}
 
+	if err := CheckCompressTools(opts.Format); err != nil {
+		return nil, err
+	}
+
 	totalSize := int64(0)
 	for _, f := range files {
 		info, err := os.Stat(f)
@@ -338,6 +342,56 @@ func splitOutPath(outPath string, opts CompressOptions) string {
 func isTarBased(f Format) bool {
 	return f == Gz || f == Xz || f == Bz2 || f == Bz3 || f == Zst ||
 		f == Lz || f == Lrz || f == Lz4 || f == Br
+}
+
+func compressToolName(f Format) string {
+	switch f {
+	case Gz:
+		if hasTool("pigz") {
+			return "pigz"
+		}
+		return "gzip"
+	case Xz:
+		return "xz"
+	case Bz2:
+		return bzip2Bin()
+	case Bz3:
+		return "bzip3"
+	case Zst:
+		return "zstd"
+	case Lz:
+		if hasTool("plzip") {
+			return "plzip"
+		}
+		return "lzip"
+	case Lz4:
+		return "lz4"
+	case Br:
+		return "brotli"
+	case Lrz:
+		return "lrzip"
+	case Zip:
+		return "zip"
+	case SevenZ:
+		return sevenzBin()
+	case Tar:
+		return "tar"
+	case Rar:
+		return rarBin()
+	default:
+		return ""
+	}
+}
+
+func CheckCompressTools(f Format) error {
+	tool := compressToolName(f)
+	if tool == "" {
+		return fmt.Errorf("formato no soportado para compresión: %s", f)
+	}
+	if !hasTool(tool) {
+		return fmt.Errorf("herramienta no instalada: %s (ejecuta crush --install-deps)", tool)
+	}
+	return nil
 }
 
 func compressItems(files []string, outPath string, opts CompressOptions) error {

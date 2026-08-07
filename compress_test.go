@@ -131,6 +131,41 @@ func TestCompressParallelSplit(t *testing.T) {
 	}
 }
 
+func TestCheckCompressTools(t *testing.T) {
+	if err := CheckCompressTools(Gz); err != nil {
+		t.Fatalf("gz no debería fallar: %v", err)
+	}
+	if hasTool("brotli") {
+		t.Skip("brotli instalado; no se puede probar la ausencia de herramienta")
+	}
+	if err := CheckCompressTools(Br); err == nil {
+		t.Fatal("esperaba error con brotli ausente")
+	} else if !strings.Contains(err.Error(), "brotli") {
+		t.Fatalf("error sin nombre de herramienta: %v", err)
+	}
+}
+
+func TestCompressMissingToolNoOutput(t *testing.T) {
+	if hasTool("brotli") {
+		t.Skip("brotli instalado; no se puede probar la ausencia de herramienta")
+	}
+	tmpDir := t.TempDir()
+	f := filepath.Join(tmpDir, "x.txt")
+	if err := os.WriteFile(f, []byte("datos"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := DoCompress([]string{f}, CompressOptions{Format: Br, OutputDir: tmpDir, KeepOrig: true})
+	if err == nil {
+		t.Fatal("esperaba error de herramienta ausente")
+	}
+	if !strings.Contains(err.Error(), "herramienta") {
+		t.Fatalf("error debería ser del pre-check de herramientas: %v", err)
+	}
+	if g, _ := filepath.Glob(filepath.Join(tmpDir, "*.br")); len(g) != 0 {
+		t.Fatalf("no debió crear archivo de salida: %v", g)
+	}
+}
+
 func TestFastOrSlow(t *testing.T) {
 	opts := CompressOptions{CompressionOpts: ""}
 	lvl := fastOrSlow(opts, 6)

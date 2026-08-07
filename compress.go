@@ -328,6 +328,13 @@ func expandGlobs(items []string) []string {
 	return result
 }
 
+func splitOutPath(outPath string, opts CompressOptions) string {
+	if opts.SplitSize > 0 {
+		return outPath + ".part"
+	}
+	return outPath
+}
+
 func isTarBased(f Format) bool {
 	return f == Gz || f == Xz || f == Bz2 || f == Bz3 || f == Zst ||
 		f == Lz || f == Lrz || f == Lz4 || f == Br
@@ -446,6 +453,9 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 		defer outFile.Close()
 
 		var writer io.Writer = outFile
+		if opts.SplitSize > 0 {
+			writer = newSplitWriter(outFile, opts.SplitSize, outPath)
+		}
 		if opts.Progress != nil {
 			writer = &countingWriter{w: writer, pt: opts.Progress, fp: fp}
 		}
@@ -555,6 +565,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			base := filepath.Base(file)
 			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
 			outPath := GetUniqueName(filepath.Join(opts.OutputDir, baseNoExt), ext)
+			outPath = splitOutPath(outPath, opts)
 
 			fp.OutPath = outPath
 

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -95,6 +96,37 @@ func TestCompressUniqueNameWithOutputDir(t *testing.T) {
 	for _, want := range []string{"out/a.tar.gz", "out/a_1.tar.gz"} {
 		if _, statErr := os.Stat(want); statErr != nil {
 			t.Errorf("Esperaba %s: %v", want, statErr)
+		}
+	}
+}
+
+func TestCompressParallelSplit(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte(strings.Repeat("aaa", 10000)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte(strings.Repeat("bbb", 10000)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		SplitSize: 1,
+		KeepOrig:  true,
+		Parallel:  4,
+	}
+
+	out, err := DoCompress([]string{filepath.Join(tmpDir, "a.txt"), filepath.Join(tmpDir, "b.txt")}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("outPaths = %v, quiere 2", out)
+	}
+	for _, want := range []string{filepath.Join(tmpDir, "a.gz.part"), filepath.Join(tmpDir, "b.gz.part")} {
+		if _, statErr := os.Stat(want); statErr != nil {
+			t.Errorf("Con -s en paralelo esperaba %s: %v", want, statErr)
 		}
 	}
 }

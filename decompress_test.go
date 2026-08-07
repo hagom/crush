@@ -203,6 +203,58 @@ func TestDecompressLrz(t *testing.T) {
 	}
 }
 
+func TestListArchiveOutputsBz3(t *testing.T) {
+	if !hasTool("tar") {
+		t.Skip("tar no disponible")
+	}
+	tmpDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	if err := os.Mkdir("content", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("content/a.txt", []byte("aaaa"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		tool    string
+		ext     string
+		flags   string
+	}{
+		{"bz3", "bzip3", ".tar.bz3", "bzip3 -dc"},
+		{"lrz", "lrzip", ".tar.lrz", "lrzip -d -p 1 -o -"},
+		{"br", "brotli", ".tar.br", "brotli -dc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !hasTool(tt.tool) {
+				t.Skipf("%s no disponible", tt.tool)
+			}
+			archive := "data" + tt.ext
+			if err := exec.Command("tar", "-I", tt.tool, "-cf", archive, "content").Run(); err != nil {
+				t.Fatal(err)
+			}
+			outputs := listArchiveOutputs(archive, "out", FormatInfo{})
+			want := filepath.Join("out", "content", "a.txt")
+			for _, o := range outputs {
+				if o == want {
+					return
+				}
+			}
+			t.Errorf("listArchiveOutputs(%s) no incluye %s: %v", archive, want, outputs)
+		})
+	}
+}
+
 func TestDecompressTarCleanupOnError(t *testing.T) {
 	if !hasTool("tar") {
 		t.Skip("tar no disponible")

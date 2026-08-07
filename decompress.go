@@ -181,6 +181,8 @@ func listArchiveOutputs(file string, dir string, info FormatInfo) []string {
 		strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") ||
 		strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".txz") ||
 		strings.HasSuffix(lower, ".tar.bz2") || strings.HasSuffix(lower, ".tbz2") ||
+		strings.HasSuffix(lower, ".tar.bz3") || strings.HasSuffix(lower, ".tar.br") ||
+		strings.HasSuffix(lower, ".tar.lrz") ||
 		strings.HasSuffix(lower, ".tar.zst") || strings.HasSuffix(lower, ".tzst") ||
 		strings.HasSuffix(lower, ".tar.lz") || strings.HasSuffix(lower, ".tlz") ||
 		strings.HasSuffix(lower, ".tar.lz4") {
@@ -188,11 +190,6 @@ func listArchiveOutputs(file string, dir string, info FormatInfo) []string {
 			return resolveOutputs(members, dir)
 		}
 		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
-		return nil
-	}
-	if strings.HasSuffix(lower, ".tar.bz3") || strings.HasSuffix(lower, ".tar.br") ||
-		strings.HasSuffix(lower, ".tar.lrz") {
-		WriteLogf("  %s⚠ No se puede listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
 		return nil
 	}
 	if strings.HasSuffix(lower, ".7z") || strings.HasSuffix(lower, ".zip") {
@@ -213,7 +210,20 @@ func listArchiveOutputs(file string, dir string, info FormatInfo) []string {
 }
 
 func listTarMembers(file string) ([]string, bool) {
-	cmd := exec.Command("tar", "-tf", file)
+	lower := strings.ToLower(file)
+	args := []string{"-tf"}
+	switch {
+	case strings.HasSuffix(lower, ".tar.bz3"):
+		args = []string{"-I", "bzip3 -dc", "-tf"}
+	case strings.HasSuffix(lower, ".tar.br"):
+		args = []string{"-I", "brotli -dc", "-tf"}
+	case strings.HasSuffix(lower, ".tar.lrz"):
+		args = []string{"-I", "lrzip -d -p 1 -o -", "-tf"}
+	case strings.HasSuffix(lower, ".tar.lz4"):
+		args = []string{"-I", "lz4 -dc", "-tf"}
+	}
+	args = append(args, file)
+	cmd := exec.Command("tar", args...)
 	var out strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard

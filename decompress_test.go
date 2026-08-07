@@ -122,6 +122,18 @@ func TestDecompressPreExistingKept(t *testing.T) {
 	}
 }
 
+func TestDecompressPartFileHint(t *testing.T) {
+	tmp := t.TempDir()
+	part := filepath.Join(tmp, "big.tar.gz.part")
+	err := decompressFile(part, DecompressOptions{}, nil)
+	if err == nil {
+		t.Fatal("esperaba error para fragmento .part")
+	}
+	if !strings.Contains(err.Error(), "concatena") {
+		t.Fatalf("mensaje debería sugerir concatenar las partes: %v", err)
+	}
+}
+
 func TestPipeCmdForLz4UpperExt(t *testing.T) {
 	tmp := t.TempDir()
 	lz4File := filepath.Join(tmp, "x.tar.LZ4")

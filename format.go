@@ -91,7 +91,7 @@ func FormatInfoFromFormat(f Format) FormatInfo {
 	case Lz:
 		return FormatInfo{Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case Lrz:
-		return FormatInfo{Tool: "lrzip", PipeFlags: "-d -k -p " + ncpuStr() + " -o -", DirectFlags: "-d -k -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Tool: "lrzip", PipeFlags: "-d -p " + ncpuStr() + " -o -", DirectFlags: "-d -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case Lz4:
 		return FormatInfo{Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case Br:

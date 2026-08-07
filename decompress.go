@@ -554,7 +554,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			}
 			return pipeline(outFile, os.Stderr, decompCmd, exec.Command("pv", pvArgs...))
 		}
-		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-k", "--", file, "-o", outputPath}
+		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-o", outputPath, "--", file}
 		cmd := exec.Command("lrzip", args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)

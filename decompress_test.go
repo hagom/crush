@@ -167,6 +167,42 @@ func TestDecompressRelativeOutputDir(t *testing.T) {
 	}
 }
 
+func TestDecompressLrz(t *testing.T) {
+	if !hasTool("lrzip") {
+		t.Skip("lrzip no disponible")
+	}
+	tmpDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	if err := os.WriteFile("data.txt", []byte(strings.Repeat("contenido lrzip repetido ", 500)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("lrzip", "-f", "data.txt").Run(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat("data.txt.lrz"); err != nil {
+		t.Fatal("No se creó data.txt.lrz:", err)
+	}
+
+	err = DoDecompress([]string{"data.txt.lrz"}, DecompressOptions{OutputDir: "out", KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoDecompress .lrz = %v", err)
+	}
+
+	if fi, statErr := os.Stat("out/data.txt"); statErr != nil {
+		t.Errorf("Salida esperada out/data.txt no existe: %v", statErr)
+	} else if fi.Size() == 0 {
+		t.Error("Salida out/data.txt vacía")
+	}
+}
+
 func TestDecompressTarCleanupOnError(t *testing.T) {
 	if !hasTool("tar") {
 		t.Skip("tar no disponible")

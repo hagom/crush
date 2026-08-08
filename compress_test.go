@@ -131,6 +131,51 @@ func TestCompressParallelSplit(t *testing.T) {
 	}
 }
 
+func TestSplitUnsupportedFormatsDisabled(t *testing.T) {
+	if !hasTool(sevenzBin()) && !hasTool("zip") && !hasTool("lrzip") {
+		t.Skip("sin herramientas zip/lrzip")
+	}
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "a.txt")
+	if err := os.WriteFile(src, []byte("contenido a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if hasTool("lrzip") {
+		out, err := DoCompress([]string{src}, CompressOptions{Format: Lrz, OutputDir: tmpDir, SplitSize: 1, KeepOrig: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range out {
+			if strings.HasSuffix(o, ".part") {
+				t.Errorf("lrz con -s no debe producir .part: %s", o)
+			}
+			if _, statErr := os.Stat(o); statErr != nil {
+				t.Errorf("salida %s no existe: %v", o, statErr)
+			}
+		}
+	}
+
+	if !hasTool(sevenzBin()) && !hasTool("zip") {
+		return
+	}
+	src2 := filepath.Join(tmpDir, "b.txt")
+	if err := os.WriteFile(src2, []byte("contenido b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := DoCompress([]string{src, src2}, CompressOptions{Format: Zip, OutputDir: tmpDir, SplitSize: 1, Parallel: 2, KeepOrig: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range out {
+		if strings.HasSuffix(o, ".part") {
+			t.Errorf("zip con -s no debe producir .part: %s", o)
+		}
+		if _, statErr := os.Stat(o); statErr != nil {
+			t.Errorf("salida %s no existe: %v", o, statErr)
+		}
+	}
+}
 func TestCheckCompressTools(t *testing.T) {
 	if err := CheckCompressTools(Gz); err != nil {
 		t.Fatalf("gz no debería fallar: %v", err)

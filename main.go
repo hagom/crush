@@ -149,6 +149,13 @@ func main() {
 
 	flag.Parse()
 
+	outDirSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "o" {
+			outDirSet = true
+		}
+	})
+
 	// Detect stdin pipe mode (needed before -f/-n warnings)
 	stdinIsPipe := false
 	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
@@ -204,9 +211,14 @@ func main() {
 	}
 
 	if conflict {
-		for f, name := range map[*bool]string{compressFlag: "-c", decompressFlag: "-d", listFlag: "-l", testFlag: "-t", readFlag: "-r"} {
-			if *f {
-				conflictFlags = append(conflictFlags, name)
+		for _, f := range []struct {
+			v    *bool
+			name string
+		}{
+			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {readFlag, "-r"},
+		} {
+			if *f.v {
+				conflictFlags = append(conflictFlags, f.name)
 			}
 		}
 		fmt.Fprintf(os.Stderr, "Error: los flags %s no se pueden combinar\n", strings.Join(conflictFlags, " + "))
@@ -250,7 +262,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Warning: -n solo tiene efecto con -c o -d (ignorado)")
 	}
 	// -C requiere -o
-	if *combineFlag && *outputDir == "." {
+	if *combineFlag && !outDirSet {
 		fmt.Fprintln(os.Stderr, "Error: -C requiere -o DIRECTORIO")
 		os.Exit(1)
 	}
@@ -615,13 +627,9 @@ func doInstallCompletion(shell string) {
 
 	// Ensure parent directory exists
 	parentDir := filepath.Dir(dest)
-	cmd := exec.Command("sudo", "mkdir", "-p", parentDir)
-	cmd.Stderr = os.Stderr
-	cmd.Run()
+	runElevated("mkdir", "-p", parentDir)
 
-	cmd = exec.Command("sudo", "install", "-m", "644", tmpPath, dest)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runElevated("install", "-m", "644", tmpPath, dest); err != nil {
 		os.Remove(tmpPath)
 		fmt.Fprintf(os.Stderr, "%sError: no se pudo instalar completado en %s%s\n", Red, dest, NC)
 		os.Exit(1)

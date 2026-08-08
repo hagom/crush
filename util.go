@@ -40,17 +40,53 @@ type FileProgress struct {
 	Name    string
 	Size    int64
 	Current atomic.Int64
-	Status  string // "waiting", "active", "done", "error"
-	Start   time.Time
-	OutPath string
+	status  string
+	start   time.Time
+	outPath string
 	mu      sync.Mutex
 }
 
+func (fp *FileProgress) Status() string {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	return fp.status
+}
+
+func (fp *FileProgress) SetStatus(s string) {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	fp.status = s
+}
+
+func (fp *FileProgress) StartTime() time.Time {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	return fp.start
+}
+
+func (fp *FileProgress) SetStart(t time.Time) {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	fp.start = t
+}
+
+func (fp *FileProgress) OutPath() string {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	return fp.outPath
+}
+
+func (fp *FileProgress) SetOutPath(p string) {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	fp.outPath = p
+}
+
 func pollFileProgress(fp *FileProgress) {
-	if fp == nil || fp.Status != "active" || fp.OutPath == "" || fp.Size <= 0 {
+	if fp == nil || fp.Status() != "active" || fp.OutPath() == "" || fp.Size <= 0 {
 		return
 	}
-	fi, err := os.Stat(fp.OutPath)
+	fi, err := os.Stat(fp.OutPath())
 	if err != nil {
 		return
 	}
@@ -802,7 +838,7 @@ func fileLine(fp *FileProgress) string {
 	}
 	name = fmt.Sprintf("  %-"+fmt.Sprintf("%d", pad-2)+"s", name)
 
-	switch fp.Status {
+	switch fp.Status() {
 	case "waiting":
 		return fmt.Sprintf("%s%sesperando...%s", name, Yellow, NC)
 	case "active":
@@ -823,10 +859,7 @@ func fileLine(fp *FileProgress) string {
 			line += fmt.Sprintf("  %s/%s", fmtSizeDec(current), fmtSizeDec(fp.Size))
 		}
 		if current > 0 && fp.Size > 0 && current < fp.Size {
-			fp.mu.Lock()
-			start := fp.Start
-			fp.mu.Unlock()
-			elapsed := time.Since(start)
+			elapsed := time.Since(fp.StartTime())
 			if elapsed.Seconds() > 0 {
 				remaining := time.Duration(float64(elapsed) / float64(current) * float64(fp.Size-current))
 				line += fmt.Sprintf("  %v", remaining.Round(time.Second))
@@ -838,7 +871,7 @@ func fileLine(fp *FileProgress) string {
 	case "error":
 		return fmt.Sprintf("%s%s✗%s", name, Red, NC)
 	default:
-		return fmt.Sprintf("%s %s", name, fp.Status)
+		return fmt.Sprintf("%s %s", name, fp.Status())
 	}
 }
 

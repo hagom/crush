@@ -242,12 +242,13 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	defer pt.Stop()
 
 	opts.TotalSize = totalSize
-	_, preExistErr := os.Stat(outPath)
+	realOut := splitOutPath(outPath, opts)
+	_, preExistErr := os.Stat(realOut)
 	err = compressItems(filteredFiles, outPath, opts)
 	if err != nil {
 		if preExistErr != nil {
-			if rmErr := os.Remove(outPath); rmErr == nil {
-				WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, outPath, NC)
+			if rmErr := os.Remove(realOut); rmErr == nil {
+				WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, realOut, NC)
 			}
 		}
 		return nil, err
@@ -257,13 +258,13 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	origSize := totalSize
 	finalSize := int64(0)
-	if info, err := os.Stat(outPath); err == nil {
+	if info, err := os.Stat(realOut); err == nil {
 		finalSize = info.Size()
 	}
 
 	WriteLogf("\n")
 	WriteLogf("%s=== Reporte de Compresión ===%s\n", Green, NC)
-	WriteLogf("%sArchivo Salida:%s    %s%s%s\n", Blue, NC, Yellow, outPath, NC)
+	WriteLogf("%sArchivo Salida:%s    %s%s%s\n", Blue, NC, Yellow, realOut, NC)
 	WriteLogf("%sTamaño Original:%s   %s%s%s\n", Blue, NC, Red, FormatSize(origSize), NC)
 	WriteLogf("%sTamaño Final:%s      %s%s%s\n", Blue, NC, Green, FormatSize(finalSize), NC)
 	WriteLogf("%sAhorro de espacio:%s %s%s%%%s\n", Blue, NC, Green, CalcPct(origSize, finalSize), NC)
@@ -278,7 +279,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
 		}
 	}
-	return []string{outPath}, nil
+	return []string{realOut}, nil
 }
 
 var CompressCleanupFiles []string

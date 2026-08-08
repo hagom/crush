@@ -95,7 +95,8 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		if err == nil {
 			sz = fi.Size()
 		}
-		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz, Status: "waiting"}
+		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz}
+		fps[i].SetStatus("waiting")
 	}
 	opts.Progress.SetFiles(fps)
 
@@ -108,11 +109,11 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 		err := decompressFile(allFiles[0], opts, fps[0])
 		if err != nil {
-			fps[0].Status = "error"
+			fps[0].SetStatus("error")
 			WriteLogf("%s✗ %s%s\n", Red, err, NC)
 			errors++
 		} else {
-			fps[0].Status = "done"
+			fps[0].SetStatus("done")
 			successes++
 		}
 	} else {
@@ -142,9 +143,9 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 				defer func() { <-sem }()
 				err := decompressFile(f, opts, fp)
 				if err != nil {
-					fp.Status = "error"
+					fp.SetStatus("error")
 				} else {
-					fp.Status = "done"
+					fp.SetStatus("done")
 				}
 				results <- err
 			}(file, fp)
@@ -299,8 +300,8 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		opts.Progress.SetCurrentFile(file)
 	}
 	if fp != nil {
-		fp.Status = "active"
-		fp.Start = time.Now()
+		fp.SetStatus("active")
+		fp.SetStart(time.Now())
 	}
 
 	info, err := DetectFormat(file)

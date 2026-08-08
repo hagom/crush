@@ -489,10 +489,10 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 			if err == nil && opts.Progress != nil {
 				opts.Progress.FileDone(outPath)
 				if fp != nil {
-					fp.Status = "done"
+					fp.SetStatus("done")
 				}
 			} else if fp != nil {
-				fp.Status = "error"
+				fp.SetStatus("error")
 			}
 			return err
 		}
@@ -603,7 +603,8 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 		if err == nil {
 			sz = fi.Size()
 		}
-		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz, Status: "waiting"}
+		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz}
+		fps[i].SetStatus("waiting")
 	}
 	opts.Progress.SetFiles(fps)
 
@@ -616,15 +617,15 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			fp.Status = "active"
-			fp.Start = time.Now()
+			fp.SetStatus("active")
+			fp.SetStart(time.Now())
 
 			base := filepath.Base(file)
 			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
 			outPath := GetUniqueName(filepath.Join(opts.OutputDir, baseNoExt), ext)
 			outPath = splitOutPath(outPath, opts)
 
-			fp.OutPath = outPath
+			fp.SetOutPath(outPath)
 
 			mu.Lock()
 			outFiles = append(outFiles, outPath)
@@ -637,7 +638,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			_, preExistErr := os.Stat(outPath)
 			err := compressSingleFile(file, outPath, opts, fp)
 			if err != nil {
-				fp.Status = "error"
+				fp.SetStatus("error")
 				if preExistErr != nil {
 					if rmErr := os.Remove(outPath); rmErr == nil {
 						WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, outPath, NC)
@@ -645,7 +646,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 				}
 				errCh <- fmt.Errorf("%s: %w", file, err)
 			} else {
-				fp.Status = "done"
+				fp.SetStatus("done")
 			}
 		}(f, fp)
 	}
@@ -679,7 +680,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 
 	successFiles := make([]string, 0, len(files))
 	for i, fp := range fps {
-		if fp.Status == "done" {
+		if fp.Status() == "done" {
 			successFiles = append(successFiles, files[i])
 		}
 	}

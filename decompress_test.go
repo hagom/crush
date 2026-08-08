@@ -129,8 +129,8 @@ func TestDecompressPartFileHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("esperaba error para fragmento .part")
 	}
-	if !strings.Contains(err.Error(), "concatena") {
-		t.Fatalf("mensaje debería sugerir concatenar las partes: %v", err)
+	if !strings.Contains(err.Error(), "cat big.tar.gz.part* > big.tar.gz") {
+		t.Fatalf("mensaje debería sugerir concatenar correctamente: %v", err)
 	}
 }
 

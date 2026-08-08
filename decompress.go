@@ -306,8 +306,9 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	info, err := DetectFormat(file)
 	if err != nil {
 		if strings.Contains(filepath.Base(file), ".part") {
+			base := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
 			return fmt.Errorf("%s es un fragmento de división (split); concatena todas las partes antes de descomprimir (cat %s.part* > %s)",
-				file, filepath.Base(file), strings.TrimSuffix(file, filepath.Ext(file)))
+				file, base, base)
 		}
 		return err
 	}

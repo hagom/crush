@@ -452,7 +452,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		}
 	} else {
 		// Decompress the compression layer, writing the tar into dir
-		tarName := filepath.Join(dir, filepath.Base(stripTarExt(file))+".tar")
+		tarName := GetUniqueName(filepath.Join(dir, filepath.Base(stripTarExt(file))), "tar")
 		decompCmd, closer := pipeCmdFor(info, file)
 		if closer != nil {
 			defer closer.Close()

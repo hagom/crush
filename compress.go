@@ -74,6 +74,14 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	ext := ExtForFormat(opts.Format)
 
+	if opts.SplitSize > 0 {
+		switch opts.Format {
+		case Lrz, Zip, SevenZ, Tar, Rar:
+			WriteLogf("  %ssplit (-s) no soportado para %s; se ignora%s\n", Yellow, opts.Format, NC)
+			opts.SplitSize = 0
+		}
+	}
+
 	if singleItem {
 		base := filepath.Base(files[0])
 		baseName := strings.TrimSuffix(base, filepath.Ext(base))

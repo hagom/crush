@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -139,5 +140,57 @@ func TestListCompressed(t *testing.T) {
 	err = ListCompressed(f)
 	if err == nil {
 		t.Error("ListCompressed(.unknown) = nil, want error")
+	}
+}
+
+func TestCompressReadTar(t *testing.T) {
+	tmp := t.TempDir()
+	txtFile := filepath.Join(tmp, "sample.txt")
+	expected := "tar stream content for test"
+	if err := os.WriteFile(txtFile, []byte(expected), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tarFile := filepath.Join(tmp, "archive.tar")
+	cmd := exec.Command("tar", "-cf", tarFile, "-C", tmp, "sample.txt")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(tarFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	data, err := CompressRead(f)
+	if err != nil {
+		t.Fatalf("CompressRead(tar) failed: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != expected {
+		t.Errorf("CompressRead(tar) = %q, want %q", string(data), expected)
+	}
+
+	// Verify sample.txt was NOT extracted to the working directory
+	if _, err := os.Stat("sample.txt"); err == nil {
+		_ = os.Remove("sample.txt")
+		t.Errorf("CompressRead(tar) leaked extracted file into current directory")
+	}
+}
+
+func TestCompressReadAndListBz3(t *testing.T) {
+	tmp := t.TempDir()
+	bz3File := filepath.Join(tmp, "test.bz3")
+	if err := os.WriteFile(bz3File, []byte("fake bz3 data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(bz3File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	// ListCompressed should succeed without error
+	if err := ListCompressed(f); err != nil {
+		t.Errorf("ListCompressed(bz3) = %v, want nil", err)
 	}
 }

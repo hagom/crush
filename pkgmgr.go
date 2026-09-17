@@ -311,8 +311,10 @@ func CompressRead(f *os.File) ([]byte, error) {
 		cmd = exec.Command(sevenzBin(), "x", "-so", "--", f.Name())
 	case strings.HasSuffix(info.Name(), ".rar"):
 		cmd = exec.Command(rarBin(), "p", "--", f.Name())
+	case strings.HasSuffix(info.Name(), ".bz3"):
+		cmd = exec.Command("bzip3", "-dc", "--", f.Name())
 	case strings.HasSuffix(info.Name(), ".tar"):
-		cmd = exec.Command("tar", "-xf", "--", f.Name())
+		cmd = exec.Command("tar", "-xOf", f.Name())
 	default:
 		return nil, fmt.Errorf("no se puede leer archivo comprimido: %s", info.Name())
 	}
@@ -362,6 +364,9 @@ func ListCompressed(f *os.File) error {
 		}
 	case strings.HasSuffix(name, ".bz2"):
 		cmd = exec.Command(bzip2Bin(), "-tv", fpath)
+	case strings.HasSuffix(name, ".bz3"):
+		fmt.Printf("Compressed: %s (%s)\n", name, FormatSize(info.Size()))
+		return nil
 	case strings.HasSuffix(name, ".xz"):
 		cmd = exec.Command("xz", "-l", fpath)
 	case strings.HasSuffix(name, ".zst"):

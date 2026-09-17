@@ -571,6 +571,11 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 	case strings.HasSuffix(ext, ".lrz"):
 		outputPath := filepath.Join(dir, strings.TrimSuffix(filepath.Base(file), ".lrz"))
+		if !opts.Force {
+			if _, err := os.Stat(outputPath); err == nil {
+				return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", outputPath)
+			}
+		}
 		if opts.Progress == nil && hasTool("pv") {
 			pipeFlags := strings.Fields(info.PipeFlags)
 			decompCmd := exec.Command(info.Tool, pipeFlags...)
@@ -593,12 +598,17 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	default:
+		outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
+		if !opts.Force {
+			if _, err := os.Stat(outputPath); err == nil {
+				return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", outputPath)
+			}
+		}
 		if opts.Progress == nil && hasTool("pv") {
 			decompCmd, closer := pipeCmdFor(info, file)
 			if closer != nil {
 				defer closer.Close()
 			}
-			outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
 			outFile, err := os.Create(outputPath)
 			if err != nil {
 				return fmt.Errorf("Error creando archivo de salida: %w", err)
@@ -618,7 +628,6 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		if closer != nil {
 			defer closer.Close()
 		}
-		outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
 		outFile, err := os.Create(outputPath)
 		if err != nil {
 			return fmt.Errorf("Error creando archivo de salida: %w", err)

@@ -398,3 +398,56 @@ func TestDecompressTarKeepOrigNoLeak(t *testing.T) {
 	}
 }
 
+func TestDecompressNoForceRejectsExisting(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtPath := filepath.Join(tmpDir, "data.txt")
+	if err := os.WriteFile(txtPath, []byte("compressed content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("gzip", "-k", txtPath)
+	if err := cmd.Run(); err != nil {
+		t.Skip("gzip no disponible")
+	}
+	gzPath := txtPath + ".gz"
+
+	outDir := filepath.Join(tmpDir, "out")
+	if err := os.Mkdir(outDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	existingOut := filepath.Join(outDir, "data.txt")
+	if err := os.WriteFile(existingOut, []byte("pre-existing content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Force:     false,
+	}
+
+	err := DoDecompress([]string{gzPath}, opts)
+	if err == nil {
+		t.Fatalf("se esperaba error al descomprimir sin --force sobre archivo existente")
+	}
+
+	// Verificar que el contenido previo no fue sobreescrito
+	content, readErr := os.ReadFile(existingOut)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(content) != "pre-existing content" {
+		t.Errorf("el contenido fue sobreescrito sin --force: %q", string(content))
+	}
+
+	// Ahora con Force: true debe sobrescribir
+	opts.Force = true
+	if err := DoDecompress([]string{gzPath}, opts); err != nil {
+		t.Fatalf("falló descompresión con Force=true: %v", err)
+	}
+	content, _ = os.ReadFile(existingOut)
+	if string(content) != "compressed content" {
+		t.Errorf("contenido no actualizado con Force=true: %q", string(content))
+	}
+}
+

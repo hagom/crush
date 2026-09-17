@@ -131,10 +131,13 @@ func TestFile(file string, opts TestOptions) (string, error) {
 		return testWith(file, "brotli", "-t", "--", file)
 
 	case strings.HasSuffix(ext, ".tar"):
-		return testWith(file, "tar", "-tf", "--", file)
+		return testWith(file, "tar", "-tf", file)
 
 	case strings.HasSuffix(ext, ".gz"):
-		return testWith(file, "pigz", "-t", "--", file)
+		if hasTool("pigz") {
+			return testWith(file, "pigz", "-t", "--", file)
+		}
+		return testWith(file, "gzip", "-t", "--", file)
 
 	case strings.HasSuffix(ext, ".xz"):
 		return testWith(file, "xz", "-t", "--", file)
@@ -149,7 +152,10 @@ func TestFile(file string, opts TestOptions) (string, error) {
 		return testWith(file, "zstd", "-t", "--", file)
 
 	case strings.HasSuffix(ext, ".lz"):
-		return testWith(file, "plzip", "-t", "--", file)
+		if hasTool("plzip") {
+			return testWith(file, "plzip", "-t", "--", file)
+		}
+		return testWith(file, "lzip", "-t", "--", file)
 
 	case strings.HasSuffix(ext, ".lrz"):
 		return testWith(file, "lrzip", "-t", "--", file)

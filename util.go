@@ -437,8 +437,17 @@ func EstimateUncompressedSize(file string) int64 {
 // --- Filename ---
 
 var (
-	uniqueNameMu sync.Mutex
+	uniqueNameMu  sync.Mutex
+	reservedNames = make(map[string]bool)
 )
+
+func isNameAvailable(name string) bool {
+	if reservedNames[name] {
+		return false
+	}
+	_, err := os.Stat(name)
+	return os.IsNotExist(err)
+}
 
 func GetUniqueName(base, ext string) string {
 	uniqueNameMu.Lock()
@@ -448,16 +457,26 @@ func GetUniqueName(base, ext string) string {
 		base = strings.TrimSuffix(base, "."+ext)
 	}
 	name := base + "." + ext
-	if _, err := os.Stat(name); os.IsNotExist(err) {
+	if isNameAvailable(name) {
+		reservedNames[name] = true
 		return name
 	}
 	for counter := 1; counter < 1000; counter++ {
 		name = fmt.Sprintf("%s_%d.%s", base, counter, ext)
-		if _, err := os.Stat(name); os.IsNotExist(err) {
+		if isNameAvailable(name) {
+			reservedNames[name] = true
 			return name
 		}
 	}
-	return fmt.Sprintf("%s_%d.%s", base, 999, ext)
+	name = fmt.Sprintf("%s_%d.%s", base, 999, ext)
+	reservedNames[name] = true
+	return name
+}
+
+func ResetReservedNames() {
+	uniqueNameMu.Lock()
+	defer uniqueNameMu.Unlock()
+	reservedNames = make(map[string]bool)
 }
 
 // --- Logging ---

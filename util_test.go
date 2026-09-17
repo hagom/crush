@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -58,6 +59,28 @@ func TestGetUniqueName(t *testing.T) {
 	got := GetUniqueName("test", "txt")
 	if got != "test.txt" {
 		t.Errorf("GetUniqueName(test, txt) = %q, want %q", got, "test.txt")
+	}
+}
+
+func TestGetUniqueNameConcurrent(t *testing.T) {
+	n := 30
+	names := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			names[idx] = GetUniqueName("test_concurrent", "txt")
+		}(i)
+	}
+	wg.Wait()
+
+	seen := make(map[string]bool)
+	for _, name := range names {
+		if seen[name] {
+			t.Errorf("duplicate name returned concurrently: %s", name)
+		}
+		seen[name] = true
 	}
 }
 

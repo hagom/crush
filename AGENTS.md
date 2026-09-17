@@ -66,22 +66,31 @@ make install        # install -m 755 crush /usr/local/bin/
 
 ```
 crush/
-├── main.go        # CLI flags, dispatch (-c, -d, -l, -t, -r, --install)
+├── main.go        # CLI flags, dispatch (-c, -d, -l, -t, -r, --bench, --install)
 ├── format.go      # FormatInfo, ParseFormat, DetectFormat, ExtForFormat
 ├── compress.go    # DoCompress, compressItems, tar-pipe
 ├── decompress.go  # DoDecompress, splitWriter
+├── bench.go       # DoBench, BenchmarkFormat, GenerateBenchmarkDataset, FormatBenchTable
 ├── test_cmd.go    # DoTest, TestFile
-├── util.go        # NCPU, GetMemLimit, FormatSize, pipeline, logging, colors
+├── util.go        # NCPU, GetMemLimit, FormatSize, pipeline, lockedWriter, execCommand, logging, colors
 ├── pkgmgr.go      # DetectPkgManager, InstallMissingDeps, list helpers
 ├── Makefile
-└── *_test.go      # Tests por paquete
+├── .github/workflows/ci.yml  # GitHub Actions: test matrix Go 1.21-1.23, race detector, build
+├── *_test.go      # Tests por paquete
+└── mock_test.go   # Tests con mocks de exec.Command (patrón TestHelperProcess)
 ```
 
 ## Estado actual
 
-- Go: migración completa. 97 tests nativos pasando con race detector (-race). ~6190 líneas. 0 bugs conocidos.
+- Go: migración completa. 118 tests nativos pasando con race detector (-race). ~7400 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
+  - Comando `--bench` para medir throughput (MB/s) y ratio de compresión por formato con dataset determinista y verificación SHA256.
+  - Benchmarks nativos Go (`go test -bench=.`) para gz, zstd, xz, bz2, zip, 7z, lz, bz3.
+  - Inyección de dependencias con `var execCommand = exec.Command` y tests con mocks canónicos (`TestHelperProcess`).
+  - `lockedWriter` para serializar escrituras concurrentes a stderr en `pipeline()`.
+  - Extracción de `getMemFromFree()` como función testeable independiente de `/proc/meminfo`.
+  - CI/CD con GitHub Actions: matriz Go 1.21-1.23, race detector, go vet, build, smoke tests.
   - Corrección de 8 fallos de lógica auditados (BUG-L1 a BUG-L8):
     - `GetUniqueName` atómico y sincronizado en memoria contra colisiones concurrentes en compresión paralela (BUG-L1).
     - Cierre garantizado de descriptores de archivos divididos en `splitWriter` e implementación de `io.Closer` en `countingWriter` (BUG-L2).
@@ -95,12 +104,12 @@ crush/
   - Dry-run (`-n`), división (`-s`), exclusión (`-exclude`), barra de progreso estilo docker pull, colores ANSI, logging, instalador de dependencias multiplataforma, autocompletado shell.
 ## Próximos pasos
 
-- [ ] Tests con mock de exec.Command (inyección de dependencias)
-- [ ] Benchmarks Go
-- [ ] Comando `--bench` para medir velocidad por formato
+- [x] Tests con mock de exec.Command (inyección de dependencias)
+- [x] Benchmarks Go
+- [x] Comando `--bench` para medir velocidad por formato
 - [x] Compresión paralela de múltiples archivos (auto NCPU)
 - [x] Barra de progreso con ProgressTracker (byte-level en pipe, per-file en archivos)
-- [ ] CI/CD (GitHub Actions)
+- [x] CI/CD (GitHub Actions)
 - [ ] Publicar binarios precompilados en releases
 
 ## MCP Servers

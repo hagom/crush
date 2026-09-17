@@ -34,6 +34,8 @@ var (
 	logBuf         bytes.Buffer
 	logMu          sync.Mutex
 	loggingActive  atomic.Bool
+
+	execCommand = exec.Command
 )
 
 type FileProgress struct {
@@ -219,24 +221,32 @@ func GetMemLimit() int {
 		}
 	}
 
-	cmd := exec.Command("free", "-k")
+	if mb := getMemFromFree(); mb > 0 {
+		return mb
+	}
+
+	return 1024
+}
+
+func getMemFromFree() int {
+	cmd := execCommand("free", "-k")
 	out, err := cmd.Output()
-	if err == nil {
-		scanner := bufio.NewScanner(strings.NewReader(string(out)))
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "Mem:") {
-				fields := strings.Fields(line)
-				if len(fields) >= 7 {
-					if avail, err := strconv.Atoi(fields[6]); err == nil && avail > 0 {
-						return avail * 70 / 100 / 1024
-					}
+	if err != nil {
+		return 0
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "Mem:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 7 {
+				if avail, err := strconv.Atoi(fields[6]); err == nil && avail > 0 {
+					return avail * 70 / 100 / 1024
 				}
 			}
 		}
 	}
-
-	return 1024
+	return 0
 }
 
 // --- Size formatting ---
@@ -277,7 +287,7 @@ func GetAvailBytes(dir string) int64 {
 	if dir == "" {
 		dir = "."
 	}
-	cmd := exec.Command("df", "-B1", "--output=avail", dir)
+	cmd := execCommand("df", "-B1", "--output=avail", dir)
 	out, err := cmd.Output()
 	if err == nil {
 		lines := strings.Split(string(out), "\n")
@@ -288,7 +298,7 @@ func GetAvailBytes(dir string) int64 {
 		}
 	}
 
-	cmd = exec.Command("df", dir)
+	cmd = execCommand("df", dir)
 	out, err = cmd.Output()
 	if err == nil {
 		lines := strings.Split(string(out), "\n")
@@ -953,6 +963,17 @@ func (cw *countingWriter) Close() error {
 
 // --- Pipeline: chain multiple commands ---
 
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.w.Write(p)
+}
+
 func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	if len(cmds) == 0 {
 		return nil
@@ -966,8 +987,9 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	}
 	cmds[len(cmds)-1].Stdout = stdout
 	if stderr != nil {
+		lw := &lockedWriter{w: stderr}
 		for i := range cmds {
-			cmds[i].Stderr = stderr
+			cmds[i].Stderr = lw
 		}
 	}
 	for i := range cmds {

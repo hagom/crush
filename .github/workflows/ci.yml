@@ -1,0 +1,55 @@
+name: CI
+
+'on':
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test & Build (Go ${{ matrix.go-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.21', '1.22', '1.23']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Install compression tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pigz pbzip2 lbzip2 xz-utils zstd lzip lrzip p7zip-full lz4 brotli
+
+      - name: Verify style and lint (go vet)
+        run: go vet ./...
+
+      - name: Run test suite with race detector
+        run: go test -v -race ./...
+
+      - name: Build binary
+        run: go build -v -o crush .
+
+      - name: Smoke test CLI
+        run: |
+          ./crush --version
+          ./crush -h
+          echo "crush smoke test" > test_smoke.txt
+          ./crush -c -k -f gz test_smoke.txt
+          ./crush -t test_smoke.tar.gz
+          ./crush -d test_smoke.tar.gz -force
+          rm -f test_smoke.txt test_smoke.tar.gz

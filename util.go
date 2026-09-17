@@ -968,13 +968,38 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	}
 	for i := range cmds {
 		if err := cmds[i].Start(); err != nil {
+			for j := 0; j < i; j++ {
+				if cmds[j].Process != nil {
+					_ = cmds[j].Process.Kill()
+					_ = cmds[j].Wait()
+				}
+			}
 			return fmt.Errorf("pipeline start %d: %w", i, err)
 		}
 	}
-	for i := range cmds {
-		if err := cmds[i].Wait(); err != nil {
-			return fmt.Errorf("pipeline wait %d: %w", i, err)
+
+	type cmdResult struct {
+		idx int
+		err error
+	}
+	resCh := make(chan cmdResult, len(cmds))
+	for i, cmd := range cmds {
+		go func(index int, c *exec.Cmd) {
+			resCh <- cmdResult{idx: index, err: c.Wait()}
+		}(i, cmd)
+	}
+
+	var firstErr error
+	for received := 0; received < len(cmds); received++ {
+		res := <-resCh
+		if res.err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("pipeline cmd %d: %w", res.idx, res.err)
+			for j, cmd := range cmds {
+				if j != res.idx && cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			}
 		}
 	}
-	return nil
+	return firstErr
 }

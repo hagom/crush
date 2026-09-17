@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestNCPU(t *testing.T) {
@@ -140,6 +141,34 @@ func TestPipeline(t *testing.T) {
 		}
 		if strings.TrimSpace(buf.String()) != "hello-pipe" {
 			t.Errorf("pipeline(echo|cat) output = %q, want %q", buf.String(), "hello-pipe\n")
+		}
+	})
+
+	t.Run("first cmd fails kills downstream", func(t *testing.T) {
+		var buf bytes.Buffer
+		cmd1 := exec.Command("false")
+		cmd2 := exec.Command("cat")
+		err := pipeline(&buf, nil, cmd1, cmd2)
+		if err == nil {
+			t.Errorf("pipeline(false|cat) expected error, got nil")
+		}
+	})
+
+	t.Run("downstream fails terminates upstream without hanging", func(t *testing.T) {
+		var buf bytes.Buffer
+		cmd1 := exec.Command("sleep", "10")
+		cmd2 := exec.Command("false")
+		done := make(chan error, 1)
+		go func() {
+			done <- pipeline(&buf, nil, cmd1, cmd2)
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Errorf("expected error, got nil")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("pipeline hung waiting for upstream sleep instead of reacting to downstream failure")
 		}
 	})
 }

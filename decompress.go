@@ -472,6 +472,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		if err := decompCmd.Run(); err != nil {
 			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 		}
+		_ = tarFile.Close()
 
 		if info.IsTar {
 			extractCmd := exec.Command("tar", "-xf", tarName, "-C", dir)

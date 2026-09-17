@@ -79,8 +79,17 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 47 tests nativos pasando. ~3100 líneas.
-- Features implementadas: compresión/descompresión 13 formatos, dry-run, split, exclude, progress bar estilo docker pull (global + per-file con barras, porcentajes, ETA, velocidad), colors, logging, install deps, test, list, read, --install (bin + deps), --install-deps, --uninstall, detección de modos conflictivos, expansión de flags combinados (-ptkv).
+- Go: migración completa. 90 tests nativos pasando con race detector (-race). ~5850 líneas. 0 bugs conocidos.
+- Features implementadas y fixes recientes:
+  - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
+  - Corrección de verificación de archivos `.tar` en `crush -t` (BUG-01).
+  - Manejo robusto de compresión multi-archivo: compresión paralela estricta para archivos regulares individuales y derivación automática a `tar-pipe` cuando se incluyen directorios (BUG-02).
+  - Dependencias `lz4` y `brotli` incorporadas en `pkgmgr.go` y `handleInstallDeps()` (BUG-03).
+  - Eliminación garantizada de archivos temporales `.tar` intermedios durante descompresión incluso con `-k` (BUG-04).
+  - Flag CLI `-i` implementado para cargar listas de archivos desde fichero en todos los modos (BUG-05).
+  - Expansión y reordenamiento de flags con valor (`-i`, `-completion`, `--completion`) en `reorderArgs` (BUG-06).
+  - Fallbacks automáticos entre compresores paralelos y seriales (`pigz` → `gzip`, `plzip` → `lzip`).
+  - Dry-run (`-n`), división (`-s`), exclusión (`-exclude`), barra de progreso estilo docker pull, colores ANSI, logging, instalador de dependencias multiplataforma, autocompletado shell.
 ## Próximos pasos
 
 - [ ] Tests con mock de exec.Command (inyección de dependencias)

@@ -131,6 +131,35 @@ func TestCompressParallelSplit(t *testing.T) {
 	}
 }
 
+func TestCompressTarPipeSplit(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "sub")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "file.txt"), []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		SplitSize: 1,
+		KeepOrig:  true,
+	}
+
+	out, err := DoCompress([]string{subDir}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 output, got %d: %v", len(out), out)
+	}
+	if _, err := os.Stat(out[0]); err != nil {
+		t.Errorf("output file returned %s does not exist on disk: %v", out[0], err)
+	}
+}
+
 func TestSplitUnsupportedFormatsDisabled(t *testing.T) {
 	if !hasTool(sevenzBin()) && !hasTool("zip") && !hasTool("lrzip") {
 		t.Skip("sin herramientas zip/lrzip")

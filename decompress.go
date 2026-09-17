@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -729,12 +730,12 @@ func (w *splitWriter) Write(p []byte) (int, error) {
 }
 
 func (w *splitWriter) Close() error {
-	baseFile, ok := w.base.(*os.File)
-	if !ok {
-		return nil
-	}
-	if w.file != nil && w.file != baseFile {
-		return w.file.Close()
+	if w.file != nil {
+		err := w.file.Close()
+		w.file = nil
+		if err != nil && !errors.Is(err, os.ErrClosed) {
+			return err
+		}
 	}
 	return nil
 }

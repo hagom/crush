@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -448,6 +449,44 @@ func TestDecompressNoForceRejectsExisting(t *testing.T) {
 	content, _ = os.ReadFile(existingOut)
 	if string(content) != "compressed content" {
 		t.Errorf("contenido no actualizado con Force=true: %q", string(content))
+	}
+}
+
+func TestSplitWriterCloseAndCountingWriterCloser(t *testing.T) {
+	tmpDir := t.TempDir()
+	basePath := filepath.Join(tmpDir, "test.part")
+	firstFile, err := os.Create(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstFile.Close()
+
+	sw := newSplitWriter(firstFile, 1, basePath)
+	var w io.Writer = sw
+	pt := NewProgressTracker(100, 1)
+	cw := &countingWriter{w: w, pt: pt}
+
+	closer, ok := interface{}(cw).(io.Closer)
+	if !ok {
+		t.Fatalf("countingWriter does not implement io.Closer")
+	}
+
+	data := make([]byte, 1500*1024)
+	if _, err := cw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+
+	if sw.part < 1 {
+		t.Fatalf("expected split to occur, but part is %d", sw.part)
+	}
+
+	lastFile := sw.file
+	if err := closer.Close(); err != nil {
+		t.Fatalf("closer.Close() failed: %v", err)
+	}
+
+	if _, err := lastFile.Write([]byte("more")); err == nil {
+		t.Errorf("expected lastFile to be closed after Close(), but write succeeded")
 	}
 }
 

@@ -536,6 +536,9 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 		if opts.Progress != nil {
 			writer = &countingWriter{w: writer, pt: opts.Progress, fp: fp}
 		}
+		if closer, ok := writer.(io.Closer); ok {
+			defer closer.Close()
+		}
 
 		compressCmd := buildCompressCmd(opts)
 		compressCmd.Stderr = stderrFor(opts.Progress)
@@ -752,6 +755,9 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 
 	if opts.Progress != nil {
 		writer = &countingWriter{w: writer, pt: opts.Progress, fp: fp}
+	}
+	if closer, ok := writer.(io.Closer); ok {
+		defer closer.Close()
 	}
 
 	tarArgs := []string{"-cf", "-"}

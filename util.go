@@ -947,6 +947,13 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func (cw *countingWriter) Close() error {
+	if closer, ok := cw.w.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
 // --- Pipeline: chain multiple commands ---
 
 func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {

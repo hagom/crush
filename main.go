@@ -32,6 +32,8 @@ func flagTakesValue(a string) bool {
 	switch {
 	case a == "-f", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion":
 		return true
+	case a == "-bench-size" || a == "--bench-size":
+		return true
 	case a == "-exclude" || strings.HasPrefix(a, "-exclude="):
 		return true
 	case len(a) > 7 && a[:7] == "-exclude":
@@ -132,6 +134,8 @@ func main() {
 	installDepsFlag := flag.Bool("install-deps", false, "Instalar solo herramientas de compresión faltantes")
 	uninstallFlag := flag.Bool("uninstall", false, "Desinstalar crush del sistema")
 	completionFlag := flag.String("completion", "", "Instalar autocompletado (bash|zsh|fish, o auto-detectar)")
+	benchFlag := flag.Bool("bench", false, "Ejecutar benchmark de formatos de compresión")
+	benchSizeFlag := flag.Int("bench-size", 10, "Tamaño en MB del dataset para benchmark (por defecto: 10)")
 
 	formatStr := flag.String("f", "", "Formato de compresión (ver -h para lista ordenada por compresión)")
 	outputDir := flag.String("o", ".", "Directorio de salida")
@@ -242,9 +246,24 @@ func main() {
 		os.Exit(1)
 	}
 	if installModeCount > 0 {
-		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag} {
+		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag, *benchFlag} {
 			if m {
-				fmt.Fprintln(os.Stderr, "Error: --install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -r")
+				fmt.Fprintln(os.Stderr, "Error: --install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -r o --bench")
+				os.Exit(1)
+			}
+		}
+	}
+
+	// Check --bench conflicts with operation modes
+	if *benchFlag {
+		for _, m := range []struct {
+			v    *bool
+			name string
+		}{
+			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {readFlag, "-r"},
+		} {
+			if *m.v {
+				fmt.Fprintf(os.Stderr, "Error: --bench no se puede combinar con %s\n", m.name)
 				os.Exit(1)
 			}
 		}
@@ -314,6 +333,19 @@ func main() {
 	} else if len(files) == 0 && opMode {
 		fmt.Fprintln(os.Stderr, "Error: debe especificar archivos como argumentos o con -i")
 		os.Exit(1)
+	}
+
+	// Handle --bench
+	if *benchFlag {
+		customFile := ""
+		if len(files) > 0 {
+			customFile = files[0]
+		}
+		if err := DoBench(customFile, *benchSizeFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError en benchmark: %v%s\n", Red, err, NC)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Handle -l (list)
@@ -712,7 +744,8 @@ func printHelp() {
 	w(Yellow, "  crush -r archivo...\n")
 	w(Yellow, "  crush --install\n")
 	w(Yellow, "  crush --install-deps\n")
-	w(Yellow, "  crush --uninstall\n\n")
+	w(Yellow, "  crush --uninstall\n")
+	w(Yellow, "  crush --bench [archivo]\n\n")
 	w(BoldBlue, "Opciones de modo:\n")
 	w(Yellow, "  -c")
 	fmt.Print("                   Comprimir archivos\n")
@@ -724,6 +757,10 @@ func printHelp() {
 	fmt.Print("                   Verificar integridad de archivos comprimidos\n")
 	w(Yellow, "  -r")
 	fmt.Print("                   Leer contenido de archivo comprimido a stdout\n")
+	w(Yellow, "  --bench")
+	fmt.Print("              Medir velocidad y ratio de compresión por formato\n")
+	w(Yellow, "  --bench-size N")
+	fmt.Print("       Tamaño en MB del dataset para benchmark (por defecto: 10)\n")
 	w(Yellow, "  -h")
 	fmt.Print("                   Mostrar esta ayuda\n\n")
 	w(BoldBlue, "Opciones generales:\n")

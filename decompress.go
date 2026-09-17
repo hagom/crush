@@ -465,9 +465,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		}
 		defer func() {
 			tarFile.Close()
-			if !opts.KeepOrig {
-				os.Remove(tarName)
-			}
+			os.Remove(tarName)
 		}()
 		decompCmd.Stdout = tarFile
 		decompCmd.Stderr = stderrFor(opts.Progress)

@@ -347,3 +347,54 @@ func TestDecompressTarCleanupOnError(t *testing.T) {
 		t.Errorf("La extracción parcial %s debería haberse eliminado", contentDir)
 	}
 }
+
+func TestDecompressTarKeepOrigNoLeak(t *testing.T) {
+	tmpDir := t.TempDir()
+	sampleTxt := filepath.Join(tmpDir, "file.txt")
+	if err := os.WriteFile(sampleTxt, []byte("contenido a descomprimir"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tarGzPath := filepath.Join(tmpDir, "sample.tar.gz")
+	cmd := exec.Command("tar", "-czf", tarGzPath, "-C", tmpDir, "file.txt")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(sampleTxt)
+
+	outDir := filepath.Join(tmpDir, "extracted")
+	if err := os.Mkdir(outDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		KeepOrig:  true,
+	}
+
+	if err := DoDecompress([]string{tarGzPath}, opts); err != nil {
+		t.Fatalf("DoDecompress falló: %v", err)
+	}
+
+	// El original debe existir
+	if _, err := os.Stat(tarGzPath); err != nil {
+		t.Errorf("el archivo original %s debería conservarse con KeepOrig=true", tarGzPath)
+	}
+
+	// El archivo extraído debe existir
+	if _, err := os.Stat(filepath.Join(outDir, "file.txt")); err != nil {
+		t.Errorf("el archivo extraído debería existir: %v", err)
+	}
+
+	// No debe haber ningún archivo .tar residual en outDir
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tar") {
+			t.Errorf("fuga de archivo temporal detectada: %s aún existe en el directorio de salida", e.Name())
+		}
+	}
+}
+

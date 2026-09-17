@@ -79,16 +79,19 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 90 tests nativos pasando con race detector (-race). ~5850 líneas. 0 bugs conocidos.
+- Go: migración completa. 97 tests nativos pasando con race detector (-race). ~6190 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
-  - Corrección de verificación de archivos `.tar` en `crush -t` (BUG-01).
-  - Manejo robusto de compresión multi-archivo: compresión paralela estricta para archivos regulares individuales y derivación automática a `tar-pipe` cuando se incluyen directorios (BUG-02).
-  - Dependencias `lz4` y `brotli` incorporadas en `pkgmgr.go` y `handleInstallDeps()` (BUG-03).
-  - Eliminación garantizada de archivos temporales `.tar` intermedios durante descompresión incluso con `-k` (BUG-04).
-  - Flag CLI `-i` implementado para cargar listas de archivos desde fichero en todos los modos (BUG-05).
-  - Expansión y reordenamiento de flags con valor (`-i`, `-completion`, `--completion`) en `reorderArgs` (BUG-06).
-  - Fallbacks automáticos entre compresores paralelos y seriales (`pigz` → `gzip`, `plzip` → `lzip`).
+  - Corrección de 8 fallos de lógica auditados (BUG-L1 a BUG-L8):
+    - `GetUniqueName` atómico y sincronizado en memoria contra colisiones concurrentes en compresión paralela (BUG-L1).
+    - Cierre garantizado de descriptores de archivos divididos en `splitWriter` e implementación de `io.Closer` en `countingWriter` (BUG-L2).
+    - Protección contra sobreescritura accidental en descompresión sin `--force` en todos los formatos individuales (BUG-L3).
+    - Soporte completo de lectura (`crush -r`) y listado (`crush -l`) para `.bz3`, y extracción correcta de `.tar` a stdout con `tar -xOf` (BUG-L4).
+    - Validación uniforme de argumentos requeridos en modos `-l`, `-r` y `-t` con mensajes informativos en stderr (BUG-L5).
+    - Pipeline resiliente con cancelación `Kill()` y recolección `Wait()` en todos los comandos para prevenir procesos zombis (BUG-L6).
+    - Cierre y vaciado de `tarFile` antes de la llamada a `tar -xf` en descompresión (BUG-L7).
+    - Formateo estricto en `FormatSize` (1024 B → 1.0 KiB) y reemplazo de subprocess `stat` por `os.Stat` nativo (BUG-L8).
+  - Corrección previa de sintaxis tar en verificación (BUG-01), derivación multi-archivo a tar-pipe (BUG-02), dependencias lz4/brotli (BUG-03), eliminación de tar intermediario (BUG-04), y soporte integral de `-i` (BUG-05 y BUG-06).
   - Dry-run (`-n`), división (`-s`), exclusión (`-exclude`), barra de progreso estilo docker pull, colores ANSI, logging, instalador de dependencias multiplataforma, autocompletado shell.
 ## Próximos pasos
 

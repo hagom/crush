@@ -362,3 +362,43 @@ func TestCompressSequentialCleanupOnError(t *testing.T) {
 		}
 	}
 }
+
+func TestCompressMixedDirAndFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "sub_directory")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "inner.txt"), []byte("inner content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	regFile := filepath.Join(tmpDir, "regular.txt")
+	if err := os.WriteFile(regFile, []byte("regular content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: outDir,
+		Parallel:  4,
+		KeepOrig:  true,
+	}
+
+	outPaths, err := DoCompress([]string{subDir, regFile}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress con mezcla de carpeta y archivo falló: %v", err)
+	}
+	if len(outPaths) != 1 {
+		t.Fatalf("esperaba 1 archivo combinado (tar.gz), obtuve %d: %v", len(outPaths), outPaths)
+	}
+	if !strings.HasSuffix(outPaths[0], ".tar.gz") {
+		t.Errorf("el archivo de salida debería ser .tar.gz, obtuve: %s", outPaths[0])
+	}
+	status, err := TestFile(outPaths[0], TestOptions{})
+	if err != nil || status != "OK" {
+		t.Errorf("el archivo resultante .tar.gz no es válido: status=%s, err=%v", status, err)
+	}
+}
+

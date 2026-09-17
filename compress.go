@@ -97,7 +97,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	if opts.DryRun {
 		WriteLogf("%s[Simulacro] Comprimiendo %d archivo(s)%s\n", Blue, len(files), NC)
-		if !singleItem && len(files) > 1 {
+		if !singleItem && len(files) > 1 && !opts.Combine && allRegularFiles(files) {
 			mode := "paralelo"
 			if opts.Combine {
 				mode = "combinado"
@@ -202,14 +202,15 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
+	canParallel := opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 && !opts.Combine && allRegularFiles(filteredFiles)
 	filesTotal := 1
-	if !opts.Combine && len(filteredFiles) > 1 {
+	if canParallel {
 		filesTotal = len(filteredFiles)
 	}
 	opts.Progress = NewProgressTracker(totalSize, filesTotal)
 	pt := opts.Progress
 
-	if opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 && !opts.Combine {
+	if canParallel {
 		totalSize = 0
 		for _, f := range filteredFiles {
 			info, err := os.Stat(f)
@@ -342,6 +343,16 @@ func expandGlobs(items []string) []string {
 		result = append(result, matches...)
 	}
 	return result
+}
+
+func allRegularFiles(files []string) bool {
+	for _, f := range files {
+		info, err := os.Stat(f)
+		if err != nil || info.IsDir() {
+			return false
+		}
+	}
+	return true
 }
 
 func splitOutPath(outPath string, opts CompressOptions) string {

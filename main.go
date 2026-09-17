@@ -30,7 +30,7 @@ var Version = "dev" // set at build time: go build -ldflags="-X main.Version=x.y
 // takesValue reports whether a flag token consumes the next argument as its value.
 func flagTakesValue(a string) bool {
 	switch {
-	case a == "-f", a == "-o", a == "-s", a == "-opts":
+	case a == "-f", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion":
 		return true
 	case a == "-exclude" || strings.HasPrefix(a, "-exclude="):
 		return true
@@ -141,6 +141,7 @@ func main() {
 	force := flag.Bool("force", false, "Sobrescribir archivos existentes")
 	quick := flag.Bool("quick", false, "Verificación rápida (no verificar cada archivo)")
 	combineFlag := flag.Bool("C", false, "Combinar múltiples archivos en un solo archivo comprimido")
+	fromFile := flag.String("i", "", "Leer lista de archivos desde fichero")
 	splitSize := flag.Int("s", 0, "Dividir en partes de N MB (solo compresión)")
 	compressionOpts := flag.String("opts", "", "Opciones adicionales para la herramienta de compresión")
 
@@ -285,14 +286,32 @@ func main() {
 		return
 	}
 
-	// Get files from args or stdin
+	// Get files from args, fromFile, or stdin
 	var files []string
 	if flag.NArg() > 0 {
 		files = flag.Args()
-	} else if stdinIsPipe && (*compressFlag || *decompressFlag) {
+	}
+	if len(files) == 0 && *fromFile != "" {
+		lines, err := ReadFileLines(*fromFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error leyendo archivo de lista %s: %v\n", *fromFile, err)
+			os.Exit(1)
+		}
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				if strings.HasPrefix(line, "/") {
+					files = append(files, line)
+				} else {
+					files = append(files, filepath.Join(filepath.Dir(*fromFile), line))
+				}
+			}
+		}
+	}
+	if len(files) == 0 && stdinIsPipe && (*compressFlag || *decompressFlag) {
 		// Read from stdin pipe
-	} else if *compressFlag || *decompressFlag {
-		fmt.Fprintln(os.Stderr, "Error: debe especificar archivos como argumentos")
+	} else if len(files) == 0 && (*compressFlag || *decompressFlag) {
+		fmt.Fprintln(os.Stderr, "Error: debe especificar archivos como argumentos o con -i")
 		os.Exit(1)
 	}
 
@@ -376,6 +395,7 @@ func main() {
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,
 			Combine:         *combineFlag,
+			FromFile:        *fromFile,
 		}
 		var outPaths []string
 		if stdinIsPipe {
@@ -731,6 +751,8 @@ func printHelp() {
 	fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
 	w(Yellow, "  -opts \"opciones\"")
 	fmt.Print("     Opciones adicionales para la herramienta de compresión\n")
+	w(Yellow, "  -i ARCHIVO")
+	fmt.Print("           Leer lista de archivos a procesar desde fichero\n")
 	w(Yellow, "  -C")
 	fmt.Print("                   Combinar múltiples archivos en un solo archivo comprimido\n")
 	w(Yellow, "  -exclude patrón")

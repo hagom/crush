@@ -42,7 +42,7 @@ func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
 
 func DoCompress(items []string, opts CompressOptions) (outPaths []string, err error) {
 	var outPath string
-	if len(items) == 0 {
+	if len(items) == 0 && opts.FromFile == "" {
 		return nil, fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
 	}
 

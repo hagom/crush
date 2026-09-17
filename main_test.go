@@ -51,6 +51,21 @@ func TestReorderArgs(t *testing.T) {
 			args: []string{"crush", "-c", "-f", "gz", "-s", "10", "file.txt"},
 			want: []string{"crush", "-c", "-f", "gz", "-s", "10", "file.txt"},
 		},
+		{
+			name: "completion flag with value after positional",
+			args: []string{"crush", "file.txt", "-completion", "bash"},
+			want: []string{"crush", "-completion", "bash", "file.txt"},
+		},
+		{
+			name: "input list flag -i with value",
+			args: []string{"crush", "-c", "-f", "gz", "-i", "list.txt"},
+			want: []string{"crush", "-c", "-f", "gz", "-i", "list.txt"},
+		},
+		{
+			name: "input list flag -i after positional",
+			args: []string{"crush", "extra.txt", "-i", "list.txt"},
+			want: []string{"crush", "-i", "list.txt", "extra.txt"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

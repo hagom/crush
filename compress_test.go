@@ -402,3 +402,39 @@ func TestCompressMixedDirAndFile(t *testing.T) {
 	}
 }
 
+func TestCompressFromFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	file1 := filepath.Join(tmpDir, "f1.txt")
+	file2 := filepath.Join(tmpDir, "f2.txt")
+	if err := os.WriteFile(file1, []byte("contenido 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file2, []byte("contenido 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	listPath := filepath.Join(tmpDir, "files.list")
+	listContent := "f1.txt\n" + file2 + "\n\n"
+	if err := os.WriteFile(listPath, []byte(listContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: outDir,
+		FromFile:  listPath,
+		KeepOrig:  true,
+		Parallel:  2,
+	}
+
+	outPaths, err := DoCompress(nil, opts)
+	if err != nil {
+		t.Fatalf("DoCompress con FromFile falló: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("esperaba 2 archivos comprimidos (paralelo), obtuve %d: %v", len(outPaths), outPaths)
+	}
+}
+
+

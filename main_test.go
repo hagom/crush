@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os/exec"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -74,5 +76,16 @@ func TestReorderArgs(t *testing.T) {
 				t.Errorf("reorderArgs() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMainEmptyFilesValidation(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "-l")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("crush -l without files expected error exit code, got 0")
+	}
+	if !strings.Contains(string(out), "debe especificar archivos") {
+		t.Errorf("crush -l without files output = %q, want 'debe especificar archivos'", string(out))
 	}
 }

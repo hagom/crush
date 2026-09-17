@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -171,4 +173,23 @@ func TestPipeline(t *testing.T) {
 			t.Fatalf("pipeline hung waiting for upstream sleep instead of reacting to downstream failure")
 		}
 	})
+}
+
+func TestFormatSizeExact1024(t *testing.T) {
+	got := FormatSize(1024)
+	if !strings.Contains(got, "KiB") && !strings.Contains(got, "K") {
+		t.Errorf("FormatSize(1024) = %q, want 1 KiB", got)
+	}
+}
+
+func TestEstimateUncompressedSizeNative(t *testing.T) {
+	tmp := t.TempDir()
+	sample := filepath.Join(tmp, "archive.tar")
+	if err := os.WriteFile(sample, make([]byte, 2048), 0644); err != nil {
+		t.Fatal(err)
+	}
+	size := EstimateUncompressedSize(sample)
+	if size != 2048 {
+		t.Errorf("EstimateUncompressedSize = %d, want 2048", size)
+	}
 }

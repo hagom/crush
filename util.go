@@ -253,11 +253,14 @@ func FormatSize(bytes int64) string {
 	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
 	unit := 0
 	size := float64(bytes)
-	for size > 1024 && unit < 5 {
+	for size >= 1024 && unit < 5 {
 		size /= 1024
 		unit++
 	}
-	return fmt.Sprintf("%.0f %s", size, units[unit])
+	if unit == 0 {
+		return fmt.Sprintf("%d %s", bytes, units[unit])
+	}
+	return fmt.Sprintf("%.1f %s", size, units[unit])
 }
 
 func CalcPct(orig, final int64) string {
@@ -408,28 +411,22 @@ func EstimateUncompressedSize(file string) int64 {
 		}
 
 	case strings.HasSuffix(f, ".tar"):
-		cmd := exec.Command("stat", "-c%s", "--", file)
-		out, _ := cmd.Output()
-		if size, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); err == nil {
-			return size
+		if fi, err := os.Stat(file); err == nil {
+			return fi.Size()
 		}
 
 	case strings.HasSuffix(f, ".bz2") || strings.HasSuffix(f, ".tbz2") ||
 		strings.HasSuffix(f, ".bz3") || strings.HasSuffix(f, ".lz") ||
 		strings.HasSuffix(f, ".tlz") || strings.HasSuffix(f, ".lz4") ||
 		strings.HasSuffix(f, ".br"):
-		cmd := exec.Command("stat", "-c%s", "--", file)
-		out, _ := cmd.Output()
-		if size, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); err == nil {
-			return size * 6
+		if fi, err := os.Stat(file); err == nil {
+			return fi.Size() * 6
 		}
 	}
 
 	// Fallback: compressed size * 4
-	cmd := exec.Command("stat", "-c%s", "--", file)
-	out, _ := cmd.Output()
-	if size, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); err == nil {
-		return size * 4
+	if fi, err := os.Stat(file); err == nil {
+		return fi.Size() * 4
 	}
 	return 0
 }

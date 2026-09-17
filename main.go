@@ -308,9 +308,10 @@ func main() {
 			}
 		}
 	}
+	opMode := *compressFlag || *decompressFlag || *listFlag || *readFlag || *testFlag
 	if len(files) == 0 && stdinIsPipe && (*compressFlag || *decompressFlag) {
 		// Read from stdin pipe
-	} else if len(files) == 0 && (*compressFlag || *decompressFlag) {
+	} else if len(files) == 0 && opMode {
 		fmt.Fprintln(os.Stderr, "Error: debe especificar archivos como argumentos o con -i")
 		os.Exit(1)
 	}
@@ -358,6 +359,7 @@ func main() {
 			Quick:   *quick,
 		}
 		if err := DoTest(files, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		return

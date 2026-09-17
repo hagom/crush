@@ -547,7 +547,7 @@ func handleInstall() {
 func handleInstallDeps() {
 	var neededTools []string
 	allTools := []string{"pigz", "xz", "lbzip2", "pbzip2", "bzip3", "zstd", "plzip",
-		"lrzip", "zip", "unzip", "p7zip", "rar", "tar", "numfmt", "pv", "getconf"}
+		"lrzip", "zip", "unzip", "p7zip", "rar", "tar", "lz4", "brotli", "numfmt", "pv", "getconf"}
 
 	for _, tool := range allTools {
 		if !hasTool(tool) {

@@ -50,6 +50,8 @@ var tools = []ToolInfo{
 	{Name: "unzip", DebPkg: "unzip", RpmPkg: "unzip", ArchPkg: "unzip", Gentoo: "app-arch/unzip", ApkPkg: "unzip", Zypper: "unzip"},
 	{Name: "p7zip", DebPkg: "p7zip-full", RpmPkg: "p7zip-plugins", ArchPkg: "p7zip", Gentoo: "app-arch/p7zip", ApkPkg: "p7zip", Zypper: "p7zip"},
 	{Name: "rar", DebPkg: "rar", RpmPkg: "rar", ArchPkg: "rar", Gentoo: "app-arch/rar", ApkPkg: "rar", Zypper: "rar"},
+	{Name: "lz4", DebPkg: "lz4", RpmPkg: "lz4", ArchPkg: "lz4", Gentoo: "app-arch/lz4", ApkPkg: "lz4", Zypper: "lz4"},
+	{Name: "brotli", DebPkg: "brotli", RpmPkg: "brotli", ArchPkg: "brotli", Gentoo: "app-arch/brotli", ApkPkg: "brotli", Zypper: "brotli"},
 	// Listing tools
 	{Name: "tar", DebPkg: "tar", RpmPkg: "tar", ArchPkg: "tar", Gentoo: "app-arch/tar", ApkPkg: "tar", Zypper: "tar"},
 	{Name: "numfmt", DebPkg: "coreutils", RpmPkg: "coreutils", ArchPkg: "coreutils", Gentoo: "sys-apps/coreutils", ApkPkg: "coreutils", Zypper: "coreutils"},

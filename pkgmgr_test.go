@@ -17,15 +17,17 @@ func TestDetectPkgManager(t *testing.T) {
 }
 
 func TestFindToolInfo(t *testing.T) {
-	info := findToolInfo("pigz")
-	if info == nil {
-		t.Error("findToolInfo(pigz) = nil")
-	}
-	if info.Name != "pigz" {
-		t.Errorf("findToolInfo(pigz).Name = %q, want pigz", info.Name)
+	requiredTools := []string{"pigz", "xz", "lbzip2", "pbzip2", "bzip3", "zstd", "plzip", "lrzip", "zip", "unzip", "p7zip", "rar", "tar", "lz4", "brotli", "numfmt", "pv", "getconf"}
+	for _, name := range requiredTools {
+		info := findToolInfo(name)
+		if info == nil {
+			t.Errorf("findToolInfo(%q) = nil, want valid ToolInfo", name)
+		} else if info.Name != name {
+			t.Errorf("findToolInfo(%q).Name = %q, want %q", name, info.Name, name)
+		}
 	}
 
-	info = findToolInfo("nonexistent")
+	info := findToolInfo("nonexistent")
 	if info != nil {
 		t.Errorf("findToolInfo(nonexistent) = %v, want nil", info)
 	}

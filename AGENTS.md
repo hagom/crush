@@ -41,7 +41,18 @@ make install        # install -m 755 crush /usr/local/bin/
 - Tests table-driven donde sea posible.
 - Nombres en camelCase. Errores con `fmt.Errorf`.
 - NO agregar comentarios a menos que sea estrictamente necesario.
+- **Desarrollo TDD (Test-Driven Development):** todo fix o feature empieza por un test que falle (rojo), luego la implementación mínima (verde) y finalmente refactor. NO se escribe código de producción sin un test fallando antes.
 - Los colores ANSI van en las constantes de `util.go` (Green, Red, Yellow, Blue, Bold, NC).
+
+## Estándares de rigor en pruebas
+
+- Todo test debe haber **fallado por la razón correcta** antes de implementar (verificar que falle con la funcionalidad ausente, no por un error de setup).
+- Tests **table-driven** cubriendo por cada función: caso feliz, casos límite (input vacío, archivos inexistentes, rutas con `..`), y cada error que devuelve.
+- Los tests verifican **comportamiento observable** (salida, error, efecto), no detalles de implementación.
+- Un test que pasa con la implementación rota es un test inútil: si un test no detecta el bug que debe detectar, se corrige o se elimina.
+- Código concurrente: correr `go test -race ./...`.
+- Verificación pre-commit obligatoria: `go test ./...` y `go vet ./...` en verde.
+- No mockear lo que no se necesita: los tests de integración con las herramientas reales (tar, pigz, 7z) se mantienen y corren en CI además de los unitarios.
 
 ## Filosofía del proyecto
 
@@ -150,7 +161,7 @@ Actuar como **equipo de desarrollo completo**, que cada actor del equipo sea un 
 | **DevOps** | Worktrees, merge strategy, cleanup |
 | **Documentador** | Mantener AGENTS.md actualizado con decisiones |
 
-**Flujo por omisión:** Planificar → Implementar → Testear → Revisar bugs → Mergear → Documentar.
+**Flujo por omisión:** Planificar → **Test rojo** → **Verde (implementación mínima)** → **Refactor** → Revisar bugs → Mergear → Documentar.
 
 - **Trabajo en paralelo con worktrees descriptivos:** Por cada tarea (fix o feature), crear un worktree con nombre descriptivo (ej: `fix/mode-conflicts`, `feat/decompress-progress`). Todos los worktrees se trabajan en paralelo usando subagentes simultáneos para ahorrar tiempo. Al terminar cada uno, mergear a `main` y eliminar worktree + rama.
   1. `git branch fix/algo main && git worktree add ../crush-fix-algo fix/algo`
@@ -160,7 +171,7 @@ Actuar como **equipo de desarrollo completo**, que cada actor del equipo sea un 
   5. `git worktree remove ../crush-fix-algo && git branch -d fix/algo`
 - **Revisión exhaustiva de bugs:** Tras implementar fixes, hacer re-revisión completa del código en busca de bugs restantes. Si se encuentran nuevos bugs, fixearlos y repetir el ciclo. No detenerse hasta que queden **0 bugs conocidos** en todo el proyecto.
 - **Commits por fix/feature:** Cada fix o feature debe tener su propio commit. No mezclar cambios distintos en un mismo commit.
-- **Test obligatorio antes de commit:** Todo fix o feature debe compilar y pasar `go test ./...` sin errores. Si falla algún test o aparece un bug, debe corregirse hasta que quede 0 bugs antes de hacer commit.
+- **Test obligatorio antes de commit:** Todo fix o feature debe compilar y pasar `go test ./...` (con `-race` si es concurrente) y `go vet ./...` sin errores, y el test correspondiente debe haberse escrito y visto fallar ANTES de la implementación. Si falla algún test o aparece un bug, debe corregirse hasta que quede 0 bugs antes de hacer commit.
 - No esperar instrucciones en cada sub-paso.
 - Al terminar un encargo, dejar el repo limpio (rama `main` actualizada, worktrees removidos, ramas fix eliminadas, AGENTS.md reflejando el nuevo estado).
 

@@ -82,8 +82,15 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 163 tests nativos pasando con race detector (-race). ~8190 líneas. 0 bugs conocidos.
+- Go: migración completa. 168 tests nativos pasando con race detector (-race). ~8380 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Refinamiento de verificación y estimación de espacio en disco en compresión y descompresión:
+    - Resolución recursiva del primer ancestro existente en `GetAvailBytes` para evitar fallos en directorios de salida que aún no existen en el sistema.
+    - Función modular `EstimateCompressedSize` con ratios diferenciados por formato (`Tar` 102%, `Lz4` 60%, `Zip` 50%, `Gz` 40%, `Zst` 35%, `Bz2`/`Rar` 30%, `Br` 28%, `7z`/`Xz`/`Bz3`/`Lz` 25%, `Lrz` 20%) y detección inteligente de ficheros precomprimidos (`.mp4`, `.zip`, `.iso`, etc., estimando 95%).
+    - Extracción nativa de tamaño descomprimido en `.zip` vía `archive/zip` de Go stdlib (rápido, sin procesos externos y con soporte Zip64).
+    - Soporte de consulta de tamaño uncompressed en `.rar` con fallback inteligente.
+    - Ratios realistas en formatos sin tabla central: corrección de `lz4` (2.0x en lugar de 6.0x para evitar sobrestimaciones del 300%), `bz2`/`bz3`/`lz` (4.0x) y `br` (3.5x).
+    - Verificación preventiva de espacio por lote agrupado por directorio en `DoDecompress` antes de arrancar los workers paralelos, abortando limpiamente si el espacio libre con 10% de margen no es suficiente.
   - Coloreado por estado en el reporte de progreso multi-archivo: amarillo mientras se procesa (`active`), verde al completar satisfactoriamente (`done`) y rojo si ocurre algún error (`error`), preservando la alineación exacta en columnas.
   - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
   - Escaneo interactivo en descompresión: cuando se invoca `crush -d` sin argumentos, detecta automáticamente todos los archivos comprimidos en el directorio actual (excluyendo subdirectorios, ocultos y fragmentos .part), muestra la lista con sus tamaños y solicita confirmación `[s/N]` antes de descomprimirlos en paralelo.

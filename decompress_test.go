@@ -523,4 +523,82 @@ func TestDecompressReportThreadLimit(t *testing.T) {
 	}
 }
 
+func TestDecompressFileProgressTracking(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "test.txt")
+	content := []byte(strings.Repeat("test progress tracking data in decompress\n", 100))
+	if err := os.WriteFile(txtFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	gzFile := filepath.Join(tmpDir, "test.txt.gz")
+	makeGz(t, txtFile, gzFile)
+
+	fi, err := os.Stat(gzFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pt := NewProgressTracker(fi.Size(), 1)
+	opts := DecompressOptions{
+		OutputDir: filepath.Join(tmpDir, "out"),
+		Force:     true,
+		KeepOrig:  true,
+		Progress:  pt,
+	}
+
+	fp := &FileProgress{Name: filepath.Base(gzFile), Size: fi.Size()}
+	err = decompressFile(gzFile, opts, fp)
+	if err != nil {
+		t.Fatalf("decompressFile failed: %v", err)
+	}
+
+	if fp.Current.Load() != fi.Size() {
+		t.Errorf("decompressFile no actualizó fp.Current al tamaño completo: obtenido %d, esperado %d", fp.Current.Load(), fi.Size())
+	}
+}
+
+func TestDecompressTarProgressTracking(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "sample.txt")
+	content := []byte(strings.Repeat("data for tar progress tracking\n", 200))
+	if err := os.WriteFile(txtFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compressOpts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	outPaths, err := DoCompress([]string{txtFile}, compressOpts)
+	if err != nil || len(outPaths) == 0 {
+		t.Fatalf("DoCompress failed: %v", err)
+	}
+	tarGzFile := outPaths[0]
+
+	fi, err := os.Stat(tarGzFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pt := NewProgressTracker(fi.Size(), 1)
+	opts := DecompressOptions{
+		OutputDir: filepath.Join(tmpDir, "out_tar"),
+		Force:     true,
+		KeepOrig:  true,
+		Progress:  pt,
+	}
+
+	fp := &FileProgress{Name: filepath.Base(tarGzFile), Size: fi.Size()}
+	err = decompressFile(tarGzFile, opts, fp)
+	if err != nil {
+		t.Fatalf("decompressFile tar.gz failed: %v", err)
+	}
+
+	if fp.Current.Load() != fi.Size() {
+		t.Errorf("decompressTar no actualizó fp.Current al tamaño completo: obtenido %d, esperado %d", fp.Current.Load(), fi.Size())
+	}
+}
+
+
 

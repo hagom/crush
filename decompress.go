@@ -456,7 +456,10 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 	} else {
 		// Decompress the compression layer, writing the tar into dir
 		tarName := GetUniqueName(filepath.Join(dir, filepath.Base(stripTarExt(file))), "tar")
-		decompCmd, closer := pipeCmdFor(info, file)
+		decompCmd, closer, err := pipeCmdForProgress(info, file, opts.Progress, fp)
+		if err != nil {
+			return fmt.Errorf("Error preparando descompresión de %s: %w", file, err)
+		}
 		if closer != nil {
 			defer closer.Close()
 		}
@@ -503,6 +506,24 @@ func pipeCmdFor(info FormatInfo, file string) (*exec.Cmd, io.Closer) {
 	}
 	cmd.Args = append(cmd.Args, "--", file)
 	return cmd, nil
+}
+
+func pipeCmdForProgress(info FormatInfo, file string, pt *ProgressTracker, fp *FileProgress) (*exec.Cmd, io.Closer, error) {
+	cmd := exec.Command(info.Tool, strings.Fields(info.PipeFlags)...)
+	if info.Tool == "lrzip" {
+		cmd.Args = append(cmd.Args, "--", file)
+		return cmd, nil, nil
+	}
+	in, err := os.Open(file)
+	if err != nil {
+		return nil, nil, err
+	}
+	var inReader io.Reader = in
+	if pt != nil || fp != nil {
+		inReader = &countingReader{r: in, pt: pt, fp: fp}
+	}
+	cmd.Stdin = inReader
+	return cmd, in, nil
 }
 
 func decompressSingle(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
@@ -626,7 +647,10 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			}
 			return nil
 		}
-		decompCmd, closer := pipeCmdFor(info, file)
+		decompCmd, closer, err := pipeCmdForProgress(info, file, opts.Progress, fp)
+		if err != nil {
+			return fmt.Errorf("Error preparando descompresión de %s: %w", file, err)
+		}
 		if closer != nil {
 			defer closer.Close()
 		}

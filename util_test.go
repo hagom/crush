@@ -532,4 +532,40 @@ func TestFileLineColumnAlignment(t *testing.T) {
 	}
 }
 
+func TestFileLineStatusColors(t *testing.T) {
+	fpActive := &FileProgress{Name: "active_task.bin", Size: 1000}
+	fpActive.SetStatus("active")
+	fpActive.Current.Store(500)
+	lineActive := fileLine(fpActive)
+
+	if !strings.HasPrefix(lineActive, Yellow) {
+		t.Errorf("elemento activo debe iniciar con color amarillo (%q): obtenido %q", Yellow, lineActive)
+	}
+	if !strings.HasSuffix(lineActive, NC) {
+		t.Errorf("elemento activo debe finalizar con reset color (%q): obtenido %q", NC, lineActive)
+	}
+
+	fpDone := &FileProgress{Name: "done_task.bin", Size: 1000}
+	fpDone.SetStatus("done")
+	lineDone := fileLine(fpDone)
+
+	if !strings.HasPrefix(lineDone, Green) {
+		t.Errorf("elemento finalizado debe iniciar con color verde (%q): obtenido %q", Green, lineDone)
+	}
+	if !strings.HasSuffix(lineDone, NC) {
+		t.Errorf("elemento finalizado debe finalizar con reset color (%q): obtenido %q", NC, lineDone)
+	}
+
+	fpError := &FileProgress{Name: "error_task.bin", Size: 1000}
+	fpError.SetStatus("error")
+	lineError := fileLine(fpError)
+
+	if !strings.HasPrefix(lineError, Red) {
+		t.Errorf("elemento con error debe iniciar con color rojo (%q): obtenido %q", Red, lineError)
+	}
+	if !strings.HasSuffix(lineError, NC) {
+		t.Errorf("elemento con error debe finalizar con reset color (%q): obtenido %q", NC, lineError)
+	}
+}
+
 

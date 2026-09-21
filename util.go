@@ -953,11 +953,11 @@ func fileLine(fp *FileProgress) string {
 	case "waiting":
 		bar := makeBar(0, 10)
 		sizeStr := fmt.Sprintf("%8s / %-8s", "0B", fmtSizeDec(fp.Size))
-		return fmt.Sprintf("%s [%s]   0%%  %s   %sesperando...%s", name, bar, sizeStr, Yellow, NC)
+		return fmt.Sprintf("\033[0;39m%s [%s]   0%%  %s   %sesperando...%s", name, bar, sizeStr, Yellow, NC)
 	case "active":
 		current := fp.Current.Load()
 		if current == 0 && fp.Size == 0 {
-			return fmt.Sprintf("%s%sen proceso...%s", name, Bold, NC)
+			return fmt.Sprintf("%s%sen proceso...%s", Yellow, name, NC)
 		}
 		var pct float64
 		if fp.Size > 0 {
@@ -978,11 +978,13 @@ func fileLine(fp *FileProgress) string {
 				}
 			}
 		}
-		return fmt.Sprintf("%s [%s] %3d%%  %s   %s", name, bar, int(pct), sizeStr, etaStr)
+		line := fmt.Sprintf("%s [%s] %3d%%  %s   %s", name, bar, int(pct), sizeStr, etaStr)
+		return fmt.Sprintf("%s%s%s", Yellow, line, NC)
 	case "done":
 		bar := makeBar(100, 10)
 		sizeStr := fmt.Sprintf("%8s / %-8s", fmtSizeDec(fp.Size), fmtSizeDec(fp.Size))
-		return fmt.Sprintf("%s [%s] 100%%  %s        %s✓%s", name, bar, sizeStr, Green, NC)
+		line := fmt.Sprintf("%s [%s] 100%%  %s        ✓", name, bar, sizeStr)
+		return fmt.Sprintf("%s%s%s", Green, line, NC)
 	case "error":
 		current := fp.Current.Load()
 		var pct float64
@@ -994,7 +996,8 @@ func fileLine(fp *FileProgress) string {
 		}
 		bar := makeBar(pct, 10)
 		sizeStr := fmt.Sprintf("%8s / %-8s", fmtSizeDec(current), fmtSizeDec(fp.Size))
-		return fmt.Sprintf("%s [%s] %3d%%  %s        %s✗%s", name, bar, int(pct), sizeStr, Red, NC)
+		line := fmt.Sprintf("%s [%s] %3d%%  %s        ✗", name, bar, int(pct), sizeStr)
+		return fmt.Sprintf("%s%s%s", Red, line, NC)
 	default:
 		return fmt.Sprintf("%s %s", name, fp.Status())
 	}

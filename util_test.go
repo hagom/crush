@@ -441,3 +441,32 @@ func TestCountingReader(t *testing.T) {
 	}
 }
 
+func TestProgressTrackerRenderStability(t *testing.T) {
+	var buf bytes.Buffer
+	pt := NewProgressTracker(1000, 2)
+	pt.writer = &buf
+	pt.stderrIsTTY = true
+
+	fp1 := &FileProgress{Name: "file1.bin", Size: 500}
+	fp2 := &FileProgress{Name: "file2.bin", Size: 500}
+	pt.SetFiles([]*FileProgress{fp1, fp2})
+
+	pt.render()
+	output1 := buf.String()
+
+	// La primera pasada debe contener la línea global y 2 líneas de archivos
+	if !strings.Contains(output1, "file1.bin") || !strings.Contains(output1, "file2.bin") {
+		t.Fatalf("render inicial no contiene los archivos: %s", output1)
+	}
+
+	buf.Reset()
+	// La segunda pasada debe usar \r\033[3A para subir
+	pt.render()
+	output2 := buf.String()
+
+	if !strings.HasPrefix(output2, "\r\033[3A") {
+		t.Errorf("segundo render debe comenzar con \\r\\033[3A para posicionamiento exacto, obtenido: %q", output2[:10])
+	}
+}
+
+

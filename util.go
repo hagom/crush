@@ -769,6 +769,14 @@ type ProgressTracker struct {
 	started       atomic.Bool
 	files         []*FileProgress
 	linesRendered int
+	writer        io.Writer
+}
+
+func (pt *ProgressTracker) out() io.Writer {
+	if pt.writer != nil {
+		return pt.writer
+	}
+	return os.Stderr
 }
 
 func NewProgressTracker(total int64, filesTotal int) *ProgressTracker {
@@ -805,6 +813,7 @@ func (pt *ProgressTracker) Start() {
 		return
 	}
 	loggingActive.Store(true)
+	io.WriteString(pt.out(), "\033[?25l")
 	pt.ticker = time.NewTicker(100 * time.Millisecond)
 	pt.stopped = make(chan struct{})
 	go func() {
@@ -831,6 +840,9 @@ func (pt *ProgressTracker) Stop() {
 	}
 	loggingActive.Store(false)
 	pt.eraseBlock()
+	if pt.stderrIsTTY {
+		io.WriteString(pt.out(), "\033[?25h")
+	}
 	logMu.Lock()
 	if logBuf.Len() > 0 {
 		os.Stderr.Write(logBuf.Bytes())
@@ -846,11 +858,12 @@ func (pt *ProgressTracker) eraseBlock() {
 	if !pt.stderrIsTTY || pt.linesRendered <= 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "\033[%dA", pt.linesRendered)
+	w := pt.out()
+	fmt.Fprintf(w, "\r\033[%dA", pt.linesRendered)
 	for i := 0; i < pt.linesRendered; i++ {
-		os.Stderr.WriteString("\033[K\n")
+		io.WriteString(w, "\r\033[K\n")
 	}
-	fmt.Fprintf(os.Stderr, "\033[%dA", pt.linesRendered)
+	fmt.Fprintf(w, "\r\033[%dA", pt.linesRendered)
 }
 
 func (pt *ProgressTracker) render() {
@@ -875,17 +888,17 @@ func (pt *ProgressTracker) render() {
 		}
 	}
 
+	w := pt.out()
 	if pt.linesRendered > 0 {
-		fmt.Fprintf(os.Stderr, "\033[%dA", pt.linesRendered)
+		fmt.Fprintf(w, "\r\033[%dA", pt.linesRendered)
 	}
 
-	os.Stderr.WriteString(globalBarLine(globalPct, current, done, pt.filesTotal, pt.total, elapsed))
-	os.Stderr.WriteString("\033[K\n")
+	io.WriteString(w, globalBarLine(globalPct, current, done, pt.filesTotal, pt.total, elapsed))
+	io.WriteString(w, "\033[K\n")
 
 	for _, fp := range pt.files {
 		pollFileProgress(fp)
-		os.Stderr.WriteString(fileLine(fp))
-		os.Stderr.WriteString("\033[K\n")
+		io.WriteString(w, "\r"+fileLine(fp)+"\033[K\n")
 	}
 
 	pt.linesRendered = 1 + len(pt.files)
@@ -902,7 +915,7 @@ func (pt *ProgressTracker) renderFinal() {
 		line += fmt.Sprintf("  %s/s", FormatSize(int64(speed)))
 	}
 	line += fmt.Sprintf("  %v  completado%s\n", elapsed.Round(time.Second), NC)
-	os.Stderr.WriteString(line)
+	io.WriteString(pt.out(), line)
 }
 
 func globalBarLine(pct float64, current int64, done int64, filesTotal int, total int64, elapsed time.Duration) string {

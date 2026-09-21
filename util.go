@@ -896,12 +896,16 @@ func (pt *ProgressTracker) render() {
 	io.WriteString(w, globalBarLine(globalPct, current, done, pt.filesTotal, pt.total, elapsed))
 	io.WriteString(w, "\033[K\n")
 
-	for _, fp := range pt.files {
-		pollFileProgress(fp)
-		io.WriteString(w, "\r"+fileLine(fp)+"\033[K\n")
+	if len(pt.files) > 0 {
+		io.WriteString(w, "\r\033[K\n")
+		for _, fp := range pt.files {
+			pollFileProgress(fp)
+			io.WriteString(w, "\r"+fileLine(fp)+"\033[K\n")
+		}
+		pt.linesRendered = 2 + len(pt.files)
+	} else {
+		pt.linesRendered = 1
 	}
-
-	pt.linesRendered = 1 + len(pt.files)
 }
 
 func (pt *ProgressTracker) renderFinal() {
@@ -947,7 +951,9 @@ func fileLine(fp *FileProgress) string {
 
 	switch fp.Status() {
 	case "waiting":
-		return fmt.Sprintf("%s%sesperando...%s", name, Yellow, NC)
+		bar := makeBar(0, 10)
+		sizeStr := fmt.Sprintf("%8s / %-8s", "0B", fmtSizeDec(fp.Size))
+		return fmt.Sprintf("%s [%s]   0%%  %s   %sesperando...%s", name, bar, sizeStr, Yellow, NC)
 	case "active":
 		current := fp.Current.Load()
 		if current == 0 && fp.Size == 0 {
@@ -961,21 +967,34 @@ func fileLine(fp *FileProgress) string {
 			}
 		}
 		bar := makeBar(pct, 10)
-		line := fmt.Sprintf("%s [%s] %3d%%", name, bar, int(pct))
-		if fp.Size > 0 {
-			line += fmt.Sprintf("  %s/%s", fmtSizeDec(current), fmtSizeDec(fp.Size))
-		}
+		sizeStr := fmt.Sprintf("%8s / %-8s", fmtSizeDec(current), fmtSizeDec(fp.Size))
+		etaStr := "         "
 		if current > 0 && fp.Size > 0 && current < fp.Size {
-			elapsed := time.Since(fp.StartTime())
-			if eta := formatETA(elapsed, current, fp.Size); eta != "" {
-				line += "  " + eta
+			start := fp.StartTime()
+			if !start.IsZero() {
+				elapsed := time.Since(start)
+				if eta := formatETA(elapsed, current, fp.Size); eta != "" {
+					etaStr = fmt.Sprintf("%9s", eta)
+				}
 			}
 		}
-		return line
+		return fmt.Sprintf("%s [%s] %3d%%  %s   %s", name, bar, int(pct), sizeStr, etaStr)
 	case "done":
-		return fmt.Sprintf("%s%s✓%s", name, Green, NC)
+		bar := makeBar(100, 10)
+		sizeStr := fmt.Sprintf("%8s / %-8s", fmtSizeDec(fp.Size), fmtSizeDec(fp.Size))
+		return fmt.Sprintf("%s [%s] 100%%  %s        %s✓%s", name, bar, sizeStr, Green, NC)
 	case "error":
-		return fmt.Sprintf("%s%s✗%s", name, Red, NC)
+		current := fp.Current.Load()
+		var pct float64
+		if fp.Size > 0 {
+			pct = float64(current) * 100 / float64(fp.Size)
+			if pct > 100 {
+				pct = 100
+			}
+		}
+		bar := makeBar(pct, 10)
+		sizeStr := fmt.Sprintf("%8s / %-8s", fmtSizeDec(current), fmtSizeDec(fp.Size))
+		return fmt.Sprintf("%s [%s] %3d%%  %s        %s✗%s", name, bar, int(pct), sizeStr, Red, NC)
 	default:
 		return fmt.Sprintf("%s %s", name, fp.Status())
 	}
@@ -1029,7 +1048,7 @@ func fmtSizeDec(bytes int64) string {
 	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
 	unit := 0
 	sz := float64(bytes)
-	for sz > 1024 && unit < 5 {
+	for sz >= 1024 && unit < 5 {
 		sz /= 1024
 		unit++
 	}

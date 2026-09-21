@@ -454,18 +454,81 @@ func TestProgressTrackerRenderStability(t *testing.T) {
 	pt.render()
 	output1 := buf.String()
 
-	// La primera pasada debe contener la línea global y 2 líneas de archivos
+	// La primera pasada debe contener la línea global, línea de separación en blanco y 2 líneas de archivos
 	if !strings.Contains(output1, "file1.bin") || !strings.Contains(output1, "file2.bin") {
 		t.Fatalf("render inicial no contiene los archivos: %s", output1)
 	}
 
+	lines := strings.Split(output1, "\n")
+	// Deben ser al menos 4 líneas (global, separación, file1, file2) más trailing empty
+	if len(lines) < 5 {
+		t.Fatalf("esperadas al menos 4 líneas renderizadas con separación, obtenidas %d: %q", len(lines), output1)
+	}
+	// La segunda línea debe ser la separación en blanco
+	if !strings.Contains(lines[1], "\033[K") {
+		t.Errorf("segunda línea debe ser línea de separación limpia, obtenida: %q", lines[1])
+	}
+
 	buf.Reset()
-	// La segunda pasada debe usar \r\033[3A para subir
+	// La segunda pasada debe usar \r\033[4A para subir (1 global + 1 separación + 2 archivos)
 	pt.render()
 	output2 := buf.String()
 
-	if !strings.HasPrefix(output2, "\r\033[3A") {
-		t.Errorf("segundo render debe comenzar con \\r\\033[3A para posicionamiento exacto, obtenido: %q", output2[:10])
+	if !strings.HasPrefix(output2, "\r\033[4A") {
+		t.Errorf("segundo render debe comenzar con \\r\\033[4A para posicionamiento exacto, obtenido: %q", output2[:10])
+	}
+}
+
+func TestFileLineColumnAlignment(t *testing.T) {
+	fp1 := &FileProgress{Name: "Jak and Daxter.iso", Size: 1400 * 1024 * 1024}
+	fp1.Current.Store(208*1024*1024 + 900*1024)
+	fp1.SetStatus("active")
+
+	fp2 := &FileProgress{Name: "Manhunt.iso", Size: 4400 * 1024 * 1024}
+	fp2.Current.Store(2000 * 1024 * 1024)
+	fp2.SetStatus("active")
+
+	line1 := fileLine(fp1)
+	line2 := fileLine(fp2)
+
+	// Verificar posición de apertura y cierre de barra de progreso
+	idxBar1 := strings.Index(line1, "[")
+	idxBar2 := strings.Index(line2, "[")
+	if idxBar1 != idxBar2 || idxBar1 < 0 {
+		t.Errorf("desalineación en inicio de barra: %d vs %d", idxBar1, idxBar2)
+	}
+
+	// Verificar posición del separador de tamaño ' / '
+	idxSlash1 := strings.Index(line1, " / ")
+	idxSlash2 := strings.Index(line2, " / ")
+	if idxSlash1 != idxSlash2 || idxSlash1 < 0 {
+		t.Errorf("desalineación en separador de tamaño ' / ': %d vs %d (line1: %q, line2: %q)", idxSlash1, idxSlash2, line1, line2)
+	}
+
+	// Verificar estado done
+	fpDone := &FileProgress{Name: "Simpsons.iso", Size: 2000 * 1024 * 1024}
+	fpDone.SetStatus("done")
+	lineDone := fileLine(fpDone)
+
+	idxSlashDone := strings.Index(lineDone, " / ")
+	if idxSlashDone != idxSlash1 {
+		t.Errorf("estado done desalineado en separador ' / ': %d vs %d (lineDone: %q)", idxSlashDone, idxSlash1, lineDone)
+	}
+	if !strings.Contains(lineDone, "✓") {
+		t.Errorf("estado done debe contener checkmark: %s", lineDone)
+	}
+
+	// Verificar estado waiting
+	fpWait := &FileProgress{Name: "Prince.iso", Size: 3600 * 1024 * 1024}
+	fpWait.SetStatus("waiting")
+	lineWait := fileLine(fpWait)
+
+	idxSlashWait := strings.Index(lineWait, " / ")
+	if idxSlashWait != idxSlash1 {
+		t.Errorf("estado waiting desalineado en separador ' / ': %d vs %d (lineWait: %q)", idxSlashWait, idxSlash1, lineWait)
+	}
+	if !strings.Contains(lineWait, "esperando...") {
+		t.Errorf("estado waiting debe contener esperando...: %s", lineWait)
 	}
 }
 

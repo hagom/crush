@@ -82,7 +82,7 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 147 tests nativos pasando con race detector (-race). ~7900 líneas. 0 bugs conocidos.
+- Go: migración completa. 148 tests nativos pasando con race detector (-race). ~7950 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
   - Comando `--bench` para medir throughput (MB/s) y ratio de compresión por formato con dataset determinista y verificación SHA256.
@@ -102,6 +102,7 @@ crush/
     - Formateo estricto en `FormatSize` (1024 B → 1.0 KiB) y reemplazo de subprocess `stat` por `os.Stat` nativo (BUG-L8).
     - Corrección de discrepancia en reporte de hilos (`effectiveThreads`) considerando `opts.ThreadLimit` y capacidades multihilo de cada herramienta (BUG-L9).
     - Corrección de barra de progreso y estimación de tiempo (ETA) en compresión y descompresión (BUG-L10): función `formatETA` con ventana de estabilización (`--:--`) y techo (`>24h`), parser multi-delimitador en `trackProgress` (`\b`, `\r`, `\n`) para 7-Zip, `pollFileProgress` monótono y `countingReader` en flujos de entrada.
+  - Separación visual y alineación en columnas del ProgressTracker multi-archivo: línea en blanco divisoria entre barra general y sub-procesos, formateo tabular estricto de tamaños (`%8s / %-8s`) con barra `/` fijada horizontalmente, y columna de tiempos restantes / estado (`%9s` con `✓` en verde, `esperando...` en amarillo o ETA numérico).
   - Estabilización del renderizado en terminal del ProgressTracker multi-archivo: ocultamiento de cursor (`\033[?25l`), restauración garantizada (`\033[?25h`) y retorno de carro antes de salto (`\r\033[%dA`) para evitar duplicación de frames residuales ante scrollback.
   - Tracking uniforme de descompresión en tiempo real: monitoreo porcentual en streams de entrada vía `countingReader` y `pipeCmdForProgress` para `.tar.{gz,xz,bz2,bz3,zst,lz,lz4,br}` y descompresión de archivos individuales.
   - Separación de `--install` (instalación del binario en `/usr/local/bin`) e `--install-deps` (gestión de dependencias del sistema).

@@ -381,3 +381,63 @@ func TestTrackProgressMultiDelimiter(t *testing.T) {
 	}
 }
 
+func TestPollFileProgressMonotonic(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "crush_poll_test_*.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	// Archivo de 32 bytes en disco
+	tmpFile.Write(make([]byte, 32))
+	tmpFile.Close()
+
+	fp := &FileProgress{Name: "test.bin", Size: 1000}
+	fp.SetStatus("active")
+	fp.SetOutPath(tmpFile.Name())
+	fp.Current.Store(500)
+
+	// Caso 1: Con external progress activo, pollFileProgress no debe tocar Current
+	fp.SetHasExternalProgress(true)
+	pollFileProgress(fp)
+	if fp.Current.Load() != 500 {
+		t.Errorf("pollFileProgress sobreescribió cuando HasExternalProgress=true (esperado 500, obtenido %d)", fp.Current.Load())
+	}
+
+	// Caso 2: Sin external progress pero archivo en disco (32B) menor que progreso actual (500B)
+	fp.SetHasExternalProgress(false)
+	pollFileProgress(fp)
+	if fp.Current.Load() != 500 {
+		t.Errorf("pollFileProgress redujo progreso de forma regresiva (esperado 500, obtenido %d)", fp.Current.Load())
+	}
+
+	// Caso 3: Archivo en disco crece a 800 bytes (mayor que 500B)
+	if err := os.WriteFile(tmpFile.Name(), make([]byte, 800), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pollFileProgress(fp)
+	if fp.Current.Load() != 800 {
+		t.Errorf("pollFileProgress no actualizó a tamaño mayor (esperado 800, obtenido %d)", fp.Current.Load())
+	}
+}
+
+func TestCountingReader(t *testing.T) {
+	pt := NewProgressTracker(1000, 1)
+	fp := &FileProgress{Name: "data.bin", Size: 1000}
+
+	data := make([]byte, 500)
+	cr := &countingReader{r: bytes.NewReader(data), pt: pt, fp: fp}
+
+	buf := make([]byte, 200)
+	n, err := cr.Read(buf)
+	if err != nil || n != 200 {
+		t.Fatalf("Read esperado n=200, err=nil, obtenido n=%d, err=%v", n, err)
+	}
+	if fp.Current.Load() != 200 {
+		t.Errorf("fp.Current esperado 200, obtenido %d", fp.Current.Load())
+	}
+	if pt.current.Load() != 200 {
+		t.Errorf("pt.current esperado 200, obtenido %d", pt.current.Load())
+	}
+}
+

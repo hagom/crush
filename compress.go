@@ -533,11 +533,13 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 		if opts.SplitSize > 0 {
 			writer = newSplitWriter(outFile, opts.SplitSize, outPath)
 		}
-		if opts.Progress != nil {
-			writer = &countingWriter{w: writer, pt: opts.Progress, fp: fp}
-		}
 		if closer, ok := writer.(io.Closer); ok {
 			defer closer.Close()
+		}
+
+		var inReader io.Reader = inFile
+		if opts.Progress != nil {
+			inReader = &countingReader{r: inFile, pt: opts.Progress, fp: fp}
 		}
 
 		compressCmd := buildCompressCmd(opts)
@@ -574,7 +576,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 			return compressErr
 		}
 
-		compressCmd.Stdin = inFile
+		compressCmd.Stdin = inReader
 		compressCmd.Stdout = writer
 
 		if opts.Verbose {

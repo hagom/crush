@@ -97,12 +97,22 @@ func pollFileProgress(fp *FileProgress) {
 	if fp == nil || fp.Status() != "active" || fp.OutPath() == "" || fp.Size <= 0 {
 		return
 	}
+	if fp.HasExternalProgress() {
+		return
+	}
 	fi, err := os.Stat(fp.OutPath())
 	if err != nil {
 		return
 	}
-	if fi.Size() > 0 {
-		fp.Current.Store(fi.Size())
+	newSize := fi.Size()
+	for {
+		curr := fp.Current.Load()
+		if newSize <= curr {
+			break
+		}
+		if fp.Current.CompareAndSwap(curr, newSize) {
+			break
+		}
 	}
 }
 
@@ -1043,6 +1053,32 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 
 func (cw *countingWriter) Close() error {
 	if closer, ok := cw.w.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+type countingReader struct {
+	r  io.Reader
+	pt *ProgressTracker
+	fp *FileProgress
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	if n > 0 {
+		if cr.pt != nil {
+			cr.pt.Add(int64(n))
+		}
+		if cr.fp != nil {
+			cr.fp.Current.Add(int64(n))
+		}
+	}
+	return n, err
+}
+
+func (cr *countingReader) Close() error {
+	if closer, ok := cr.r.(io.Closer); ok {
 		return closer.Close()
 	}
 	return nil

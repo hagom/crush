@@ -886,9 +886,10 @@ func globalBarLine(pct float64, current int64, done int64, filesTotal int, total
 		line += fmt.Sprintf("  %s/s", FormatSize(int64(speed)))
 	}
 
-	if total > 0 && current > 0 {
-		remaining := time.Duration(float64(elapsed) / float64(current) * float64(total-current))
-		line += fmt.Sprintf("  %v restantes", remaining.Round(time.Second))
+	if total > 0 && current > 0 && current < total {
+		if eta := formatETA(elapsed, current, total); eta != "" {
+			line += fmt.Sprintf("  %s restantes", eta)
+		}
 	}
 
 	return line
@@ -924,9 +925,8 @@ func fileLine(fp *FileProgress) string {
 		}
 		if current > 0 && fp.Size > 0 && current < fp.Size {
 			elapsed := time.Since(fp.StartTime())
-			if elapsed.Seconds() > 0 {
-				remaining := time.Duration(float64(elapsed) / float64(current) * float64(fp.Size-current))
-				line += fmt.Sprintf("  %v", remaining.Round(time.Second))
+			if eta := formatETA(elapsed, current, fp.Size); eta != "" {
+				line += "  " + eta
 			}
 		}
 		return line
@@ -937,6 +937,36 @@ func fileLine(fp *FileProgress) string {
 	default:
 		return fmt.Sprintf("%s %s", name, fp.Status())
 	}
+}
+
+func formatETA(elapsed time.Duration, current, total int64) string {
+	if current <= 0 || total <= 0 || current >= total {
+		return ""
+	}
+	if elapsed < 3*time.Second {
+		return "--:--"
+	}
+	pct := float64(current) * 100.0 / float64(total)
+	if pct < 1.0 {
+		return "--:--"
+	}
+	rate := float64(current) / elapsed.Seconds()
+	if rate <= 0 {
+		return "--:--"
+	}
+	remainingSecs := float64(total-current) / rate
+	remaining := time.Duration(remainingSecs * float64(time.Second))
+
+	if remaining > 24*time.Hour {
+		return ">24h"
+	}
+	if remaining < time.Minute {
+		return fmt.Sprintf("%ds", int(remaining.Seconds()))
+	}
+	if remaining < time.Hour {
+		return fmt.Sprintf("%dm%02ds", int(remaining.Minutes()), int(remaining.Seconds())%60)
+	}
+	return fmt.Sprintf("%dh%02dm%02ds", int(remaining.Hours()), int(remaining.Minutes())%60, int(remaining.Seconds())%60)
 }
 
 func makeBar(pct float64, width int) string {

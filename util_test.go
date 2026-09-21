@@ -261,3 +261,79 @@ func TestEffectiveThreads(t *testing.T) {
 	}
 }
 
+func TestFormatETA(t *testing.T) {
+	tests := []struct {
+		name     string
+		elapsed  time.Duration
+		current  int64
+		total    int64
+		expected string
+	}{
+		{
+			name:     "arranque temprano menor a 3 segundos",
+			elapsed:  1 * time.Second,
+			current:  1024,
+			total:    1024 * 1024,
+			expected: "--:--",
+		},
+		{
+			name:     "porcentaje inicial menor a 1%",
+			elapsed:  5 * time.Second,
+			current:  32,
+			total:    1400 * 1024 * 1024,
+			expected: "--:--",
+		},
+		{
+			name:     "tiempo estimado absurdo mayor a 24 horas",
+			elapsed:  3600 * time.Second,
+			current:  10 * 1024 * 1024 * 1024,
+			total:    1000 * 1024 * 1024 * 1024,
+			expected: ">24h",
+		},
+		{
+			name:     "progreso normal en segundos",
+			elapsed:  10 * time.Second,
+			current:  20 * 1024 * 1024,
+			total:    30 * 1024 * 1024,
+			expected: "5s",
+		},
+		{
+			name:     "progreso normal minutos y segundos",
+			elapsed:  60 * time.Second,
+			current:  60 * 1024 * 1024,
+			total:    1000 * 1024 * 1024,
+			expected: "15m40s",
+		},
+		{
+			name:     "progreso normal horas minutos segundos",
+			elapsed:  60 * time.Second,
+			current:  10 * 1024 * 1024,
+			total:    730 * 1024 * 1024,
+			expected: "1h12m00s",
+		},
+		{
+			name:     "completado o valores invalidos",
+			elapsed:  10 * time.Second,
+			current:  100,
+			total:    100,
+			expected: "",
+		},
+		{
+			name:     "current menor o igual a cero",
+			elapsed:  10 * time.Second,
+			current:  0,
+			total:    100,
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatETA(tc.elapsed, tc.current, tc.total)
+			if got != tc.expected {
+				t.Errorf("formatETA() = %q, esperado %q", got, tc.expected)
+			}
+		})
+	}
+}
+

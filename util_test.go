@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -334,6 +335,49 @@ func TestFormatETA(t *testing.T) {
 				t.Errorf("formatETA() = %q, esperado %q", got, tc.expected)
 			}
 		})
+	}
+}
+
+func TestTrackProgressMultiDelimiter(t *testing.T) {
+	pt := NewProgressTracker(1000, 1)
+	fp := &FileProgress{Name: "test.bin", Size: 1000}
+	fp.SetStatus("active")
+
+	pr, pw := io.Pipe()
+
+	done := make(chan struct{})
+	go func() {
+		trackProgress(pr, pt, 1000, fp)
+		close(done)
+	}()
+
+	// Enviar chunk 1 terminado en \x08 (sin \r)
+	pw.Write([]byte("Scanning...\n 25%\x08\x08\x08\x08"))
+	time.Sleep(50 * time.Millisecond)
+
+	if got := fp.Current.Load(); got != 250 {
+		pw.Close()
+		<-done
+		t.Fatalf("tras chunk 1 (25%% con \\b): esperado fp.Current = 250, obtenido %d", got)
+	}
+
+	// Enviar chunk 2 terminado en \n (sin \r)
+	pw.Write([]byte(" 75%\n"))
+	time.Sleep(50 * time.Millisecond)
+
+	if got := fp.Current.Load(); got != 750 {
+		pw.Close()
+		<-done
+		t.Fatalf("tras chunk 2 (75%% con \\n): esperado fp.Current = 750, obtenido %d", got)
+	}
+
+	// Enviar chunk 3 terminado en \r
+	pw.Write([]byte(" 100%\r"))
+	pw.Close()
+	<-done
+
+	if got := fp.Current.Load(); got != 1000 {
+		t.Fatalf("al finalizar: esperado fp.Current = 1000, obtenido %d", got)
 	}
 }
 

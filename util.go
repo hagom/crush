@@ -39,13 +39,22 @@ var (
 )
 
 type FileProgress struct {
-	Name    string
-	Size    int64
-	Current atomic.Int64
-	status  string
-	start   time.Time
-	outPath string
-	mu      sync.Mutex
+	Name                string
+	Size                int64
+	Current             atomic.Int64
+	hasExternalProgress atomic.Bool
+	status              string
+	start               time.Time
+	outPath             string
+	mu                  sync.Mutex
+}
+
+func (fp *FileProgress) HasExternalProgress() bool {
+	return fp.hasExternalProgress.Load()
+}
+
+func (fp *FileProgress) SetHasExternalProgress(b bool) {
+	fp.hasExternalProgress.Store(b)
 }
 
 func (fp *FileProgress) Status() string {
@@ -668,21 +677,20 @@ func trackProgress(r io.Reader, pt *ProgressTracker, fileSize int64, fp *FilePro
 	if pt == nil || fileSize == 0 {
 		return
 	}
+	if fp != nil {
+		fp.SetHasExternalProgress(true)
+	}
 	br := bufio.NewReader(r)
-	lastPct := -1
-	for {
-		line, err := br.ReadString('\r')
-		if err != nil && len(line) == 0 {
-			break
+	lastPct := 0
+	var token strings.Builder
+
+	updateWithToken := func() {
+		if token.Len() == 0 {
+			return
 		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			if err != nil {
-				break
-			}
-			continue
-		}
-		pct := parsePercent(line)
+		s := token.String()
+		token.Reset()
+		pct := parsePercent(s)
 		if pct >= 0 && pct > lastPct {
 			delta := int64(float64(pct-lastPct) / 100.0 * float64(fileSize))
 			if delta > 0 {
@@ -693,10 +701,21 @@ func trackProgress(r io.Reader, pt *ProgressTracker, fileSize int64, fp *FilePro
 			}
 			lastPct = pct
 		}
+	}
+
+	for {
+		b, err := br.ReadByte()
 		if err != nil {
+			updateWithToken()
 			break
 		}
+		if b == '\r' || b == '\n' || b == '\x08' {
+			updateWithToken()
+		} else {
+			token.WriteByte(b)
+		}
 	}
+
 	if lastPct >= 0 && lastPct < 100 {
 		delta := int64(float64(100-lastPct) / 100.0 * float64(fileSize))
 		if delta > 0 {

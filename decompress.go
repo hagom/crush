@@ -78,6 +78,28 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		return fmt.Errorf("No se encontraron archivos válidos")
 	}
 
+	neededByDir := make(map[string]int64)
+	for _, f := range allFiles {
+		targetDir := opts.OutputDir
+		if targetDir == "" {
+			targetDir = filepath.Dir(f)
+		}
+		var sz int64
+		if s := EstimateUncompressedSize(f); s > 0 {
+			sz = s
+		} else if fi, err := os.Stat(f); err == nil {
+			sz = fi.Size() * 3
+		}
+		neededByDir[targetDir] += sz
+	}
+	for targetDir, needed := range neededByDir {
+		if needed > 0 {
+			if err := CheckDiskSpace(needed*110/100, targetDir, "descomprimir"); err != nil {
+				return err
+			}
+		}
+	}
+
 	var totalSize int64
 	for _, f := range allFiles {
 		if fi, err := os.Stat(f); err == nil {

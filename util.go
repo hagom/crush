@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"fmt"
@@ -306,7 +307,20 @@ func GetAvailBytes(dir string) int64 {
 	if dir == "" {
 		dir = "."
 	}
-	cmd := execCommand("df", "-B1", "--output=avail", dir)
+	target := dir
+	for {
+		if _, err := os.Stat(target); err == nil {
+			break
+		}
+		parent := filepath.Dir(target)
+		if parent == target || parent == "" || parent == "." {
+			target = "."
+			break
+		}
+		target = parent
+	}
+
+	cmd := execCommand("df", "-B1", "--output=avail", target)
 	out, err := cmd.Output()
 	if err == nil {
 		lines := strings.Split(string(out), "\n")
@@ -317,7 +331,7 @@ func GetAvailBytes(dir string) int64 {
 		}
 	}
 
-	cmd = execCommand("df", dir)
+	cmd = execCommand("df", target)
 	out, err = cmd.Output()
 	if err == nil {
 		lines := strings.Split(string(out), "\n")
@@ -344,11 +358,89 @@ func CheckDiskSpace(needed int64, dir string, op string) error {
 	return nil
 }
 
+func isPrecompressedFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".zip", ".gz", ".tgz", ".xz", ".txz", ".bz2", ".tbz2", ".bz3",
+		".zst", ".tzst", ".7z", ".rar", ".lz", ".tlz", ".lrz", ".lz4", ".br",
+		".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
+		".mp3", ".ogg", ".aac", ".m4a", ".opus",
+		".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif",
+		".iso", ".jar", ".apk", ".deb", ".rpm":
+		return true
+	}
+	return false
+}
+
+func EstimateCompressedSize(totalSize int64, format Format, files []string) int64 {
+	if len(files) > 0 {
+		allPre := true
+		for _, f := range files {
+			if !isPrecompressedFile(f) {
+				allPre = false
+				break
+			}
+		}
+		if allPre {
+			est := totalSize * 95 / 100
+			if est < 1<<20 {
+				est = 1 << 20
+			}
+			return est
+		}
+	}
+
+	var estimated int64
+	switch format {
+	case Tar:
+		estimated = totalSize * 102 / 100
+	case Lz4:
+		estimated = totalSize * 60 / 100
+	case Zip:
+		estimated = totalSize * 50 / 100
+	case Gz:
+		estimated = totalSize * 40 / 100
+	case Zst:
+		estimated = totalSize * 35 / 100
+	case Bz2:
+		estimated = totalSize * 30 / 100
+	case Rar:
+		estimated = totalSize * 30 / 100
+	case Br:
+		estimated = totalSize * 28 / 100
+	case SevenZ, Xz, Bz3, Lz:
+		estimated = totalSize * 25 / 100
+	case Lrz:
+		estimated = totalSize * 20 / 100
+	default:
+		estimated = totalSize * 35 / 100
+	}
+
+	if estimated < 1<<20 {
+		estimated = 1 << 20
+	}
+	return estimated
+}
+
 func EstimateUncompressedSize(file string) int64 {
 	f := strings.ToLower(file)
 
 	switch {
 	case strings.HasSuffix(f, ".gz") || strings.HasSuffix(f, ".tgz"):
+		if fi, err := os.Stat(file); err == nil && fi.Size() >= 8 {
+			fHandle, err := os.Open(file)
+			if err == nil {
+				buf := make([]byte, 4)
+				if _, err := fHandle.ReadAt(buf, fi.Size()-4); err == nil {
+					isize := int64(buf[0]) | int64(buf[1])<<8 | int64(buf[2])<<16 | int64(buf[3])<<24
+					if isize > 0 && fi.Size() <= int64(1<<32) {
+						fHandle.Close()
+						return isize
+					}
+				}
+				fHandle.Close()
+			}
+		}
 		cmd := exec.Command("gzip", "-l", "--", file)
 		out, _ := cmd.Output()
 		lines := strings.Split(string(out), "\n")
@@ -392,20 +484,30 @@ func EstimateUncompressedSize(file string) int64 {
 		}
 
 	case strings.HasSuffix(f, ".zip"):
-		cmd := exec.Command("unzip", "-l", "--", file)
-			out, _ := cmd.Output()
-			lines := strings.Split(string(out), "\n")
-			for len(lines) > 0 && lines[len(lines)-1] == "" {
-				lines = lines[:len(lines)-1]
+		if r, err := zip.OpenReader(file); err == nil {
+			var sum int64
+			for _, zf := range r.File {
+				sum += int64(zf.UncompressedSize64)
 			}
-			if len(lines) >= 3 {
-				fields := strings.Fields(lines[len(lines)-1])
-				if len(fields) >= 1 {
-					if size, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
-						return size
-					}
+			r.Close()
+			if sum > 0 {
+				return sum
+			}
+		}
+		cmd := exec.Command("unzip", "-l", "--", file)
+		out, _ := cmd.Output()
+		lines := strings.Split(string(out), "\n")
+		for len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		if len(lines) >= 3 {
+			fields := strings.Fields(lines[len(lines)-1])
+			if len(fields) >= 1 {
+				if size, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
+					return size
 				}
 			}
+		}
 
 	case strings.HasSuffix(f, ".7z"):
 		cmd := exec.Command(sevenzBin(), "l", "-slt", "--", file)
@@ -423,6 +525,27 @@ func EstimateUncompressedSize(file string) int64 {
 		}
 		if sum > 0 {
 			return sum
+		}
+
+	case strings.HasSuffix(f, ".rar"):
+		cmd := exec.Command(sevenzBin(), "l", "-slt", "--", file)
+		out, _ := cmd.Output()
+		var sum int64
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "Size = ") {
+				parts := strings.SplitN(line, "= ", 2)
+				if len(parts) == 2 {
+					if size, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil {
+						sum += size
+					}
+				}
+			}
+		}
+		if sum > 0 {
+			return sum
+		}
+		if fi, err := os.Stat(file); err == nil {
+			return fi.Size() * 3
 		}
 
 	case strings.HasSuffix(f, ".lrz"):
@@ -444,18 +567,27 @@ func EstimateUncompressedSize(file string) int64 {
 			return fi.Size()
 		}
 
+	case strings.HasSuffix(f, ".lz4"):
+		if fi, err := os.Stat(file); err == nil {
+			return fi.Size() * 2
+		}
+
+	case strings.HasSuffix(f, ".br"):
+		if fi, err := os.Stat(file); err == nil {
+			return fi.Size() * 7 / 2
+		}
+
 	case strings.HasSuffix(f, ".bz2") || strings.HasSuffix(f, ".tbz2") ||
 		strings.HasSuffix(f, ".bz3") || strings.HasSuffix(f, ".lz") ||
-		strings.HasSuffix(f, ".tlz") || strings.HasSuffix(f, ".lz4") ||
-		strings.HasSuffix(f, ".br"):
+		strings.HasSuffix(f, ".tlz"):
 		if fi, err := os.Stat(file); err == nil {
-			return fi.Size() * 6
+			return fi.Size() * 4
 		}
 	}
 
-	// Fallback: compressed size * 4
+	// Fallback
 	if fi, err := os.Stat(file); err == nil {
-		return fi.Size() * 4
+		return fi.Size() * 3
 	}
 	return 0
 }

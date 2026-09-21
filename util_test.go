@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"io"
 	"os"
@@ -567,5 +568,95 @@ func TestFileLineStatusColors(t *testing.T) {
 		t.Errorf("elemento con error debe finalizar con reset color (%q): obtenido %q", NC, lineError)
 	}
 }
+
+func TestGetAvailBytesNonExistentDir(t *testing.T) {
+	nonExistent := filepath.Join(os.TempDir(), "crush_non_existent_subdir_test_12345/child")
+	avail := GetAvailBytes(nonExistent)
+	if avail <= 0 {
+		t.Errorf("GetAvailBytes para directorio aún no creado debe retornar espacio del ancestro (> 0), obtenido: %d", avail)
+	}
+}
+
+func TestEstimateCompressedSize(t *testing.T) {
+	var totalSize int64 = 100 * 1024 * 1024
+
+	tests := []struct {
+		format  Format
+		files   []string
+		wantMin int64
+		wantMax int64
+	}{
+		{Tar, []string{"file.txt"}, 100 * 1024 * 1024, 105 * 1024 * 1024},
+		{Lz4, []string{"file.txt"}, 55 * 1024 * 1024, 65 * 1024 * 1024},
+		{Zip, []string{"file.txt"}, 45 * 1024 * 1024, 55 * 1024 * 1024},
+		{Gz, []string{"file.txt"}, 35 * 1024 * 1024, 45 * 1024 * 1024},
+		{Zst, []string{"file.txt"}, 30 * 1024 * 1024, 40 * 1024 * 1024},
+		{SevenZ, []string{"file.txt"}, 20 * 1024 * 1024, 30 * 1024 * 1024},
+		{Xz, []string{"file.txt"}, 20 * 1024 * 1024, 30 * 1024 * 1024},
+		{Bz2, []string{"file.txt"}, 25 * 1024 * 1024, 35 * 1024 * 1024},
+		{Bz3, []string{"file.txt"}, 20 * 1024 * 1024, 30 * 1024 * 1024},
+		{Br, []string{"file.txt"}, 25 * 1024 * 1024, 32 * 1024 * 1024},
+		{Rar, []string{"file.txt"}, 25 * 1024 * 1024, 35 * 1024 * 1024},
+		{Lrz, []string{"file.txt"}, 18 * 1024 * 1024, 25 * 1024 * 1024},
+		{SevenZ, []string{"video.mp4", "backup.zip"}, 90 * 1024 * 1024, 100 * 1024 * 1024},
+	}
+
+	for _, tt := range tests {
+		got := EstimateCompressedSize(totalSize, tt.format, tt.files)
+		if got < tt.wantMin || got > tt.wantMax {
+			t.Errorf("EstimateCompressedSize(%s, %v) = %d, want entre %d y %d",
+				tt.format, tt.files, got, tt.wantMin, tt.wantMax)
+		}
+	}
+
+	gotSmall := EstimateCompressedSize(100, SevenZ, []string{"small.txt"})
+	if gotSmall < 1<<20 {
+		t.Errorf("EstimateCompressedSize para archivo pequeño debe ser al menos 1MB, obtenido: %d", gotSmall)
+	}
+}
+
+func TestEstimateUncompressedSizeZipNative(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "test_native.zip")
+
+	f, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w1, err := zw.Create("file1.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w1.Write(make([]byte, 3000))
+	w2, err := zw.Create("file2.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2.Write(make([]byte, 2000))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	size := EstimateUncompressedSize(zipPath)
+	if size != 5000 {
+		t.Errorf("EstimateUncompressedSize en zip nativo = %d, want 5000", size)
+	}
+}
+
+func TestEstimateUncompressedSizeLz4Realistic(t *testing.T) {
+	tmpDir := t.TempDir()
+	lz4Path := filepath.Join(tmpDir, "sample.lz4")
+	if err := os.WriteFile(lz4Path, make([]byte, 1000), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	size := EstimateUncompressedSize(lz4Path)
+	if size > 3000 || size < 1500 {
+		t.Errorf("EstimateUncompressedSize para lz4 = %d, esperado cálculo refinado realista ~2.0x (1500..3000)", size)
+	}
+}
+
 
 

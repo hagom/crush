@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,11 @@ func TestHelperProcess(t *testing.T) {
 	case "df-fail":
 		fmt.Fprintln(os.Stderr, "df: cannot access '/nonexistent': No such file or directory")
 		os.Exit(1)
+
+	case "df-low-space":
+		fmt.Println("       Avail")
+		fmt.Println("1024")
+		os.Exit(0)
 
 	case "mock-producer":
 		for {
@@ -222,3 +228,32 @@ func TestGetAvailBytesMock(t *testing.T) {
 		})
 	}
 }
+
+func TestDecompressBatchDiskSpaceCheck(t *testing.T) {
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file1.tar")
+	f2 := filepath.Join(tmpDir, "file2.tar")
+	if err := os.WriteFile(f1, make([]byte, 10*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, make([]byte, 10*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return mockExecCommand("df-low-space", args...)
+	}
+
+	opts := DecompressOptions{OutputDir: tmpDir}
+	err := DoDecompress([]string{f1, f2}, opts)
+	if err == nil {
+		t.Fatal("DoDecompress debe fallar si no hay suficiente espacio para el lote")
+	}
+	if !strings.Contains(err.Error(), "Espacio insuficiente para descomprimir") {
+		t.Errorf("error inesperado: %v", err)
+	}
+}
+

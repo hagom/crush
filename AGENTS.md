@@ -82,7 +82,7 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 144 tests nativos pasando con race detector (-race). ~7800 líneas. 0 bugs conocidos.
+- Go: migración completa. 147 tests nativos pasando con race detector (-race). ~7900 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
   - Comando `--bench` para medir throughput (MB/s) y ratio de compresión por formato con dataset determinista y verificación SHA256.
@@ -102,6 +102,8 @@ crush/
     - Formateo estricto en `FormatSize` (1024 B → 1.0 KiB) y reemplazo de subprocess `stat` por `os.Stat` nativo (BUG-L8).
     - Corrección de discrepancia en reporte de hilos (`effectiveThreads`) considerando `opts.ThreadLimit` y capacidades multihilo de cada herramienta (BUG-L9).
     - Corrección de barra de progreso y estimación de tiempo (ETA) en compresión y descompresión (BUG-L10): función `formatETA` con ventana de estabilización (`--:--`) y techo (`>24h`), parser multi-delimitador en `trackProgress` (`\b`, `\r`, `\n`) para 7-Zip, `pollFileProgress` monótono y `countingReader` en flujos de entrada.
+  - Estabilización del renderizado en terminal del ProgressTracker multi-archivo: ocultamiento de cursor (`\033[?25l`), restauración garantizada (`\033[?25h`) y retorno de carro antes de salto (`\r\033[%dA`) para evitar duplicación de frames residuales ante scrollback.
+  - Tracking uniforme de descompresión en tiempo real: monitoreo porcentual en streams de entrada vía `countingReader` y `pipeCmdForProgress` para `.tar.{gz,xz,bz2,bz3,zst,lz,lz4,br}` y descompresión de archivos individuales.
   - Separación de `--install` (instalación del binario en `/usr/local/bin`) e `--install-deps` (gestión de dependencias del sistema).
   - Corrección previa de sintaxis tar en verificación (BUG-01), derivación multi-archivo a tar-pipe (BUG-02), dependencias lz4/brotli (BUG-03), eliminación de tar intermediario (BUG-04), y soporte integral de `-i` (BUG-05 y BUG-06).
   - Dry-run (`-n`), división (`-s`), exclusión (`-exclude`), barra de progreso estilo docker pull, colores ANSI, logging, instalador de dependencias multiplataforma, autocompletado shell.

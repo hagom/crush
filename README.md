@@ -1,168 +1,307 @@
 # CRUSH
 
-Herramienta multi-formato de compresión y descompresión vía pipe.
-Soporta 13 formatos usando versiones **multihilo** para aprovechar todos los núcleos del CPU.
+<div align="center">
+
+**Herramienta multi-formato de compresión y descompresión vía pipes UNIX de alto rendimiento con auto-paralelismo.**
+
+[![CI](https://github.com/usuario/crush/actions/workflows/ci.yml/badge.svg)](https://github.com/usuario/crush/actions)
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org)
+[![Tests](https://img.shields.io/badge/tests-148%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Formats](https://img.shields.io/badge/formats-13%20supported-blueviolet)](https://github.com/usuario/crush)
+
+</div>
+
+---
+
+## Características
+
+- **13 formatos soportados:** `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`.
+- **Máximo paralelismo automático (NCPU):** No requiere flags manuales de hilos (`-j`). Detecta automáticamente los núcleos disponibles (`NCPU()`) y optimiza el uso de CPU tanto a nivel de herramienta multihilo (`pigz`, `lbzip2`, `plzip`, `bzip3`, `xz -T0`, `zstd -T0`, `7z -mmt`, `rar -mt`) como a nivel de procesamiento concurrente entre múltiples archivos.
+- **Pipeline de streaming en memoria:** Compresión y descompresión en tiempo real vía pipes UNIX (`exec.Cmd` + `StdoutPipe`), eliminando la creación de archivos `.tar` intermedios en disco.
+- **Barra de progreso tabular en tiempo real:** Interfaz dinámica estilo *Docker-pull* en terminales interactivas, con barra general agregada, sub-barras individuales por archivo con columnas milimétricamente alineadas, velocidad en MB/s y estimación de tiempo restante (ETA) estabilizada.
+- **Suite de benchmarking integrada (`--bench`):** Permite evaluar el throughput (MB/s) y el ratio de compresión en tu máquina con datasets deterministas y verificación criptográfica SHA-256.
+- **Autocompletado de comandos:** Instalación nativa de completion para Bash, Zsh y Fish.
+- **Cero dependencias externas en Go:** 100% biblioteca estándar de Go (`stdlib`).
+- **Instalador de dependencias multiplataforma:** Detección y gestión automática de paquetes en Debian/Ubuntu (`apt`), RedHat/Fedora/CentOS (`dnf`/`yum`), Arch Linux (`pacman`), openSUSE (`zypper`), Alpine (`apk`) y macOS (`brew`).
+
+---
+
+## Demostración Visual
+
+Al procesar múltiples archivos en paralelo, `crush` presenta un panel tabular interactivo:
+
+```text
+Comprimiendo 5 archivo(s) en paralelo...
+  Formato: 7z
+  Modo: Compresión 7z (LZMA2)
+
+[====>               ]  25.6%  0/5  387MiB/s  30s restantes
+
+  Jak and Daxter - Th...   [>         ]  14%   208.9MiB / 1.4GiB            59s
+  Manhunt (USA).iso        [===>      ]  45%     2.0GiB / 4.4GiB            12s
+  Prince of Persia - ...   [          ]   6%   256.8MiB / 3.6GiB          2m19s
+  Rayman 2 - Revoluti...   [          ]   8%   385.6MiB / 4.2GiB          1m46s
+  Simpsons, The - Hit...   [====>     ]  55%     1.1GiB / 2.0GiB             8s
+```
+
+---
 
 ## Requisitos
 
-- **Go 1.21+** (solo para compilar)
-- **Linux** (Debian/Ubuntu o RedHat/CentOS/Fedora)
-- Los compresores se instalan automáticamente con `--install`
+- **Compilación:** Go 1.21 o superior.
+- **Sistema operativo:** Linux o macOS.
+- **Herramientas del sistema:** Para aprovechar todos los formatos, `crush` utiliza las utilidades del sistema operativo. Si alguna herramienta multihilo no está instalada, `crush` utiliza automáticamente la versión serial como alternativa de respaldo (*fallback*).
+
+---
 
 ## Instalación
 
-### Opción 1: compilar desde fuente (recomendada)
+### 1. Compilar e instalar binario
 
 ```bash
-# Clonar
-git clone <repo> && cd crush
+# Clonar el repositorio
+git clone https://github.com/usuario/crush.git
+cd crush
+
+# Compilar
+make build
 
 # Instalar binario en /usr/local/bin
-sudo make install
-# O usando crush directamente:
-./crush --install
-
-# Instalar dependencias del sistema (apt/dnf/yum)
-crush --install-deps
+sudo ./crush --install
+# (o alternativamente: sudo make install)
 ```
 
-### Opciones de instalación
+### 2. Instalar herramientas de compresión del sistema
+
+`crush` incluye un detector que identifica tu gestor de paquetes e instala las herramientas necesarias:
 
 ```bash
-crush --install          # copia el binario a /usr/local/bin/
-crush --install-deps     # instala las herramientas de compresión del sistema
+sudo crush --install-deps
 ```
 
-### Ejecutar sin instalar
+*Soporta: `apt-get`, `dnf`, `yum`, `pacman`, `zypper`, `apk` y `brew`.*
+
+### 3. Activar autocompletado en tu Shell
 
 ```bash
-make build          # genera ./crush
-./crush -h          # usar directamente
+# Auto-detectar la shell actual e instalar
+sudo crush --completion
+
+# O para una shell específica:
+sudo crush --completion bash
+sudo crush --completion zsh
+sudo crush --completion fish
 ```
 
-### Desinstalar
+### Desinstalación
 
 ```bash
-crush --uninstall
-# o manual:
-sudo rm /usr/local/bin/crush
+sudo crush --uninstall
 ```
 
-## Formatos soportados
+---
 
-Los formatos tar-pipe comprimen múltiples archivos en un tar y lo comprimen en pipeline.
-Los formatos nativos (zip, 7z, rar) empaquetan y comprimen en un solo paso.
+## Formatos Soportados
 
-### Tar-pipe (agrupan archivos en .tar.*)
+### Formatos Tar-Pipe (Agrupan en stream `.tar.*`)
 
-| Formato | Compresor | Hilos | Ratio | Velocidad |
-|---------|-----------|-------|-------|-----------|
-| tar.gz / tgz | pigz | todos | media | rápida |
-| tar.xz / txz | xz -T0 | auto | alta | lenta |
-| tar.bz2 / tbz2 | lbzip2/pbzip2 | todos | alta | media |
-| tar.bz3 | bzip3 -j N | todos | muy alta | media |
-| tar.zst / tzst | zstd -T0 | auto | media-alta | rápida |
-| tar.lz / tlz | plzip | todos | alta | media |
-| tar.lrz | lrzip -p N | todos | máxima | lenta |
-| tar.lz4 | lz4 | — | baja | ultrarrápida |
-| tar.br | brotli | — | alta | lenta |
+| Formato | Compresor Primario (Multihilo) | Fallback Serial | Ratio de Compresión | Perfil de Velocidad |
+|---------|--------------------------------|-----------------|---------------------|---------------------|
+| `tar.lrz` | `lrzip -p N` | — | Máxima (RAM) | Lenta |
+| `tar.bz3` | `bzip3 -j N` | — | Muy alta | Media |
+| `tar.xz` / `txz` | `xz -T0` | `xz` | Alta | Lenta |
+| `tar.bz2` / `tbz2` | `lbzip2` / `pbzip2` | `bzip2` | Alta | Media |
+| `tar.lz` / `tlz` | `plzip` | `lzip` | Alta | Media |
+| `tar.br` | `brotli` | — | Alta | Lenta |
+| `tar.zst` / `tzst` | `zstd -T0` | `zstd` | Media-Alta | Muy rápida |
+| `tar.gz` / `tgz` | `pigz` | `gzip` | Media | Rápida |
+| `tar.lz4` | `lz4` | — | Baja | Ultrarrápida |
+| `tar` | `tar` | — | Ninguna (empaqueta) | I/O Bound |
 
-### Nativos (formato propio)
+### Formatos Nativos (Contenedor propio)
 
-| Formato | Compresor | Hilos | Algoritmo |
-|---------|-----------|-------|-----------|
-| .zip | 7z -mmt=on | auto | DEFLATE |
-| .7z | 7zz/7z -mmt=on | auto | LZMA2 |
-| .rar | rar -mtN | todos | RAR |
-| .tar | tar | — | solo empaqueta |
+| Formato | Compresor | Multihilo | Algoritmo |
+|---------|-----------|-----------|-----------|
+| `.7z` | `7zz` / `7z` | Auto (`-mmt=on`) | LZMA2 |
+| `.zip` | `7z` / `zip` | Auto (`-mmt=on` vía 7z) | DEFLATE |
+| `.rar` | `rar` | Auto (`-mtN`) | RAR |
 
-## Uso
+---
+
+## Uso y Ejemplos
+
+### Compresión
 
 ```bash
-# Comprimir
-crush -c -f gz documento.txt              # → documento.tar.gz
-crush -c -f xz -v carpeta/                 # → carpeta.tar.xz (verbose)
-crush -c -f zst -o /salida/ archivo.iso    # → /salida/archivo.tar.zst
+# Compresión de archivo individual
+crush -c -f gz documento.txt                 # → documento.tar.gz
 
-# Descomprimir (detección automática de formato por extensión)
-crush -d archivo.tar.gz                    # → ./
-crush -d -o /tmp/ archivo.zip              # → /tmp/
+# Compresión paralela multi-archivo (cada archivo genera su propio comprimido)
+crush -c -f 7z *.iso
 
-# Verificar integridad
-crush -t *.tar.gz
+# Combinar múltiples archivos en un único archivo comprimido
+crush -c -C -f 7z archivo1.bin archivo2.bin # → crush_archive.7z
 
-# Listar contenido de un comprimido
-crush -l archivo.7z
+# Comprimir un directorio conservando el original (-k) y en modo detallado (-v)
+crush -c -f zst -k -v fotos/                 # → fotos.tar.zst
 
-# Leer contenido a stdout (sin descomprimir a disco)
-crush -r archivo.txt.gz | head
+# Especificar directorio de salida (-o)
+crush -c -f xz -o /backup/ base_datos.sql
 
-# Modo simulacro (ver qué haría sin ejecutar)
-crush -c -f xz -n carpeta/
+# Dividir la salida comprimida en volúmenes de 10 MB (-s)
+crush -c -f zst -s 10 archivo_pesado.iso      # → archivo_pesado.tar.zst.part00, part01...
+
+# Comprimir excluyendo patrones (-exclude)
+crush -c -f zip -exclude "*.log" -exclude "node_modules/*" proyecto/
+
+# Comprimir leyendo la lista de archivos desde un fichero (-i)
+crush -c -f gz -i lista_archivos.txt
 ```
 
-## Opciones
+> **Nota sobre originales:** Por defecto, al completar una compresión sin errores, `crush` elimina los archivos de origen. Para conservarlos, usa siempre la opción `-k`.
 
-| Flag | Descripción | Defecto |
-|------|-------------|---------|
-| `-c -f FORMATO` | Comprimir en el formato indicado | — |
-| `-d` | Descomprimir (detecta formato por extensión) | — |
-| `-l` | Listar contenido del archivo comprimido | — |
-| `-t` | Verificar integridad | — |
-| `-r` | Leer contenido a stdout | — |
-| `-o DIR` | Directorio de salida | `.` |
-| `-k` | Conservar archivos originales | off (los borra) |
-| `-v` | Modo verbose (muestra comandos) | off |
-| `-p` | Barra de progreso (requiere `pv`) | off |
-| `-n` | Modo simulacro (dry-run) | off |
-| `-s N` | Dividir en partes de N MB | off |
-| `-T N` | Hilos de compresión (0 = auto) | auto |
-| `-exclude patrón` | Excluir archivos (repetible) | — |
-| `-force` | Sobrescribir sin preguntar | off |
-| `-opts "flags"` | Flags extra para el compresor | — |
+### Descompresión
 
-## Ejemplos
+La descompresión detecta automáticamente el formato a partir de la extensión del archivo y muestra el progreso de extracción en tiempo real:
 
 ```bash
-# Comprimir un directorio con ratio máximo (lrzip)
-crush -c -f lrz -v carpeta_de_fotos/
+# Descomprimir en el directorio actual
+crush -d archivo.tar.gz
 
-# Comprimir rápido con zstd y barra de progreso
-crush -c -f zst -p video.mp4
+# Descomprimir múltiples archivos concurrentemente
+crush -d *.zip *.7z
 
-# Comprimir y dividir en partes de 10 MB
-crush -c -f gz -s 10 archivo_grande.bin
-# Genera: archivo.tar.gz.part00, .part01, ...
+# Descomprimir hacia un directorio destino específico (-o)
+crush -d -o /tmp/ descargas.tar.xz
 
-# Excluir archivos .log y .tmp
-crush -c -f xz --exclude='*.log' --exclude='*.tmp' carpeta/
-
-# Descomprimir conservando el original
-crush -d -k archivo.zip
-
-# Verificar todos los comprimidos del directorio
-crush -t *.tar.* *.zip *.7z
+# Forzar sobreescritura de archivos existentes (-force)
+crush -d -force paquete.tar.zst
 ```
 
-## Rama del repositorio
+### Inspección, Verificación y Pipes
 
-- **main** — versión en Go (desarrollo activo)
+```bash
+# Listar contenido de un archivo comprimido
+crush -l paquete.7z
+crush -l *.tar.gz
 
-## Estructura del proyecto
+# Verificar integridad sin extraer a disco
+crush -t backup.tar.xz
+crush -t -quick archivo_enorme.7z             # Verificación rápida
 
+# Leer contenido comprimido directamente a stdout (útil para tuberías)
+crush -r registros.tar.gz | grep "ERROR 500"
+crush -r dump.sql.zst | mysql -u root -p base_datos
+
+# Simulación (dry-run): ver los comandos que se ejecutarían sin realizar cambios
+crush -c -f xz -n directorio_grande/
 ```
+
+### Benchmarks de Compresión (`--bench`)
+
+Compara la velocidad (MB/s) y el ratio de compresión de todos los formatos en tu máquina:
+
+```bash
+# Benchmark con dataset determinista generado en memoria (10 MB por defecto)
+crush --bench
+
+# Benchmark especificando tamaño del dataset en MB
+crush --bench --bench-size 50
+
+# Benchmark utilizando un archivo propio del mundo real
+crush --bench mi_archivo_de_prueba.iso
+```
+
+---
+
+## Referencia de Comandos y Opciones
+
+```text
+Uso:
+  crush -c -f FORMATO [opciones] archivo...
+  crush -d [opciones] archivo...
+  crush -l archivo...
+  crush -t archivo...
+  crush -r archivo...
+  crush --install
+  crush --install-deps
+  crush --uninstall
+  crush --completion [bash|zsh|fish]
+  crush --bench [archivo]
+```
+
+### Modos de Operación
+
+| Opción | Descripción |
+|---|---|
+| `-c` | Comprimir archivos. |
+| `-d` | Descomprimir archivos (detección automática de formato). |
+| `-l` | Listar el contenido de los archivos comprimidos. |
+| `-t` | Verificar la integridad de los archivos comprimidos. |
+| `-r` | Descomprimir y emitir contenido directamente a `stdout`. |
+| `--bench` | Ejecutar benchmark comparativo de formatos. |
+| `--install` | Instalar el binario `crush` en `/usr/local/bin`. |
+| `--install-deps` | Detectar e instalar herramientas de compresión faltantes en el sistema. |
+| `--completion` | Instalar autocompletado en el sistema para la shell detectada o especificada. |
+| `--uninstall` | Desinstalar `crush` del sistema. |
+| `-h`, `--help` | Mostrar mensaje de ayuda. |
+| `--version` | Mostrar versión de `crush`. |
+
+### Opciones y Modificadores
+
+| Opción | Argumento | Descripción | Por Defecto |
+|---|---|---|---|
+| `-f` | `FORMATO` | Formato objetivo (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`). | Requerido en `-c` |
+| `-o` | `DIR` | Directorio de salida. | `.` |
+| `-k` | — | Conservar archivos originales tras compresión. | `false` (los elimina) |
+| `-v` | — | Modo verbose (muestra los comandos del sistema invocados). | `false` |
+| `-n` | — | Modo simulacro (*dry-run*): muestra qué haría sin ejecutar. | `false` |
+| `-force` | — | Sobrescribir archivos destino existentes sin confirmar. | `false` |
+| `-quick` | — | Verificación rápida de integridad (no valida cada archivo interno). | `false` |
+| `-C` | — | Combinar múltiples archivos en un único archivo comprimido. | `false` (paralelo) |
+| `-s` | `N` | Dividir el archivo comprimido en partes de `N` MB. | `0` (sin división) |
+| `-i` | `ARCHIVO` | Leer lista de archivos de entrada desde un fichero o stdin (`-`). | — |
+| `-exclude`| `PATRÓN` | Patrón de exclusión glob (puede repetirse). | — |
+| `-opts` | `"OPTS"` | Opciones adicionales pasadas directamente a la herramienta subyacente. | — |
+| `--bench-size` | `N` | Tamaño en MB del dataset de prueba para `--bench`. | `10` |
+
+---
+
+## Arquitectura y Estructura del Código
+
+El proyecto está diseñado bajo los principios de modularidad, cero dependencias externas y desarrollo guiado por pruebas (TDD):
+
+```text
 crush/
-├── main.go         # CLI, flags, dispatch de modos
-├── compress.go     # compresión (tar-pipe, zip, 7z, rar, tar)
-├── decompress.go   # descompresión multi-formato
-├── format.go       # detección y mapeo de formatos
-├── test_cmd.go     # verificación de integridad
-├── util.go         # NCPU, logging, colores, pipeline
-├── pkgmgr.go       # instalación de dependencias (apt/dnf/yum)
-├── Makefile
-└── *_test.go       # tests unitarios
+├── main.go         # CLI flags, dispatch de comandos, autocompletado y ayuda
+├── format.go       # Detección de formatos, extensiones y ordenamiento por ratio
+├── compress.go     # Compresión concurrente paralela y streaming tar-pipe
+├── decompress.go   # Descompresión multi-formato, splitWriter y tracking de entrada
+├── bench.go        # Motor de benchmark determinista y formateo de tablas
+├── test_cmd.go     # Verificación de integridad (-t)
+├── util.go         # NCPU, límites de memoria RAM, pipeline streaming, ProgressTracker
+├── pkgmgr.go       # Gestor multiplataforma de dependencias del sistema
+├── Makefile        # Comandos de compilación, testeo e instalación
+├── *_test.go       # Tests unitarios y de integración table-driven
+└── mock_test.go    # Tests con inyección de dependencias (execCommand) y mocks
 ```
+
+### Ejecutar Tests y Verificación
+
+```bash
+# Ejecutar suite de pruebas con detector de carreras (-race)
+go test -v -race ./...
+
+# Análisis estático
+go vet ./...
+
+# Ejecutar benchmarks nativos de Go
+go test -bench=. ./...
+```
+
+---
 
 ## Licencia
 
-MIT
+Este proyecto está bajo la Licencia **MIT**. Consulta el archivo `LICENSE` para más detalles.

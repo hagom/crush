@@ -82,7 +82,7 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 130 tests nativos pasando con race detector (-race). ~7580 líneas. 0 bugs conocidos.
+- Go: migración completa. 144 tests nativos pasando con race detector (-race). ~7800 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
   - Comando `--bench` para medir throughput (MB/s) y ratio de compresión por formato con dataset determinista y verificación SHA256.
@@ -91,7 +91,7 @@ crush/
   - `lockedWriter` para serializar escrituras concurrentes a stderr en `pipeline()`.
   - Extracción de `getMemFromFree()` como función testeable independiente de `/proc/meminfo`.
   - CI/CD con GitHub Actions: matriz Go 1.21-1.23, race detector, go vet, build, smoke tests.
-  - Corrección de 9 fallos de lógica auditados (BUG-L1 a BUG-L9):
+  - Corrección de 10 fallos de lógica auditados (BUG-L1 a BUG-L10):
     - `GetUniqueName` atómico y sincronizado en memoria contra colisiones concurrentes en compresión paralela (BUG-L1).
     - Cierre garantizado de descriptores de archivos divididos en `splitWriter` e implementación de `io.Closer` en `countingWriter` (BUG-L2).
     - Protección contra sobreescritura accidental en descompresión sin `--force` en todos los formatos individuales (BUG-L3).
@@ -101,6 +101,8 @@ crush/
     - Cierre y vaciado de `tarFile` antes de la llamada a `tar -xf` en descompresión (BUG-L7).
     - Formateo estricto en `FormatSize` (1024 B → 1.0 KiB) y reemplazo de subprocess `stat` por `os.Stat` nativo (BUG-L8).
     - Corrección de discrepancia en reporte de hilos (`effectiveThreads`) considerando `opts.ThreadLimit` y capacidades multihilo de cada herramienta (BUG-L9).
+    - Corrección de barra de progreso y estimación de tiempo (ETA) en compresión y descompresión (BUG-L10): función `formatETA` con ventana de estabilización (`--:--`) y techo (`>24h`), parser multi-delimitador en `trackProgress` (`\b`, `\r`, `\n`) para 7-Zip, `pollFileProgress` monótono y `countingReader` en flujos de entrada.
+  - Separación de `--install` (instalación del binario en `/usr/local/bin`) e `--install-deps` (gestión de dependencias del sistema).
   - Corrección previa de sintaxis tar en verificación (BUG-01), derivación multi-archivo a tar-pipe (BUG-02), dependencias lz4/brotli (BUG-03), eliminación de tar intermediario (BUG-04), y soporte integral de `-i` (BUG-05 y BUG-06).
   - Dry-run (`-n`), división (`-s`), exclusión (`-exclude`), barra de progreso estilo docker pull, colores ANSI, logging, instalador de dependencias multiplataforma, autocompletado shell.
 ## Próximos pasos

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -89,3 +91,47 @@ func TestMainEmptyFilesValidation(t *testing.T) {
 		t.Errorf("crush -l without files output = %q, want 'debe especificar archivos'", string(out))
 	}
 }
+
+func TestInstallHelpText(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "-h")
+	out, _ := cmd.CombinedOutput()
+	help := string(out)
+	found := false
+	for _, line := range strings.Split(help, "\n") {
+		if strings.Contains(line, "--install") && strings.Contains(line, "Instalar") && !strings.Contains(line, "--install-deps") {
+			found = true
+			if strings.Contains(line, "herramientas faltantes") {
+				t.Errorf("--install help text still mentions 'herramientas faltantes': %s", line)
+			}
+			if !strings.Contains(line, "/usr/local/bin") {
+				t.Errorf("--install help text should mention /usr/local/bin: %s", line)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("--install flag description not found in help output")
+	}
+}
+
+func TestInstallBinaryTo(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "crush_dummy")
+	if err := os.WriteFile(src, []byte("#!/bin/sh\necho test\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(tmpDir, "bin", "crush")
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := installBinaryTo(src, dest); err != nil {
+		t.Fatalf("installBinaryTo failed: %v", err)
+	}
+	fi, err := os.Stat(dest)
+	if err != nil {
+		t.Fatalf("stat dest failed: %v", err)
+	}
+	if fi.Mode()&0111 == 0 {
+		t.Errorf("dest permissions not executable: %v", fi.Mode())
+	}
+}
+

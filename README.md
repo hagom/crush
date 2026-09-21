@@ -17,29 +17,27 @@ Soporta 13 formatos usando versiones **multihilo** para aprovechar todos los nú
 # Clonar
 git clone <repo> && cd crush
 
-# Compilar e instalar en /usr/local/bin
+# Instalar binario en /usr/local/bin
 sudo make install
-# O paso a paso:
-make build
-sudo install -m 755 crush /usr/local/bin/
+# O usando crush directamente:
+./crush --install
 
 # Instalar dependencias del sistema (apt/dnf/yum)
 crush --install-deps
 ```
 
-### Opción 2: instalación todo-en-uno
+### Opciones de instalación
 
 ```bash
-# Compila, copia el binario e instala todas las herramientas faltantes
-crush --install          # binario + dependencias
-crush --install-deps     # solo dependencias (si ya tienes el binario)
+crush --install          # copia el binario a /usr/local/bin/
+crush --install-deps     # instala las herramientas de compresión del sistema
 ```
 
-### Opción 3: solo el binario
+### Ejecutar sin instalar
 
 ```bash
 make build          # genera ./crush
-./crush -h      # usar directamente
+./crush -h          # usar directamente
 ```
 
 ### Desinstalar

@@ -130,7 +130,7 @@ func main() {
 	testFlag := flag.Bool("t", false, "Verificar integridad de archivos comprimidos")
 	readFlag := flag.Bool("r", false, "Leer contenido de archivo comprimido a stdout")
 	helpFlag := flag.Bool("h", false, "Mostrar ayuda")
-	installFlag := flag.Bool("install", false, "Instalar crush en el sistema + herramientas faltantes")
+	installFlag := flag.Bool("install", false, "Instalar binario crush en /usr/local/bin")
 	installDepsFlag := flag.Bool("install-deps", false, "Instalar solo herramientas de compresión faltantes")
 	uninstallFlag := flag.Bool("uninstall", false, "Desinstalar crush del sistema")
 	completionFlag := flag.String("completion", "", "Instalar autocompletado (bash|zsh|fish, o auto-detectar)")
@@ -293,7 +293,7 @@ func main() {
 		return
 	}
 
-	// Handle --install (binary + deps)
+	// Handle --install (solo binario en /usr/local/bin)
 	if *installFlag {
 		handleInstall()
 		return
@@ -529,8 +529,10 @@ func installBinary() error {
 		return fmt.Errorf("error resolviendo ruta: %w", err)
 	}
 
-	dest := "/usr/local/bin/crush"
+	return installBinaryTo(src, "/usr/local/bin/crush")
+}
 
+func installBinaryTo(src, dest string) error {
 	// Try direct copy
 	if err := copyFile(src, dest); err == nil {
 		WriteLogf("  %s✓ Binario instalado en %s%s\n", Green, dest, NC)
@@ -594,8 +596,6 @@ func handleInstall() {
 		fmt.Fprintf(os.Stderr, "%sError: %v%s\n", Red, err, NC)
 		os.Exit(1)
 	}
-
-	handleInstallDeps()
 }
 
 func handleInstallDeps() {
@@ -797,7 +797,7 @@ func printHelp() {
 	w(Yellow, "  -exclude patrón")
 	fmt.Print("      Patrón de exclusión (se puede repetir)\n")
 	w(Yellow, "  --install")
-	fmt.Print("            Instalar crush en el sistema + herramientas faltantes\n")
+	fmt.Print("            Instalar binario crush en /usr/local/bin\n")
 	w(Yellow, "  --install-deps")
 	fmt.Print("        Instalar solo herramientas de compresión faltantes\n")
 	w(Yellow, "  --uninstall")

@@ -26,8 +26,8 @@ go test ./... -v
 ./crush -d archivo.tar.gz
 
 # Instalación / desinstalación
-./crush --install             # binario + dependencias del sistema
-./crush --install-deps         # solo dependencias
+./crush --install             # binario en /usr/local/bin/
+./crush --install-deps         # solo dependencias del sistema
 ./crush --uninstall            # eliminar binario
 
 # Binario final (sin dependencias)
@@ -82,7 +82,7 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 128 tests nativos pasando con race detector (-race). ~7550 líneas. 0 bugs conocidos.
+- Go: migración completa. 130 tests nativos pasando con race detector (-race). ~7580 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
   - Comando `--bench` para medir throughput (MB/s) y ratio de compresión por formato con dataset determinista y verificación SHA256.

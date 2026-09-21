@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"io"
 	"os"
@@ -597,6 +598,149 @@ func TestDecompressTarProgressTracking(t *testing.T) {
 
 	if fp.Current.Load() != fi.Size() {
 		t.Errorf("decompressTar no actualizó fp.Current al tamaño completo: obtenido %d, esperado %d", fp.Current.Load(), fi.Size())
+	}
+}
+
+func TestFindDecompressibleFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Crear archivos de prueba válidos
+	validFiles := []string{"archive1.zip", "archive2.tar.gz", "archive3.7z", "data.bz2", "photo.tar.xz"}
+	for _, f := range validFiles {
+		if err := os.WriteFile(filepath.Join(tmpDir, f), []byte("dummy"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Crear archivos que deben ser ignorados
+	ignoredFiles := []string{"readme.txt", "script.sh", ".hidden.gz", "archive.tar.gz.part00", "image.png"}
+	for _, f := range ignoredFiles {
+		if err := os.WriteFile(filepath.Join(tmpDir, f), []byte("dummy"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Crear un subdirectorio con nombre de archivo comprimido (debe ser ignorado)
+	if err := os.Mkdir(filepath.Join(tmpDir, "subfolder.tar.gz"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := FindDecompressibleFiles(tmpDir)
+	if err != nil {
+		t.Fatalf("FindDecompressibleFiles falló: %v", err)
+	}
+
+	if len(found) != len(validFiles) {
+		t.Fatalf("esperados %d archivos, obtenidos %d: %v", len(validFiles), len(found), found)
+	}
+
+	for _, expected := range validFiles {
+		expectedPath := filepath.Join(tmpDir, expected)
+		matched := false
+		for _, f := range found {
+			if f == expectedPath || f == expected {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("archivo esperado %s no encontrado en %v", expected, found)
+		}
+	}
+}
+
+func TestFindDecompressibleFilesEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	found, err := FindDecompressibleFiles(tmpDir)
+	if err != nil {
+		t.Fatalf("FindDecompressibleFiles falló en dir vacío: %v", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("esperado 0 archivos en dir vacío, obtenidos: %v", found)
+	}
+}
+
+func TestPromptDecompressAll(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		files     []string
+		wantOK    bool
+		wantInOut string
+	}{
+		{
+			name:      "confirmación con s",
+			input:     "s\n",
+			files:     []string{"file1.zip", "file2.tar.gz"},
+			wantOK:    true,
+			wantInOut: "¿Desea descomprimir",
+		},
+		{
+			name:      "confirmación con S mayúscula",
+			input:     "S\n",
+			files:     []string{"file1.zip"},
+			wantOK:    true,
+			wantInOut: "¿Desea descomprimir",
+		},
+		{
+			name:      "confirmación con si",
+			input:     "si\n",
+			files:     []string{"file1.zip"},
+			wantOK:    true,
+			wantInOut: "¿Desea descomprimir",
+		},
+		{
+			name:      "confirmación con y",
+			input:     "y\n",
+			files:     []string{"file1.zip"},
+			wantOK:    true,
+			wantInOut: "¿Desea descomprimir",
+		},
+		{
+			name:      "rechazo con n",
+			input:     "n\n",
+			files:     []string{"file1.zip"},
+			wantOK:    false,
+			wantInOut: "¿Desea descomprimir",
+		},
+		{
+			name:      "rechazo con enter vacío",
+			input:     "\n",
+			files:     []string{"file1.zip"},
+			wantOK:    false,
+			wantInOut: "¿Desea descomprimir",
+		},
+		{
+			name:      "rechazo por EOF",
+			input:     "",
+			files:     []string{"file1.zip"},
+			wantOK:    false,
+			wantInOut: "¿Desea descomprimir",
+		},
+		{
+			name:      "sin archivos devuelve false sin preguntar",
+			input:     "s\n",
+			files:     nil,
+			wantOK:    false,
+			wantInOut: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := strings.NewReader(tt.input)
+			var out bytes.Buffer
+			got, err := PromptDecompressAll(in, &out, tt.files)
+			if err != nil {
+				t.Fatalf("PromptDecompressAll devolvió error inesperado: %v", err)
+			}
+			if got != tt.wantOK {
+				t.Errorf("PromptDecompressAll() = %v, want %v", got, tt.wantOK)
+			}
+			if tt.wantInOut != "" && !strings.Contains(out.String(), tt.wantInOut) {
+				t.Errorf("salida esperada contenía %q, obtenida: %q", tt.wantInOut, out.String())
+			}
+		})
 	}
 }
 

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -762,4 +764,63 @@ func (w *splitWriter) Close() error {
 		}
 	}
 	return nil
+}
+
+func FindDecompressibleFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if strings.Contains(name, ".part") {
+			continue
+		}
+		if _, err := DetectFormat(name); err == nil {
+			if dir == "." || dir == "" {
+				files = append(files, name)
+			} else {
+				files = append(files, filepath.Join(dir, name))
+			}
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func PromptDecompressAll(r io.Reader, w io.Writer, files []string) (bool, error) {
+	if len(files) == 0 {
+		return false, nil
+	}
+
+	fmt.Fprintf(w, "%sArchivos comprimidos detectados en el directorio actual (%d):%s\n", Bold, len(files), NC)
+	for _, f := range files {
+		sizeStr := ""
+		if fi, err := os.Stat(f); err == nil {
+			sizeStr = fmt.Sprintf(" (%s)", FormatSize(fi.Size()))
+		}
+		fmt.Fprintf(w, "  • %s%s%s%s\n", Blue, f, NC, sizeStr)
+	}
+	fmt.Fprintf(w, "\n%s¿Desea descomprimir todos los archivos (%d)? [s/N]: %s", Yellow, len(files), NC)
+
+	scanner := bufio.NewScanner(r)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	resp := strings.TrimSpace(scanner.Text())
+	lower := strings.ToLower(resp)
+	if lower == "s" || lower == "si" || lower == "sí" || lower == "y" || lower == "yes" {
+		return true, nil
+	}
+	return false, nil
 }

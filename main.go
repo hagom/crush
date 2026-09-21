@@ -328,8 +328,27 @@ func main() {
 		}
 	}
 	opMode := *compressFlag || *decompressFlag || *listFlag || *readFlag || *testFlag
-	if len(files) == 0 && stdinIsPipe && (*compressFlag || *decompressFlag) {
+	if len(files) == 0 && stdinIsPipe && *formatStr != "" && (*compressFlag || *decompressFlag) {
 		// Read from stdin pipe
+	} else if len(files) == 0 && *decompressFlag {
+		found, err := FindDecompressibleFiles(".")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error buscando archivos comprimidos: %v\n", err)
+			os.Exit(1)
+		}
+		if len(found) == 0 {
+			fmt.Println("No se encontraron archivos comprimidos en el directorio actual.")
+			return
+		}
+		confirmed, err := PromptDecompressAll(os.Stdin, os.Stdout, found)
+		if err != nil || !confirmed {
+			if !confirmed {
+				fmt.Println("Operación cancelada.")
+			}
+			return
+		}
+		fmt.Println()
+		files = found
 	} else if len(files) == 0 && opMode {
 		fmt.Fprintln(os.Stderr, "Error: debe especificar archivos como argumentos o con -i")
 		os.Exit(1)
@@ -482,27 +501,16 @@ func main() {
 			Force:     *force,
 			Parallel:  parallel,
 		}
-		if stdinIsPipe {
-			if *formatStr == "" && len(files) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: modo pipe requiere -f FORMATO (ej: -f gz)")
+		if stdinIsPipe && *formatStr != "" && len(files) == 0 {
+			f, err := ParseFormat(*formatStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
-			if len(files) == 0 {
-				f, err := ParseFormat(*formatStr)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-				info := FormatInfoFromFormat(f)
-				if err := decompressStream(os.Stdin, os.Stdout, info); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-			} else {
-				if err := DoDecompress(files, opts); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
+			info := FormatInfoFromFormat(f)
+			if err := decompressStream(os.Stdin, os.Stdout, info); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
 			}
 		} else {
 			if err := DoDecompress(files, opts); err != nil {

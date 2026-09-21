@@ -135,3 +135,78 @@ func TestInstallBinaryTo(t *testing.T) {
 	}
 }
 
+func TestMainDecompressScanNoFiles(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "crush_bin")
+	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build falló: %v, salida: %s", err, string(out))
+	}
+
+	tmpDir := t.TempDir()
+	cmd := exec.Command(binPath, "-d")
+	cmd.Dir = tmpDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("crush -d en dir vacío falló: %v, salida: %s", err, string(out))
+	}
+	if !strings.Contains(string(out), "No se encontraron archivos comprimidos") {
+		t.Errorf("salida esperada contenía 'No se encontraron archivos comprimidos', obtenida: %s", string(out))
+	}
+}
+
+func TestMainDecompressScanCancel(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "crush_bin")
+	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build falló: %v, salida: %s", err, string(out))
+	}
+
+	tmpDir := t.TempDir()
+	zipFile := filepath.Join(tmpDir, "sample.zip")
+	if err := os.WriteFile(zipFile, []byte("dummy zip content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(binPath, "-d")
+	cmd.Dir = tmpDir
+	cmd.Stdin = strings.NewReader("n\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("crush -d cancelado falló con error: %v, salida: %s", err, string(out))
+	}
+	if !strings.Contains(string(out), "Operación cancelada") {
+		t.Errorf("salida esperada contenía 'Operación cancelada', obtenida: %s", string(out))
+	}
+}
+
+func TestMainDecompressScanConfirm(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "crush_bin")
+	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build falló: %v, salida: %s", err, string(out))
+	}
+
+	tmpDir := t.TempDir()
+	txtPath := filepath.Join(tmpDir, "hello.txt")
+	if err := os.WriteFile(txtPath, []byte("contenido de prueba"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tarPath := filepath.Join(tmpDir, "hello.tar")
+	cmdTar := exec.Command("tar", "-cf", tarPath, "-C", tmpDir, "hello.txt")
+	if err := cmdTar.Run(); err != nil {
+		t.Skip("tar no disponible para test")
+	}
+	// Eliminar original para comprobar que se extrae
+	os.Remove(txtPath)
+
+	cmd := exec.Command(binPath, "-d")
+	cmd.Dir = tmpDir
+	cmd.Stdin = strings.NewReader("s\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("crush -d confirmado falló: %v, salida: %s", err, string(out))
+	}
+
+	// Verificar que hello.txt fue extraído
+	if _, err := os.Stat(txtPath); err != nil {
+		t.Errorf("archivo esperado %s no fue extraído tras confirmación: %v, salida: %s", txtPath, err, string(out))
+	}
+}
+

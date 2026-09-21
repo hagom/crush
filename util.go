@@ -547,12 +547,50 @@ const (
 
 // --- Helpers ---
 
-func effectiveThreads(ext string) int {
-	ext = strings.ToLower(ext)
-	if strings.HasSuffix(ext, ".lz4") || strings.HasSuffix(ext, ".br") {
+func effectiveThreads(extOrFile string, threadLimit int) int {
+	limit := threadLimit
+	if limit <= 0 {
+		limit = NCPU()
+	}
+
+	ext := strings.ToLower(extOrFile)
+	if ext == "lz4" || ext == "br" || ext == "tar" ||
+		strings.HasSuffix(ext, ".lz4") || strings.HasSuffix(ext, ".br") ||
+		strings.HasSuffix(ext, ".tar.lz4") || strings.HasSuffix(ext, ".tar.br") ||
+		strings.HasSuffix(ext, ".tar") {
 		return 1
 	}
-	return NCPU()
+
+	if ext == "zip" || strings.HasSuffix(ext, ".zip") {
+		if hasTool(sevenzBin()) {
+			return limit
+		}
+		return 1
+	}
+
+	if ext == "gz" || strings.HasSuffix(ext, ".gz") || strings.HasSuffix(ext, ".tgz") || strings.HasSuffix(ext, ".tar.gz") {
+		if hasTool("pigz") {
+			return limit
+		}
+		return 1
+	}
+
+	if ext == "bz2" || strings.HasSuffix(ext, ".bz2") || strings.HasSuffix(ext, ".tbz2") || strings.HasSuffix(ext, ".tar.bz2") {
+		bin := bzip2Bin()
+		if bin == "lbzip2" || bin == "pbzip2" {
+			return limit
+		}
+		return 1
+	}
+
+	if ext == "lz" || strings.HasSuffix(ext, ".lz") || strings.HasSuffix(ext, ".tlz") || strings.HasSuffix(ext, ".tar.lz") {
+		if hasTool("plzip") {
+			return limit
+		}
+		return 1
+	}
+
+	return limit
 }
 
 func stdoutFor(pt *ProgressTracker) io.Writer {

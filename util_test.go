@@ -193,3 +193,71 @@ func TestEstimateUncompressedSizeNative(t *testing.T) {
 		t.Errorf("EstimateUncompressedSize = %d, want 2048", size)
 	}
 }
+
+func TestEffectiveThreads(t *testing.T) {
+	tests := []struct {
+		name        string
+		ext         string
+		threadLimit int
+		want        int
+	}{
+		{
+			name:        "lz4 is always single-threaded",
+			ext:         "file.lz4",
+			threadLimit: 10,
+			want:        1,
+		},
+		{
+			name:        "br is always single-threaded",
+			ext:         "file.br",
+			threadLimit: 10,
+			want:        1,
+		},
+		{
+			name:        "tar is always single-threaded",
+			ext:         "file.tar",
+			threadLimit: 10,
+			want:        1,
+		},
+		{
+			name:        "tar compound lz4 is single-threaded",
+			ext:         "archive.tar.lz4",
+			threadLimit: 8,
+			want:        1,
+		},
+		{
+			name:        "zip respects threadLimit when sevenz is available",
+			ext:         "archive.zip",
+			threadLimit: 10,
+			want:        10,
+		},
+		{
+			name:        "zip with 0 threadLimit uses NCPU",
+			ext:         "archive.zip",
+			threadLimit: 0,
+			want:        NCPU(),
+		},
+		{
+			name:        "zst respects threadLimit",
+			ext:         "data.zst",
+			threadLimit: 5,
+			want:        5,
+		},
+		{
+			name:        "xz respects threadLimit",
+			ext:         "data.xz",
+			threadLimit: 4,
+			want:        4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := effectiveThreads(tt.ext, tt.threadLimit)
+			if got != tt.want {
+				t.Errorf("effectiveThreads(%q, %d) = %d, want %d", tt.ext, tt.threadLimit, got, tt.want)
+			}
+		})
+	}
+}
+

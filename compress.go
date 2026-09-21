@@ -278,7 +278,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	WriteLogf("%sTamaño Final:%s      %s%s%s\n", Blue, NC, Green, FormatSize(finalSize), NC)
 	WriteLogf("%sAhorro de espacio:%s %s%s%%%s\n", Blue, NC, Green, CalcPct(origSize, finalSize), NC)
 	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
-	WriteLogf("%sHilos utilizados:%s  %s%d%s\n", Blue, NC, Bold, effectiveThreads(ext), NC)
+	WriteLogf("%sHilos utilizados:%s  %s%d%s\n", Blue, NC, Bold, effectiveThreads(ext, opts.ThreadLimit), NC)
 	WriteLogf("%s=============================%s\n", Green, NC)
 
 	CompressCleanupFiles = filteredFiles

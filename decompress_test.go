@@ -490,3 +490,37 @@ func TestSplitWriterCloseAndCountingWriterCloser(t *testing.T) {
 	}
 }
 
+func TestDecompressReportThreadLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(txtFile, []byte("thread report test data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gzFile := filepath.Join(tmpDir, "test.txt.gz")
+	makeGz(t, txtFile, gzFile)
+
+	// Test decompressFile with ThreadLimit = 7
+	opts := DecompressOptions{
+		OutputDir:   filepath.Join(tmpDir, "out"),
+		ThreadLimit: 7,
+		Force:       true,
+		KeepOrig:    true,
+	}
+
+	fp := &FileProgress{Name: filepath.Base(gzFile), Size: 100}
+	err := decompressFile(gzFile, opts, fp)
+	if err != nil {
+		t.Fatalf("decompressFile failed: %v", err)
+	}
+
+	expectedThreads := 7
+	if !hasTool("pigz") {
+		expectedThreads = 1
+	}
+	gotThreads := effectiveThreads(gzFile, opts.ThreadLimit)
+	if gotThreads != expectedThreads {
+		t.Errorf("effectiveThreads = %d, want %d", gotThreads, expectedThreads)
+	}
+}
+
+

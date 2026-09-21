@@ -390,7 +390,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	fmt.Fprintf(&report, "%sTamaño Comprimido:%s  %s%s%s\n", Blue, NC, Red, FormatSize(compressedSize), NC)
 	fmt.Fprintf(&report, "%sTamaño Descomprimido:%s %s%s%s\n", Blue, NC, Green, FormatSize(uncompressedSize), NC)
 	fmt.Fprintf(&report, "%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
-	fmt.Fprintf(&report, "%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file), NC)
+	fmt.Fprintf(&report, "%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file, opts.ThreadLimit), NC)
 	fmt.Fprintf(&report, "%s=============================%s\n", Green, NC)
 	WriteLog(report.String())
 

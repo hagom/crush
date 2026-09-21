@@ -82,9 +82,10 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 148 tests nativos pasando con race detector (-race). ~7950 líneas. 0 bugs conocidos.
+- Go: migración completa. 162 tests nativos pasando con race detector (-race). ~8150 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Compresión y descompresión de 13 formatos (gz, xz, bz2, bz3, zst, lz, lrz, zip, 7z, tar, rar, lz4, br).
+  - Escaneo interactivo en descompresión: cuando se invoca `crush -d` sin argumentos, detecta automáticamente todos los archivos comprimidos en el directorio actual (excluyendo subdirectorios, ocultos y fragmentos .part), muestra la lista con sus tamaños y solicita confirmación `[s/N]` antes de descomprimirlos en paralelo.
   - Comando `--bench` para medir throughput (MB/s) y ratio de compresión por formato con dataset determinista y verificación SHA256.
   - Benchmarks nativos Go (`go test -bench=.`) para gz, zstd, xz, bz2, zip, 7z, lz, bz3.
   - Inyección de dependencias con `var execCommand = exec.Command` y tests con mocks canónicos (`TestHelperProcess`).

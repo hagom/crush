@@ -640,16 +640,20 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			fp.SetStart(time.Now())
 
 			base := filepath.Base(file)
-			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
+			isContainer := opts.Format == Zip || opts.Format == SevenZ || opts.Format == Tar || opts.Format == Rar
+			baseName := base
+			if isContainer {
+				baseName = strings.TrimSuffix(base, filepath.Ext(base))
+			}
 			targetDir := opts.OutputDir
 			if opts.SplitSize > 0 {
-				targetDir = filepath.Join(opts.OutputDir, baseNoExt+"_parts")
+				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
 				if err := os.MkdirAll(targetDir, 0755); err != nil {
 					errCh <- fmt.Errorf("%s: %w", file, err)
 					return
 				}
 			}
-			outPath := GetUniqueName(filepath.Join(targetDir, baseNoExt), ext)
+			outPath := GetUniqueName(filepath.Join(targetDir, baseName), ext)
 			outPath = splitOutPath(outPath, opts)
 
 			fp.SetOutPath(outPath)

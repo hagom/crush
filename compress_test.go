@@ -127,7 +127,7 @@ func TestCompressParallelSplit(t *testing.T) {
 	if len(out) != 2 {
 		t.Fatalf("outPaths = %v, quiere 2", out)
 	}
-	for _, want := range []string{filepath.Join(tmpDir, "a_parts", "a.gz"), filepath.Join(tmpDir, "b_parts", "b.gz")} {
+	for _, want := range []string{filepath.Join(tmpDir, "a.txt_parts", "a.txt.gz"), filepath.Join(tmpDir, "b.txt_parts", "b.txt.gz")} {
 		if _, statErr := os.Stat(want); statErr != nil {
 			t.Errorf("Con -s en paralelo esperaba %s: %v", want, statErr)
 		}
@@ -350,10 +350,10 @@ func TestCompressParallelCleanupOnError(t *testing.T) {
 	if _, statErr := os.Stat(bad); statErr != nil {
 		t.Errorf("El original fallido %s no debería eliminarse: %v", bad, statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(tmpDir, "good.gz")); statErr != nil {
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "good.txt.gz")); statErr != nil {
 		t.Errorf("El archivo comprimido de %s debería existir: %v", good, statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(tmpDir, "bad.gz")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "bad.txt.gz")); !os.IsNotExist(statErr) {
 		t.Errorf("La salida parcial del fallido %s debería haberse eliminado", bad)
 	}
 }
@@ -662,3 +662,60 @@ func TestCompressParallelNoGhostDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestCompressParallelPreservesExtension(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "game1.iso")
+	f2 := filepath.Join(tmpDir, "game2.iso")
+	if err := os.WriteFile(f1, []byte("isodata1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("isodata2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Formato de flujo (single-stream): gz -> debe preservar .iso (game1.iso.gz, game2.iso.gz)
+	outDirGz := filepath.Join(tmpDir, "out_gz")
+	optsGz := CompressOptions{
+		Format:    Gz,
+		OutputDir: outDirGz,
+		KeepOrig:  true,
+		Parallel:  2,
+	}
+	outGz, err := DoCompress([]string{f1, f2}, optsGz)
+	if err != nil {
+		t.Fatalf("DoCompress paralelo con gz falló: %v", err)
+	}
+	if len(outGz) != 2 {
+		t.Fatalf("se esperaban 2 archivos, obtenido %d", len(outGz))
+	}
+	for _, p := range outGz {
+		base := filepath.Base(p)
+		if !strings.HasSuffix(base, ".iso.gz") {
+			t.Errorf("formato de flujo (gz) debería preservar extensión completa .iso.gz, obtenido: %s", base)
+		}
+	}
+
+	// 2. Formato contenedor: zip -> debe reemplazar la extensión a .zip (game1.zip, game2.zip)
+	outDirZip := filepath.Join(tmpDir, "out_zip")
+	optsZip := CompressOptions{
+		Format:    Zip,
+		OutputDir: outDirZip,
+		KeepOrig:  true,
+		Parallel:  2,
+	}
+	outZip, err := DoCompress([]string{f1, f2}, optsZip)
+	if err != nil {
+		t.Fatalf("DoCompress paralelo con zip falló: %v", err)
+	}
+	if len(outZip) != 2 {
+		t.Fatalf("se esperaban 2 archivos, obtenido %d", len(outZip))
+	}
+	for _, p := range outZip {
+		base := filepath.Base(p)
+		if strings.Contains(base, ".iso") || !strings.HasSuffix(base, ".zip") {
+			t.Errorf("formato contenedor (zip) debería reemplazar extensión a .zip, obtenido: %s", base)
+		}
+	}
+}
+

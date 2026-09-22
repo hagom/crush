@@ -495,10 +495,14 @@ func main() {
 		if parallel < 2 {
 			parallel = 2
 		}
+		decompOutputDir := *outputDir
+		if !outDirSet {
+			decompOutputDir = ""
+		}
 		opts := DecompressOptions{
 			DryRun:    *dryRun,
 			Verbose:   *verbose,
-			OutputDir: *outputDir,
+			OutputDir: decompOutputDir,
 			KeepOrig:  *keepOrig,
 			Force:     *force,
 			Parallel:  parallel,

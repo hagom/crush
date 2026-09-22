@@ -91,10 +91,7 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 	neededByDir := make(map[string]int64)
 	for _, f := range allFiles {
-		targetDir := opts.OutputDir
-		if targetDir == "" {
-			targetDir = filepath.Dir(f)
-		}
+		targetDir := resolveTargetDir(opts.OutputDir, f)
 		var sz int64
 		if s := EstimateUncompressedSize(f); s > 0 {
 			sz = s
@@ -374,10 +371,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	startTime := time.Now()
 	WriteLogf("%s%s%s\n", Bold, file, NC)
 
-	dir := opts.OutputDir
-	if dir == "" {
-		dir = filepath.Dir(file)
-	}
+	dir := resolveTargetDir(opts.OutputDir, file)
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("Error creando directorio de salida: %w", err)
@@ -713,13 +707,22 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			if size := EstimateUncompressedSize(file); size > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
 			}
-			return pipeline(outFile, os.Stderr, decompCmd, exec.Command("pv", pvArgs...))
+			if err := pipeline(outFile, os.Stderr, decompCmd, exec.Command("pv", pvArgs...)); err != nil {
+				return err
+			}
+			outFile.Close()
+			checkAndApplyIsoExtension(outputPath)
+			return nil
 		}
 		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-o", outputPath, "--", file}
 		cmd := exec.Command("lrzip", args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
-		return cmd.Run()
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+		checkAndApplyIsoExtension(outputPath)
+		return nil
 
 	default:
 		outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
@@ -747,6 +750,8 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			if err := pipeline(outFile, os.Stderr, decompCmd, pvCmd); err != nil {
 				return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 			}
+			outFile.Close()
+			checkAndApplyIsoExtension(outputPath)
 			return nil
 		}
 		decompCmd, closer, err := pipeCmdForParts(info, parts, opts.Progress, fp)
@@ -766,9 +771,39 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		if err := decompCmd.Run(); err != nil {
 			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 		}
+		outFile.Close()
+		checkAndApplyIsoExtension(outputPath)
 		return nil
 	}
 }
+
+func checkAndApplyIsoExtension(outputPath string) {
+	if filepath.Ext(outputPath) != "" {
+		return
+	}
+	f, err := os.Open(outputPath)
+	if err != nil {
+		return
+	}
+	buf := make([]byte, 5)
+	n, err := f.ReadAt(buf, 32769)
+	f.Close()
+	if (err == nil || errors.Is(err, io.EOF)) && n == 5 && string(buf) == "CD001" {
+		_ = os.Rename(outputPath, outputPath+".iso")
+	}
+}
+
+func resolveTargetDir(outputDir, file string) string {
+	if outputDir != "" {
+		return outputDir
+	}
+	targetDir := filepath.Dir(file)
+	if strings.HasSuffix(targetDir, "_parts") || strings.HasSuffix(targetDir, "_split") {
+		targetDir = filepath.Dir(targetDir)
+	}
+	return targetDir
+}
+
 
 var tarSuffixes = []string{".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2",
 	".tar.bz3", ".tar.zst", ".tzst", ".tar.lz", ".tlz",

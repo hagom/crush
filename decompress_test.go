@@ -921,5 +921,165 @@ func TestDecompressSplitReportPortions(t *testing.T) {
 	}
 }
 
+func TestDecompressSinglePreservesExtension(t *testing.T) {
+	if !hasTool("bzip3") {
+		t.Skip("bzip3 no disponible")
+	}
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "game.iso")
+	originalData := []byte("Antigravity ISO dummy data for decompression test")
+	if err := os.WriteFile(src, originalData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Comprimir game.iso -> game.iso.bz3
+	archive := filepath.Join(tmpDir, "game.iso.bz3")
+	cmd := exec.Command("bzip3", "-c", src)
+	outFile, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outFile
+	if err := cmd.Run(); err != nil {
+		outFile.Close()
+		t.Fatalf("falló compresión bzip3: %v", err)
+	}
+	outFile.Close()
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+
+	err = DoDecompress([]string{archive}, opts)
+	if err != nil {
+		t.Fatalf("DoDecompress falló: %v", err)
+	}
+
+	extracted := filepath.Join(outDir, "game.iso")
+	data, err := os.ReadFile(extracted)
+	if err != nil {
+		t.Fatalf("se esperaba que el archivo descomprimido fuese %s pero no se encontró: %v", extracted, err)
+	}
+	if !bytes.Equal(data, originalData) {
+		t.Fatalf("contenido descomprimido no coincide")
+	}
+}
+
+func TestDecompressAutoDetectIsoExtension(t *testing.T) {
+	if !hasTool("bzip3") {
+		t.Skip("bzip3 no disponible")
+	}
+	tmpDir := t.TempDir()
+
+	// Crear archivo simulando imagen ISO 9660:
+	// Tamaño >= 32774 bytes, con magic "CD001" en offset 32769 (0x8001)
+	isoData := make([]byte, 33000)
+	copy(isoData[32769:], []byte("CD001"))
+
+	src := filepath.Join(tmpDir, "legacy_file") // sin extensión
+	if err := os.WriteFile(src, isoData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Archivo legacy sin extensión comprimido: legacy_game.bz3
+	archive := filepath.Join(tmpDir, "legacy_game.bz3")
+	cmd := exec.Command("bzip3", "-c", src)
+	outFile, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outFile
+	if err := cmd.Run(); err != nil {
+		outFile.Close()
+		t.Fatalf("falló compresión bzip3: %v", err)
+	}
+	outFile.Close()
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+
+	err = DoDecompress([]string{archive}, opts)
+	if err != nil {
+		t.Fatalf("DoDecompress falló: %v", err)
+	}
+
+	expectedIso := filepath.Join(outDir, "legacy_game.iso")
+	if _, err := os.Stat(expectedIso); err != nil {
+		t.Errorf("se esperaba que legacy_game fuese renombrado a legacy_game.iso por magic CD001, pero no existe: %v", err)
+	}
+	unwanted := filepath.Join(outDir, "legacy_game")
+	if _, err := os.Stat(unwanted); err == nil {
+		t.Errorf("el archivo sin extensión %s no debería existir tras el renombramiento a .iso", unwanted)
+	}
+}
+
+func TestDecompressRecursivePreservesDirectoryPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Subdirectorio anidado: dir1/dir2
+	nestedDir := filepath.Join(tmpDir, "dir1", "dir2")
+	if err := os.MkdirAll(nestedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Archivo comprimido en dir1/dir2/data.txt.gz
+	fileNested := filepath.Join(nestedDir, "data.txt")
+	if err := os.WriteFile(fileNested, []byte("nested content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	archNested := filepath.Join(nestedDir, "data.txt.gz")
+	makeGz(t, fileNested, archNested)
+	os.Remove(fileNested)
+
+	// Subdirectorio con _parts: dir1/mysplit_parts/part.txt.gz
+	partsDir := filepath.Join(tmpDir, "dir1", "mysplit_parts")
+	if err := os.MkdirAll(partsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	fileParts := filepath.Join(partsDir, "part.txt")
+	if err := os.WriteFile(fileParts, []byte("parts content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	archParts := filepath.Join(partsDir, "part.txt.gz")
+	makeGz(t, fileParts, archParts)
+	os.Remove(fileParts)
+
+	// Descomprimir con OutputDir: "" (como crush -d sin -o)
+	opts := DecompressOptions{
+		OutputDir: "",
+		Force:     true,
+		KeepOrig:  true,
+	}
+
+	err := DoDecompress([]string{archNested, archParts}, opts)
+	if err != nil {
+		t.Fatalf("DoDecompress falló: %v", err)
+	}
+
+	// 1. archNested debe extraerse en dir1/dir2/data.txt
+	expectedNested := filepath.Join(nestedDir, "data.txt")
+	if _, err := os.Stat(expectedNested); err != nil {
+		t.Errorf("archivo anidado debería extraerse en %s, pero no existe: %v", expectedNested, err)
+	}
+
+	// 2. archParts debe extraerse en dir1/part.txt (padre de mysplit_parts), NO dentro de mysplit_parts/
+	expectedParts := filepath.Join(tmpDir, "dir1", "part.txt")
+	if _, err := os.Stat(expectedParts); err != nil {
+		t.Errorf("archivo en _parts debería extraerse en %s (padre del directorio _parts), pero no existe: %v", expectedParts, err)
+	}
+	unwantedInParts := filepath.Join(partsDir, "part.txt")
+	if _, err := os.Stat(unwantedInParts); err == nil {
+		t.Errorf("el archivo no debería estar dentro de _parts: %s", unwantedInParts)
+	}
+}
+
+
 
 

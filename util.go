@@ -154,6 +154,18 @@ func resolveSplitBase(file string) string {
 	return file
 }
 
+func ResolveDecompressDir(archivePath string, configuredOutputDir string) string {
+	if configuredOutputDir != "" {
+		return configuredOutputDir
+	}
+	dir := filepath.Dir(archivePath)
+	if strings.HasSuffix(dir, "_parts") || strings.HasSuffix(dir, "_split") {
+		return filepath.Dir(dir)
+	}
+	return dir
+}
+
+
 func pollFileProgress(fp *FileProgress) {
 	if fp == nil || fp.Status() != "active" || fp.OutPath() == "" || fp.Size <= 0 {
 		return

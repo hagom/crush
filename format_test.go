@@ -187,3 +187,82 @@ func TestFormatInfo(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatIsContainerAndIsStream(t *testing.T) {
+	tests := []struct {
+		format      Format
+		isContainer bool
+		isStream    bool
+	}{
+		{Gz, false, true},
+		{Xz, false, true},
+		{Bz2, false, true},
+		{Bz3, false, true},
+		{Zst, false, true},
+		{Lz, false, true},
+		{Lrz, false, true},
+		{Zip, true, false},
+		{SevenZ, true, false},
+		{Tar, true, false},
+		{Rar, true, false},
+		{Lz4, false, true},
+		{Br, false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.format.String(), func(t *testing.T) {
+			if got := tt.format.IsContainer(); got != tt.isContainer {
+				t.Errorf("Format(%s).IsContainer() = %v, want %v", tt.format, got, tt.isContainer)
+			}
+			if got := tt.format.IsStream(); got != tt.isStream {
+				t.Errorf("Format(%s).IsStream() = %v, want %v", tt.format, got, tt.isStream)
+			}
+
+			info := FormatInfoFromFormat(tt.format)
+			if got := info.IsContainer(); got != tt.isContainer {
+				t.Errorf("FormatInfo(%s).IsContainer() = %v, want %v", tt.format, got, tt.isContainer)
+			}
+			if got := info.IsStream(); got != tt.isStream {
+				t.Errorf("FormatInfo(%s).IsStream() = %v, want %v", tt.format, got, tt.isStream)
+			}
+		})
+	}
+}
+
+func TestArchiveBaseName(t *testing.T) {
+	tests := []struct {
+		name      string
+		format    Format
+		inputPath string
+		want      string
+	}{
+		// Stream formats: return filepath.Base(inputPath)
+		{"Gz regular file", Gz, "/path/to/archive.tar.gz", "archive.tar.gz"},
+		{"Gz relative path", Gz, "data.txt", "data.txt"},
+		{"Xz path", Xz, "/var/log/syslog.log", "syslog.log"},
+		{"Zst path", Zst, "../folder/document.pdf", "document.pdf"},
+		{"Lz4 path", Lz4, "myfile.dat", "myfile.dat"},
+		{"Br path", Br, "/tmp/style.css", "style.css"},
+		// Container formats: return strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+		{"Zip path", Zip, "/path/to/archive.zip", "archive"},
+		{"Zip relative", Zip, "mydata.zip", "mydata"},
+		{"SevenZ path", SevenZ, "/home/user/backup.7z", "backup"},
+		{"Tar path", Tar, "/etc/config.tar", "config"},
+		{"Tar with dots", Tar, "data.2024.tar", "data.2024"},
+		{"Rar path", Rar, "/downloads/pack.rar", "pack"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.format.ArchiveBaseName(tt.inputPath); got != tt.want {
+				t.Errorf("Format(%s).ArchiveBaseName(%q) = %q, want %q", tt.format, tt.inputPath, got, tt.want)
+			}
+
+			info := FormatInfoFromFormat(tt.format)
+			if got := info.ArchiveBaseName(tt.inputPath); got != tt.want {
+				t.Errorf("FormatInfo(%s).ArchiveBaseName(%q) = %q, want %q", tt.format, tt.inputPath, got, tt.want)
+			}
+		})
+	}
+}
+

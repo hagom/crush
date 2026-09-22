@@ -75,8 +75,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	ext := ExtForFormat(opts.Format)
 
 	if opts.SplitSize > 0 {
-		switch opts.Format {
-		case Lrz, Zip, SevenZ, Tar, Rar:
+		if opts.Format.IsContainer() || opts.Format == Lrz {
 			WriteLogf("  %s⚠ split (-s) no soportado para %s (solo disponible para gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*); se ignora%s\n", Yellow, opts.Format, NC)
 			opts.SplitSize = 0
 		}
@@ -357,8 +356,7 @@ func splitOutPath(outPath string, opts CompressOptions) string {
 }
 
 func isTarBased(f Format) bool {
-	return f == Gz || f == Xz || f == Bz2 || f == Bz3 || f == Zst ||
-		f == Lz || f == Lrz || f == Lz4 || f == Br
+	return f.IsStream()
 }
 
 func compressToolName(f Format) string {
@@ -639,12 +637,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			fp.SetStatus("active")
 			fp.SetStart(time.Now())
 
-			base := filepath.Base(file)
-			isContainer := opts.Format == Zip || opts.Format == SevenZ || opts.Format == Tar || opts.Format == Rar
-			baseName := base
-			if isContainer {
-				baseName = strings.TrimSuffix(base, filepath.Ext(base))
-			}
+			baseName := opts.Format.ArchiveBaseName(file)
 			targetDir := opts.OutputDir
 			if opts.SplitSize > 0 {
 				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")

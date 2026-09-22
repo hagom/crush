@@ -91,7 +91,7 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 	neededByDir := make(map[string]int64)
 	for _, f := range allFiles {
-		targetDir := resolveTargetDir(opts.OutputDir, f)
+		targetDir := ResolveDecompressDir(f, opts.OutputDir)
 		var sz int64
 		if s := EstimateUncompressedSize(f); s > 0 {
 			sz = s
@@ -223,30 +223,26 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 }
 
 func listArchiveOutputs(file string, dir string, info FormatInfo) []string {
-	lower := strings.ToLower(file)
-	if strings.HasSuffix(lower, ".tar") ||
-		strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") ||
-		strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".txz") ||
-		strings.HasSuffix(lower, ".tar.bz2") || strings.HasSuffix(lower, ".tbz2") ||
-		strings.HasSuffix(lower, ".tar.bz3") || strings.HasSuffix(lower, ".tar.br") ||
-		strings.HasSuffix(lower, ".tar.lrz") ||
-		strings.HasSuffix(lower, ".tar.zst") || strings.HasSuffix(lower, ".tzst") ||
-		strings.HasSuffix(lower, ".tar.lz") || strings.HasSuffix(lower, ".tlz") ||
-		strings.HasSuffix(lower, ".tar.lz4") {
+	if info.Tool == "" {
+		if fi, err := DetectFormat(file); err == nil {
+			info = fi
+		}
+	}
+	if info.IsTar || info.Format == Tar {
 		if members, ok := listTarMembers(file); ok {
 			return resolveOutputs(members, dir)
 		}
 		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
 		return nil
 	}
-	if strings.HasSuffix(lower, ".7z") || strings.HasSuffix(lower, ".zip") {
+	if info.Format == SevenZ || info.Format == Zip {
 		if members, ok := listSevenZipMembers(file); ok {
 			return resolveOutputs(members, dir)
 		}
 		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
 		return nil
 	}
-	if strings.HasSuffix(lower, ".rar") {
+	if info.Format == Rar {
 		if members, ok := listRarMembers(file); ok {
 			return resolveOutputs(members, dir)
 		}
@@ -371,7 +367,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	startTime := time.Now()
 	WriteLogf("%s%s%s\n", Bold, file, NC)
 
-	dir := resolveTargetDir(opts.OutputDir, file)
+	dir := ResolveDecompressDir(file, opts.OutputDir)
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("Error creando directorio de salida: %w", err)
@@ -794,14 +790,7 @@ func checkAndApplyIsoExtension(outputPath string) {
 }
 
 func resolveTargetDir(outputDir, file string) string {
-	if outputDir != "" {
-		return outputDir
-	}
-	targetDir := filepath.Dir(file)
-	if strings.HasSuffix(targetDir, "_parts") || strings.HasSuffix(targetDir, "_split") {
-		targetDir = filepath.Dir(targetDir)
-	}
-	return targetDir
+	return ResolveDecompressDir(file, outputDir)
 }
 
 

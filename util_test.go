@@ -824,3 +824,78 @@ func TestFindSplitPartsNaturalSort(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveDecompressDir(t *testing.T) {
+	tests := []struct {
+		name                string
+		archivePath         string
+		configuredOutputDir string
+		want                string
+	}{
+		{
+			name:                "configured output dir takes precedence",
+			archivePath:         "/home/user/downloads/archive.tar.gz",
+			configuredOutputDir: "/custom/extract/dir",
+			want:                "/custom/extract/dir",
+		},
+		{
+			name:                "configured output dir takes precedence over _parts",
+			archivePath:         "/home/user/downloads/archive_parts/archive.tar.gz",
+			configuredOutputDir: "/custom/extract/dir",
+			want:                "/custom/extract/dir",
+		},
+		{
+			name:                "configured output dir takes precedence over _split",
+			archivePath:         "/home/user/downloads/archive_split/archive.tar.gz",
+			configuredOutputDir: "/custom/extract/dir",
+			want:                "/custom/extract/dir",
+		},
+		{
+			name:                "empty configured dir with normal path uses parent dir",
+			archivePath:         "/home/user/downloads/archive.tar.gz",
+			configuredOutputDir: "",
+			want:                "/home/user/downloads",
+		},
+		{
+			name:                "empty configured dir with relative path in current dir",
+			archivePath:         "archive.tar.gz",
+			configuredOutputDir: "",
+			want:                ".",
+		},
+		{
+			name:                "empty configured dir unwraps _parts folder to grandparent dir",
+			archivePath:         "/var/data/backup_parts/backup.tar.gz",
+			configuredOutputDir: "",
+			want:                "/var/data",
+		},
+		{
+			name:                "empty configured dir unwraps _split folder to grandparent dir",
+			archivePath:         "/var/data/backup_split/backup.tar.gz",
+			configuredOutputDir: "",
+			want:                "/var/data",
+		},
+		{
+			name:                "empty configured dir unwraps relative _parts directory",
+			archivePath:         "myarchive_parts/myarchive.zip",
+			configuredOutputDir: "",
+			want:                ".",
+		},
+		{
+			name:                "empty configured dir unwraps relative _split directory",
+			archivePath:         "project_split/project.tar.bz2",
+			configuredOutputDir: "",
+			want:                ".",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveDecompressDir(tt.archivePath, tt.configuredOutputDir)
+			if got != tt.want {
+				t.Errorf("ResolveDecompressDir(%q, %q) = %q, want %q",
+					tt.archivePath, tt.configuredOutputDir, got, tt.want)
+			}
+		})
+	}
+}
+

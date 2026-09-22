@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -50,7 +51,29 @@ func (f Format) String() string {
 	return fmt.Sprintf("Format(%d)", f)
 }
 
+func (f Format) IsContainer() bool {
+	switch f {
+	case Zip, SevenZ, Tar, Rar:
+		return true
+	default:
+		return false
+	}
+}
+
+func (f Format) IsStream() bool {
+	return !f.IsContainer()
+}
+
+func (f Format) ArchiveBaseName(inputPath string) string {
+	base := filepath.Base(inputPath)
+	if f.IsStream() {
+		return base
+	}
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
 type FormatInfo struct {
+	Format      Format
 	Tool        string
 	PipeFlags   string
 	DirectFlags string
@@ -58,13 +81,34 @@ type FormatInfo struct {
 	TestFlag    string
 }
 
-func ExtForFormat(f Format) string {
-	switch f {
-	case Zip, SevenZ, Rar, Tar:
-		return f.String()
-	default:
-		return "tar." + f.String()
+func (fi FormatInfo) IsContainer() bool {
+	if fi.Format != 0 {
+		return fi.Format.IsContainer()
 	}
+	switch fi.Tool {
+	case "unzip", "tar", "7z", "7za", "7zr", "rar", "unrar":
+		return true
+	}
+	return fi.Format.IsContainer()
+}
+
+func (fi FormatInfo) IsStream() bool {
+	return !fi.IsContainer()
+}
+
+func (fi FormatInfo) ArchiveBaseName(inputPath string) string {
+	base := filepath.Base(inputPath)
+	if fi.IsStream() {
+		return base
+	}
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+func ExtForFormat(f Format) string {
+	if f.IsContainer() {
+		return f.String()
+	}
+	return "tar." + f.String()
 }
 
 func ParseFormat(s string) (Format, error) {
@@ -79,23 +123,31 @@ func ParseFormat(s string) (Format, error) {
 func FormatInfoFromFormat(f Format) FormatInfo {
 	switch f {
 	case Gz:
-		return FormatInfo{Tool: "pigz", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Gz, Tool: "pigz", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case Xz:
-		return FormatInfo{Tool: "xz", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Xz, Tool: "xz", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
 	case Bz2:
-		return FormatInfo{Tool: bzip2Bin(), PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Bz2, Tool: bzip2Bin(), PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case Bz3:
-		return FormatInfo{Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -kj " + ncpuStr(), IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Bz3, Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -kj " + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case Zst:
-		return FormatInfo{Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Zst, Tool: "zstd", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
 	case Lz:
-		return FormatInfo{Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Lz, Tool: "plzip", PipeFlags: "-dc --threads=" + ncpuStr(), DirectFlags: "-dk --threads=" + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case Lrz:
-		return FormatInfo{Tool: "lrzip", PipeFlags: "-d -p " + ncpuStr() + " -o -", DirectFlags: "-d -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Lrz, Tool: "lrzip", PipeFlags: "-d -p " + ncpuStr() + " -o -", DirectFlags: "-d -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case Lz4:
-		return FormatInfo{Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Lz4, Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case Br:
-		return FormatInfo{Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Br, Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+	case Zip:
+		return FormatInfo{Format: Zip, Tool: "unzip", PipeFlags: "-o", DirectFlags: "-o", TestFlag: "-t"}
+	case SevenZ:
+		return FormatInfo{Format: SevenZ, Tool: sevenzBin(), PipeFlags: "x -mmt=on", DirectFlags: "x -mmt=on", TestFlag: "t"}
+	case Rar:
+		return FormatInfo{Format: Rar, Tool: rarBin(), PipeFlags: "x -mt" + ncpuStr(), DirectFlags: "x -mt" + ncpuStr(), TestFlag: "t"}
+	case Tar:
+		return FormatInfo{Format: Tar, Tool: "tar", PipeFlags: "-xf", DirectFlags: "-xf", TestFlag: "-tf"}
 	default:
 		return FormatInfo{}
 	}
@@ -143,15 +195,5 @@ func DetectFormat(filename string) (FormatInfo, error) {
 		strings.HasSuffix(lower, ".tzst") || strings.HasSuffix(lower, ".tar.lz") ||
 		strings.HasSuffix(lower, ".tlz") || strings.HasSuffix(lower, ".tar.lrz") ||
 		strings.HasSuffix(lower, ".tar.lz4") || strings.HasSuffix(lower, ".tar.br")
-	switch ext {
-	case Zip:
-		fi = FormatInfo{Tool: "unzip", PipeFlags: "-o", DirectFlags: "-o", TestFlag: "-t"}
-	case SevenZ:
-		fi = FormatInfo{Tool: sevenzBin(), PipeFlags: "x -mmt=on", DirectFlags: "x -mmt=on", TestFlag: "t"}
-	case Rar:
-		fi = FormatInfo{Tool: rarBin(), PipeFlags: "x -mt" + ncpuStr(), DirectFlags: "x -mt" + ncpuStr(), TestFlag: "t"}
-	case Tar:
-		fi = FormatInfo{Tool: "tar", PipeFlags: "-xf", DirectFlags: "-xf", TestFlag: "-tf"}
-	}
 	return fi, nil
 }

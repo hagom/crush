@@ -282,38 +282,43 @@ func CompressRead(f *os.File) ([]byte, error) {
 		return nil, err
 	}
 
+	format, ok := ParseFormatFromExt(info.Name())
+	if !ok {
+		return nil, fmt.Errorf("no se puede leer archivo comprimido: %s", info.Name())
+	}
+
 	var cmd *exec.Cmd
 
-	switch {
-	case strings.HasSuffix(info.Name(), ".gz") || strings.HasSuffix(info.Name(), ".tgz"):
+	switch format {
+	case Gz:
 		cmd = exec.Command("pigz", "-dc", "--", f.Name())
 		if !hasTool("pigz") {
 			cmd = exec.Command("gzip", "-dc", "--", f.Name())
 		}
-	case strings.HasSuffix(info.Name(), ".bz2") || strings.HasSuffix(info.Name(), ".tbz2"):
+	case Bz2:
 		bin := bzip2Bin()
 		cmd = exec.Command(bin, "-dc", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".xz") || strings.HasSuffix(info.Name(), ".txz"):
+	case Xz:
 		cmd = exec.Command("xz", "-dc", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".zst") || strings.HasSuffix(info.Name(), ".tzst"):
+	case Zst:
 		cmd = exec.Command("zstd", "-dc", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".lz") || strings.HasSuffix(info.Name(), ".tlz"):
+	case Lz:
 		cmd = exec.Command("plzip", "-dc", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".lz4"):
+	case Lz4:
 		cmd = exec.Command("lz4", "-dc", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".br"):
+	case Br:
 		cmd = exec.Command("brotli", "-dc", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".lrz"):
+	case Lrz:
 		cmd = exec.Command("lrzip", "-d", "-k", "-p", ncpuStr(), "-o", "-", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".zip"):
+	case Zip:
 		cmd = exec.Command("unzip", "-p", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".7z"):
+	case SevenZ:
 		cmd = exec.Command(sevenzBin(), "x", "-so", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".rar"):
+	case Rar:
 		cmd = exec.Command(rarBin(), "p", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".bz3"):
+	case Bz3:
 		cmd = exec.Command("bzip3", "-dc", "--", f.Name())
-	case strings.HasSuffix(info.Name(), ".tar"):
+	case Tar:
 		cmd = exec.Command("tar", "-xOf", f.Name())
 	default:
 		return nil, fmt.Errorf("no se puede leer archivo comprimido: %s", info.Name())

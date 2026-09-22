@@ -62,6 +62,37 @@ make install        # install -m 755 crush /usr/local/bin/
 - **Sistemas target**: Debian (apt) y RedHat (dnf/yum). El instalador de dependencias debe priorizar estos gestores.
 - Si la versión paralela de un compresor no está disponible, caer en la versión serial (`gzip`, `bzip2`, etc.) como último recurso, nunca fallar.
 
+## Principios de Diseño SOLID
+
+La arquitectura de `crush` aplica rigurosamente los principios SOLID para garantizar mantenibilidad, extensibilidad y desacoplamiento sin dependencias externas:
+
+### 1. SRP — Single Responsibility Principle (Principio de Responsabilidad Única)
+- **Contratos de Formato (`format.go`):** La estructura `FormatInfo` y el tipo enum `Format` encapsulan exclusivamente los rasgos, herramientas, flags y nombres base correspondientes a cada formato (`IsContainer()`, `IsStream()`, `ArchiveBaseName()`). Ni `compress.go` ni `decompress.go` deben deducir heurísticas de formato dispersas.
+- **Resolución de Directorios (`ResolveDecompressDir` en `util.go`):** Centraliza la regla de negocio para resolver el directorio destino de extracción, manejando limpiamente si el archivo origen se encuentra dentro de carpetas de partición (`_parts` o `_split`) para extraer en el directorio superior sin acoplarse al pipeline de descompresión.
+- **Canales de E/S (`lockedWriter`, `countingWriter`, `countingReader` en `util.go`):** Cada adaptador de streaming tiene una única tarea (sincronizar escrituras concurrentes, contar bytes transferidos para progreso o interceptar lectura en tiempo real).
+
+### 2. OCP — Open/Closed Principle (Principio de Abierto/Cerrado)
+- **Extensibilidad de Formatos:** Nuevos compresores o formatos se incorporan registrándolos en `format.go` (`formatNames`, `FormatInfoFromFormat`, `knownTarSuffixes`), sin necesidad de modificar switches hardcodeados en `compress.go`, `decompress.go`, `pkgmgr.go` o `test_cmd.go`.
+- **Diferenciación Flujo vs Contenedor:** Funciones como `ExtForFormat`, `isTarBased`, `listArchiveOutputs` y validación de `SplitSize` consumen los métodos polimórficos `info.IsContainer()` e `info.IsStream()`, permaneciendo cerradas a modificación cuando se añade un nuevo formato de compresión.
+
+### 3. LSP — Liskov Substitution Principle (Principio de Sustitución de Liskov)
+- **Intercambiabilidad de Herramientas:** Las herramientas concurrentes (`pigz`, `lbzip2`, `plzip`, `bzip3`, `xz`, `zstd`, `lrzip`, `7z`, `rar`) y sus fallbacks secuenciales (`gzip`, `bzip2`, `lzip`) respetan idénticos contratos de entrada/salida y comportamiento vía pipes (`-dc`, `-c`, `-f`, stdout/stdin).
+- **Lectores y Escritores Estándar:** Cualquier componente que acepte `io.Reader` o `io.Writer` puede recibir indistintamente `os.File`, `bytes.Buffer`, `countingReader`, `countingWriter` o pipes anónimos sin alterar la corrección del programa.
+
+### 4. ISP — Interface Segregation Principle (Principio de Segregación de Interfaces)
+- **Interfaces Mínimas de la Stdlib:** Se evitan interfaces monolíticas o sobrecargadas. Se emplean exclusivamente las interfaces elementales de la biblioteca estándar de Go (`io.Reader`, `io.Writer`, `io.Closer`) compuestas según la necesidad (`io.ReadCloser`, `io.WriteCloser`).
+- **Opciones Específicas por Operación:** `CompressOptions`, `DecompressOptions` y `TestOptions` segregan claramente las configuraciones de cada modo de ejecución en lugar de compartir un único struct de opciones hinchado.
+
+### 5. DIP — Dependency Inversion Principle (Principio de Inversión de Dependencias)
+- **Desacoplamiento de Comandos del Sistema:** El acceso a utilidades externas del sistema operativo (`df`, `free`, procesos de compresión) se realiza mediante la abstracción inyectable `var execCommand = exec.Command` en `util.go`, permitiendo que los tests unitarios (`mock_test.go`, `util_test.go`) simulen entornos y respuestas del sistema sin ejecutar subprocesos reales ni requerir privilegios de root.
+- **Inyección de Dependencias en Progreso y Logging:** Las rutinas de ejecución reciben sus sumideros (`pt *ProgressTracker`, `fp *FileProgress`, `io.Writer`) en lugar de depender de instancias globales rígidas.
+
+### Directrices para Código Futuro
+- Al agregar un formato: actualizar solo `format.go` (definición de enum, nombre, herramientas y extensiones). Evitar agregar `switch format` dispersos fuera de `format.go`.
+- Todo cálculo de rutas de extracción debe invocar `ResolveDecompressDir`.
+- Mantener la stdlib pura: no introducir dependencias externas en `go.mod`.
+- Todo comando externo susceptible de ser testeado debe invocar `execCommand` para preservar la testeabilidad.
+
 ## Estructura del código Go
 
 ```
@@ -82,8 +113,13 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 205 tests nativos pasando con race detector (-race). ~9300 líneas. 0 bugs conocidos.
+- Go: migración completa. 208 tests nativos pasando con race detector (-race). ~9350 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Refactorización de Arquitectura SOLID:
+    - Encapsulación de rasgos de formato en `Format` y `FormatInfo` (`format.go`): métodos polimórficos `IsContainer()` (verdadero para Zip, SevenZ, Tar, Rar), `IsStream()` (`!IsContainer()`) y `ArchiveBaseName(inputPath)`.
+    - Centralización de resolución de directorios en `ResolveDecompressDir` (`util.go`): regla única para derivar carpetas destino de descompresión desempaquetando directorios residuales de división (`_parts`, `_split`) hacia el directorio padre sin acoplar detalles de partición en `decompress.go`.
+    - Cumplimiento estricto de OCP, LSP, ISP y DIP: eliminación de switches de extensiones redundantes en `compress.go`, `decompress.go` y `pkgmgr.go`, segregación de interfaces con Go stdlib, e inversión de dependencias en subprocesos del sistema con `execCommand`.
+    - Suite de pruebas unitarias table-driven exhaustiva para los nuevos métodos y contratos SOLID.
   - Ordenamiento natural numérico en unión de fragmentos split: corrección en `globSplitParts` (`util.go`) para ordenar numéricamente los fragmentos `.part*` en lugar de léxicamente, resolviendo el error de flujo corrupto (`exit status 1`) que ocurría en archivos segmentados en 100 o más partes (donde el orden alfabético colocaba `.part100` antes de `.part11`).
   - Prevención de carpetas residuales (`crush_YYYYMMDD_parts`) en compresión paralela: cálculo diferido de rutas de salida en `DoCompress` para evitar crear directorios combinados vacíos cuando se ejecuta compresión multi-archivo paralela, y limpieza garantizada de carpetas vacías si una operación se cancela o falla.
   - Autocompletado inteligente contextual para división en partes (`-s`): sugerencia exclusiva de tamaños comunes de partición en megabytes (`10`, `50`, `100`, `500`, `1000` MB) al pulsar TAB en `-s` / `--split` en Bash, Zsh y Fish con descripciones explícitas de unidad, desacoplando los formatos de `-s` y trasladando el filtrado dinámico de formatos compatibles (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lz4`, `br`) a `-f` condicionado a la presencia de `-s` en la línea de comando.

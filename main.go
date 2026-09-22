@@ -901,7 +901,7 @@ _crush_completions() {
             return 0
             ;;
         -s|--split)
-            COMPREPLY=( $(compgen -W "${split_sizes} ${split_formats}" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "${split_sizes}" -- "${cur}") )
             return 0
             ;;
     esac
@@ -975,7 +975,7 @@ _crush() {
         {-v,--verbose}'[Modo verbose]' \
         {-k,--keep}'[Conservar originales]' \
         {-n,--dry-run}'[Modo simulacro]' \
-        {-s,--split}'[Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)]:tamaño o formato:->split' \
+        {-s,--split}'[Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)]:tamaño en MB:->split' \
         '--opts[Opciones adicionales]:opciones:' \
         '--exclude[Patrón de exclusión]:patrón:' \
         '*:archivo:_files'
@@ -989,8 +989,7 @@ _crush() {
             fi
             ;;
         split)
-            _describe -t split_sizes "tamaño sugerido" split_sizes
-            _describe -t split_formats "formato compatible" split_formats
+            _describe -t split_sizes "tamaño en MB" split_sizes
             ;;
     esac
 }
@@ -1036,7 +1035,7 @@ complete -c crush -s quick -l quick -d "Verificación rápida"
 complete -c crush -s v -d "Modo verbose"
 complete -c crush -s k -d "Conservar originales"
 complete -c crush -s n -d "Modo simulacro"
-complete -c crush -s s -l split -d "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)" -xa "10 50 100 500 1000 gz xz bz2 bz3 zst lz lz4 br"
+complete -c crush -s s -l split -d "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)" -xa "10 50 100 500 1000"
 complete -c crush -s opts -l opts -d "Opciones adicionales"
 complete -c crush -s exclude -l exclude -d "Patrón de exclusión" -r
 complete -c crush -s install -l install -d "Instalar crush + dependencias"

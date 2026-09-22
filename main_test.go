@@ -312,17 +312,17 @@ func TestSplitAutocompleteScripts(t *testing.T) {
 		if !strings.Contains(bashCompletion, "_crush_completions") {
 			t.Errorf("bashCompletion should define _crush_completions()")
 		}
-		// 2. Must suggest sizes and compatible formats for -s / --split
-		for _, expected := range []string{"10", "50", "100", "500", "1000", "gz", "xz", "bz2", "bz3", "zst", "lz", "lz4", "br"} {
-			if !strings.Contains(bashCompletion, expected) {
-				t.Errorf("bashCompletion missing %q for -s completion", expected)
+		// 2. Must suggest sizes for -s / --split, and NOT suggest formats for -s
+		for _, size := range []string{"10", "50", "100", "500", "1000"} {
+			if !strings.Contains(bashCompletion, size) {
+				t.Errorf("bashCompletion missing size %q for -s completion", size)
 			}
 		}
 		// 3. Must check COMP_WORDS for -s / --split
 		if !strings.Contains(bashCompletion, "COMP_WORDS") || (!strings.Contains(bashCompletion, "-s") && !strings.Contains(bashCompletion, "--split")) {
 			t.Errorf("bashCompletion must inspect COMP_WORDS for -s / --split")
 		}
-		// 4. Must suggest ONLY split_formats when -s is present
+		// 4. Must suggest ONLY split_formats when -s is present on -f
 		if !strings.Contains(bashCompletion, "split_formats") {
 			t.Errorf("bashCompletion should define split_formats with stream formats")
 		}
@@ -331,19 +331,19 @@ func TestSplitAutocompleteScripts(t *testing.T) {
 		if bashPath, err := exec.LookPath("bash"); err == nil {
 			testScript := `
 ` + bashCompletion + `
-# Test 1: crush -s <TAB> -> should include 10 and gz, but NOT zip, 7z, tar, rar
+# Test 1: crush -s <TAB> -> should include sizes (10, 50, 100, 500, 1000), but NOT formats (gz, xz, zip, 7z)
 COMP_WORDS=("crush" "-s" "")
 COMP_CWORD=2
 _crush_completions
 out_s="${COMPREPLY[*]}"
-for expected in 10 50 100 500 1000 gz xz bz2 bz3 zst lz lz4 br; do
+for expected in 10 50 100 500 1000; do
     if [[ ! " $out_s " =~ " $expected " ]]; then
         echo "FAIL_S_MISSING:$expected"
     fi
 done
-for forbidden in zip 7z tar rar lrz; do
+for forbidden in gz xz bz2 bz3 zst lz lz4 br zip 7z tar rar lrz; do
     if [[ " $out_s " =~ " $forbidden " ]]; then
-        echo "FAIL_S_UNEXPECTED:$forbidden"
+        echo "FAIL_S_UNEXPECTED_FORMAT:$forbidden"
     fi
 done
 
@@ -382,25 +382,23 @@ done
 		}
 	})
 
-	t.Run("Zsh completion suggests compatible formats and sizes on -s and filters -f", func(t *testing.T) {
-		// Verify -s / --split definition
+	t.Run("Zsh completion suggests sizes in MB for -s and filters -f", func(t *testing.T) {
+		// Verify definitions
 		if !strings.Contains(zshCompletion, "split_formats") {
 			t.Errorf("zshCompletion should define split_formats")
 		}
 		if !strings.Contains(zshCompletion, "split_sizes") {
 			t.Errorf("zshCompletion should define split_sizes")
 		}
-		// Verify compatible formats
-		for _, f := range []string{"gz", "xz", "bz2", "bz3", "zst", "lz", "lz4", "br"} {
-			if !strings.Contains(zshCompletion, f) {
-				t.Errorf("zshCompletion missing compatible format %q", f)
+		// Verify sizes have explicit MB specifications
+		for _, s := range []string{"10:10 MB", "50:50 MB", "100:100 MB", "500:500 MB", "1000:1000 MB"} {
+			if !strings.Contains(zshCompletion, s) {
+				t.Errorf("zshCompletion missing size suggestion with MB %q", s)
 			}
 		}
-		// Verify sizes
-		for _, s := range []string{"10", "50", "100", "500", "1000"} {
-			if !strings.Contains(zshCompletion, s) {
-				t.Errorf("zshCompletion missing size suggestion %q", s)
-			}
+		// In split state, it must NOT describe formats as choices for -s
+		if strings.Contains(zshCompletion, `_describe -t split_formats "formato compatible" split_formats`) {
+			t.Errorf("zshCompletion should NOT suggest formats as options for -s")
 		}
 		// Verify -s completion links to split state
 		if !strings.Contains(zshCompletion, "->split") {
@@ -412,22 +410,20 @@ done
 		}
 	})
 
-	t.Run("Fish completion suggests compatible formats and sizes on -s and filters -f", func(t *testing.T) {
+	t.Run("Fish completion suggests sizes in MB for -s and filters -f", func(t *testing.T) {
 		// Verify __crush_split_formats definition
 		if !strings.Contains(fishCompletion, "__crush_split_formats") {
 			t.Errorf("fishCompletion should define __crush_split_formats")
 		}
-		// Verify compatible formats list
-		for _, f := range []string{"gz", "xz", "bz2", "bz3", "zst", "lz", "lz4", "br"} {
-			if !strings.Contains(fishCompletion, f) {
-				t.Errorf("fishCompletion missing compatible format %q", f)
+		// Verify -s description and values are sizes, not formats
+		for _, size := range []string{"10", "50", "100", "500", "1000"} {
+			if !strings.Contains(fishCompletion, size) {
+				t.Errorf("fishCompletion -s missing size %q", size)
 			}
 		}
-		// Verify -s description and values/formats
-		for _, val := range []string{"10", "50", "100", "500", "1000", "gz", "xz", "bz2", "bz3", "zst", "lz", "lz4", "br"} {
-			if !strings.Contains(fishCompletion, val) {
-				t.Errorf("fishCompletion -s missing value/format %q", val)
-			}
+		// Formats must NOT be suggested for -s
+		if strings.Contains(fishCompletion, `-s s -l split -d "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)" -xa "10 50 100 500 1000 gz`) {
+			t.Errorf("fishCompletion should NOT suggest formats for -s argument")
 		}
 		// Verify conditional logic for -f when -s is present
 		if !strings.Contains(fishCompletion, "__crush_has_split") {

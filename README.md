@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/usuario/crush/actions/workflows/ci.yml/badge.svg)](https://github.com/usuario/crush/actions)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Tests](https://img.shields.io/badge/tests-266%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
+[![Tests](https://img.shields.io/badge/tests-364%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Formats](https://img.shields.io/badge/formats-13%20supported-blueviolet)](https://github.com/usuario/crush)
 
@@ -18,7 +18,7 @@
 
 - **13 formatos soportados:** `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`.
 - **Compresión máxima real y paralelismo automático (NCPU):** No requiere flags manuales de hilos (`-j`). Detecta automáticamente los núcleos disponibles (`NCPU()`) y maximiza los ratios de compresión (`zstd --ultra -22`, `7z -mx=9 -md=256m -mfb=273` adaptativo a RAM, `bzip3 -b 64`, `lz4 -9` LZ4HC) y descompresión multihilo (`lbzip2 -n N`, `pigz -p N`).
-- **Planificación LPT inteligente:** En compresión multi-archivo paralela, ordena los elementos por tamaño descendente (*Longest Processing Time first*), garantizando una utilización del 100% de los núcleos del CPU durante todo el proceso y eliminando el cuello de botella por archivos rezagados.
+- **Planificación LPT inteligente (Compresión y Descompresión):** Ordenamiento óptimo descendente por tamaño (*Longest Processing Time first*) tanto al comprimir múltiples archivos como al descomprimir lotes de archivos, garantizando una utilización del 100% de los núcleos del CPU durante todo el proceso y eliminando el cuello de botella por archivos rezagados.
 - **Streaming directo sin temporales a disco:** Extracción continua en tiempo real conectando pipes directamente con `tar -xf - -C dir` sin escribir archivos `.tar` intermedios en disco, ahorrando 50% de espacio y duplicando la velocidad.
 - **Buffers de tuberías ampliados a 1 MiB:** Ajuste de capacidad de pipes en el kernel Linux (`F_SETPIPE_SZ`) a 1 MiB para minimizar los cambios de contexto (*context switches*) entre procesos UNIX.
 - **Detección y descompresión interactiva:** Al invocar `crush -d` sin argumentos, detecta automáticamente todos los archivos comprimidos del directorio actual, muestra sus tamaños y solicita confirmación para descomprimirlos en paralelo.

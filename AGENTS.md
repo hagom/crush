@@ -87,9 +87,16 @@ La arquitectura de `crush` aplica rigurosamente los principios SOLID para garant
 - **Desacoplamiento de Comandos del Sistema:** El acceso a utilidades externas del sistema operativo (`df`, `free`, procesos de compresión) se realiza mediante la abstracción inyectable `var execCommand = exec.Command` en `util.go`, permitiendo que los tests unitarios (`mock_test.go`, `util_test.go`) simulen entornos y respuestas del sistema sin ejecutar subprocesos reales ni requerir privilegios de root.
 - **Inyección de Dependencias en Progreso y Logging:** Las rutinas de ejecución reciben sus sumideros (`pt *ProgressTracker`, `fp *FileProgress`, `io.Writer`) en lugar de depender de instancias globales rígidas.
 
+### 6. Principio DRY — Don't Repeat Yourself (No te repitas)
+- **Cero Duplicación de Lógica Algorítmica (`SortByLPT` en `util.go`):** El ordenamiento concurrente LPT (*Longest Processing Time first*) se encapsula en una única función genérica de infraestructura reutilizada tanto por `compressParallel` como por `DoDecompress`, evitando duplicar la lógica de estimación, ordenamiento y manejo de errores.
+- **Fuente Única de Verdad para Sufijos (`format.go`):** Toda comprobación o extracción de sufijos tar (`.tar.gz`, `.tar.xz`, etc.) debe consultar exclusivamente la tabla `knownTarSuffixes` mediante `HasTarSuffix` y `StripTarSuffix`. Queda estrictamente prohibido redefinir slices locales de extensiones o encadenar condiciones manuales `strings.HasSuffix`.
+- **Cálculo Consolidado de Tamaños de Partes (`PartsTotalSize` / `TotalArchiveSize` en `util.go`):** El cálculo de tamaño acumulado de archivos divididos (*split*) debe invocar las funciones centralizadas de `util.go`, prohibiendo bucles manuales duplicados que sumen `os.Stat` de partes.
+- **Detección Centralizada de Particiones (`IsSplitPartsDir` en `util.go`):** La validación de carpetas de fragmentos (`_parts` o `_split`) debe realizarse mediante `IsSplitPartsDir`.
+
 ### Directrices para Código Futuro
 - Al agregar un formato: actualizar solo `format.go` (definición de enum, nombre, herramientas y extensiones). Evitar agregar `switch format` dispersos fuera de `format.go`.
 - Todo cálculo de rutas de extracción debe invocar `ResolveDecompressDir`.
+- Cumplimiento estricto del principio DRY: Si una lógica o consulta al sistema de archivos se repite en más de un sitio, debe abstraerse en una función pura o auxiliar en `util.go` o `format.go`.
 - Mantener la stdlib pura: no introducir dependencias externas en `go.mod`.
 - Todo comando externo susceptible de ser testeado debe invocar `execCommand` para preservar la testeabilidad.
 
@@ -113,14 +120,18 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 266 tests nativos pasando con race detector (-race). ~9850 líneas. 0 bugs conocidos.
+- Go: migración completa. 364 tests nativos pasando con race detector (-race). ~10250 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Refactorización de Arquitectura DRY y Unificación de LPT:
+    - **Algoritmo LPT Reutilizable (`SortByLPT` en `util.go`):** Unificación del algoritmo de planificación *Longest Processing Time first* consumido tanto por `compressParallel` como por `DoDecompress`. Elimina la duplicación de código algorítmico y asegura saturación óptima del CPU en compresión y descompresión.
+    - **Eliminación de E/S Redundante en Descompresión:** Precálculo y reuso en una sola pasada $O(N)$ del mapa de tamaños (`archiveSizes`), eliminando 3 bucles redundantes que consultaban el disco en `DoDecompress`.
+    - **Fuente Única de Sufijos Tar (`format.go`):** Deduplicación de sufijos mediante `HasTarSuffix` y `StripTarSuffix` sobre `knownTarSuffixes`, eliminando el slice duplicado `tarSuffixes` en `decompress.go` y 14 comprobaciones manuales en `DetectFormat`.
+    - **Abstracción de Tamaño y Carpetas Split (`util.go`):** Centralización de sumatorias de fragmentos en `PartsTotalSize` y `TotalArchiveSize`, y verificación de directorios particionados con `IsSplitPartsDir`.
   - Optimización de Rendimiento Extremo en Compresión y Descompresión:
     - **Streaming directo sin archivos `.tar` temporales a disco (`decompressTar`):** Descompresión por tubería directa conectando el stdout del descompresor a `tar -xf - -C dir` con monitorización en tiempo real vía `countingReader`. Elimina la creación del `.tar` intermedio en disco, reduciendo el I/O en un 50% y duplicando la velocidad.
     - **Ampliación de buffers de pipes a 1 MiB (`util_linux.go` / `setPipeCapacity`):** Configuración de `F_SETPIPE_SZ` (1048576 bytes) en descriptores de tuberías de Linux en `pipeline()`, reduciendo cambios de contexto entre subprocesos.
     - **Ratios de compresión máxima:** Activación de parámetros extremos (`zstd --ultra -22`, `7z -mx=9 -md=256m -mfb=273` adaptativo a RAM libre, `bzip3 -b 64`, `lz4 -9` LZ4HC por omisión, `pigz -p N`).
     - **Descompresión multihilo optimizada:** Inclusión de `-n <NCPU>` para `lbzip2` y `-p <NCPU>` para `pigz` en descompresión.
-    - **Planificación LPT (*Longest Processing Time first*):** Ordenamiento estable descendente por tamaño en `compressParallel`, eliminando el efecto de cola larga (*stragglers*) y asegurando la saturación de todos los núcleos del CPU durante el 100% de la operación concurrente.
   - Preservación de extensiones y rutas de directorio en descompresión:
     - Preservación estricta de extensiones en formatos de flujo (`ArchiveBaseName` / `IsStream`): archivos como `juego.iso` empaquetados en formatos stream (`bz3`, `gz`, `xz`, `zst`, etc.) retienen su extensión original (`juego.iso.bz3`) para que al descomprimirse se recupere `juego.iso` en lugar de un binario sin extensión.
     - Detección mágica preventiva de imágenes ISO 9660: inspección de firma `CD001` en offset 32769 (`0x8001`) al descomprimir archivos individuales para reasignar automáticamente la extensión `.iso` ante archivos legacy desprovistos de extensión.

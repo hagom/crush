@@ -82,8 +82,11 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 168 tests nativos pasando con race detector (-race). ~8380 líneas. 0 bugs conocidos.
+- Go: migración completa. 176 tests nativos pasando con race detector (-race). ~8750 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Documentación explícita de compatibilidad para división en partes (`-s`): especificación clara en ayuda (`crush -h`), flag usage y autocompletados (Zsh, Fish, Bash) indicando que `-s` opera sobre formatos de flujo (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lz4`, `br` y `tar.*`), emitiendo advertencia descriptiva en tiempo de ejecución para formatos no soportados (`7z`, `rar`, `zip`, `tar`, `lrz`).
+  - Estandarización de colores ANSI en mensajes de consola: funciones auxiliares `WriteWarning` (amarillo con prefijo `⚠ Advertencia:`), `WriteError` (rojo con prefijo `✗ Error:`), `WriteInfo` (azul con prefijo `ℹ `) y `WriteSuccess` (verde con prefijo `✓ `), con salida thread-safe sobre `lockedWriter` dinámico y eliminación de prefijos redundantes.
+  - Protocolo formal de resolución de conflictos entre ramas y worktrees paralelos (rebase sobre `main`, integración semántica no ciega y re-verificación obligatoria post-conflicto con `go test -race` y `go vet`).
   - Refinamiento de verificación y estimación de espacio en disco en compresión y descompresión:
     - Resolución recursiva del primer ancestro existente en `GetAvailBytes` para evitar fallos en directorios de salida que aún no existen en el sistema.
     - Función modular `EstimateCompressedSize` con ratios diferenciados por formato (`Tar` 102%, `Lz4` 60%, `Zip` 50%, `Gz` 40%, `Zst` 35%, `Bz2`/`Rar` 30%, `Br` 28%, `7z`/`Xz`/`Bz3`/`Lz` 25%, `Lrz` 20%) y detección inteligente de ficheros precomprimidos (`.mp4`, `.zip`, `.iso`, etc., estimando 95%).

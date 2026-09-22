@@ -151,6 +151,7 @@ crush -c -f zst -k -v fotos/                 # → fotos.tar.zst
 crush -c -f xz -o /backup/ base_datos.sql
 
 # Dividir la salida comprimida en volúmenes de 10 MB (-s)
+# Compatible con formatos de flujo (gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*); no soportado para lrz, zip, 7z, tar ni rar.
 crush -c -f zst -s 10 archivo_pesado.iso      # → archivo_pesado.tar.zst.part00, part01...
 
 # Comprimir excluyendo patrones (-exclude)
@@ -264,7 +265,7 @@ Uso:
 | `-force` | — | Sobrescribir archivos destino existentes sin confirmar. | `false` |
 | `-quick` | — | Verificación rápida de integridad (no valida cada archivo interno). | `false` |
 | `-C` | — | Combinar múltiples archivos en un único archivo comprimido. | `false` (paralelo) |
-| `-s` | `N` | Dividir el archivo comprimido en partes de `N` MB. | `0` (sin división) |
+| `-s` | `N` | Dividir el archivo comprimido en partes de `N` MB (formatos de flujo: `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lz4`, `br` y `tar.*`; no soportado para `lrz`, `zip`, `7z`, `tar`, `rar`). | `0` (sin división) |
 | `-i` | `ARCHIVO` | Leer lista de archivos de entrada desde un fichero o stdin (`-`). | — |
 | `-exclude`| `PATRÓN` | Patrón de exclusión glob (puede repetirse). | — |
 | `-opts` | `"OPTS"` | Opciones adicionales pasadas directamente a la herramienta subyacente. | — |

@@ -699,8 +699,8 @@ const (
 )
 
 var (
-	lockedStderr = &lockedWriter{w: os.Stderr}
-	lockedStdout = &lockedWriter{w: os.Stdout}
+	lockedStderr = &lockedWriter{}
+	lockedStdout = &lockedWriter{}
 )
 
 func setOutputWriters(stdout, stderr io.Writer) func() {
@@ -1360,7 +1360,15 @@ type lockedWriter struct {
 func (lw *lockedWriter) Write(p []byte) (int, error) {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
-	return lw.w.Write(p)
+	w := lw.w
+	if w == nil {
+		if lw == lockedStdout {
+			w = os.Stdout
+		} else {
+			w = os.Stderr
+		}
+	}
+	return w.Write(p)
 }
 
 func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {

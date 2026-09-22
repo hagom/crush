@@ -77,7 +77,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if opts.SplitSize > 0 {
 		switch opts.Format {
 		case Lrz, Zip, SevenZ, Tar, Rar:
-			WriteLogf("  %ssplit (-s) no soportado para %s; se ignora%s\n", Yellow, opts.Format, NC)
+			WriteLogf("  %s⚠ split (-s) no soportado para %s (solo disponible para gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*); se ignora%s\n", Yellow, opts.Format, NC)
 			opts.SplitSize = 0
 		}
 	}

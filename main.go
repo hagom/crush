@@ -146,7 +146,9 @@ func main() {
 	quick := flag.Bool("quick", false, "Verificación rápida (no verificar cada archivo)")
 	combineFlag := flag.Bool("C", false, "Combinar múltiples archivos en un solo archivo comprimido")
 	fromFile := flag.String("i", "", "Leer lista de archivos desde fichero")
-	splitSize := flag.Int("s", 0, "Dividir en partes de N MB (solo compresión)")
+	var splitSizeVal int
+	flag.IntVar(&splitSizeVal, "s", 0, "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*)")
+	splitSize := &splitSizeVal
 	compressionOpts := flag.String("opts", "", "Opciones adicionales para la herramienta de compresión")
 
 	var exclude multiFlag
@@ -795,7 +797,7 @@ func printHelp() {
 	w(Yellow, "  -quick")
 	fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
 	w(Yellow, "  -s N")
-	fmt.Print("                 Dividir en partes de N MB (solo compresión)\n")
+	fmt.Print("                 Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*)\n")
 	w(Yellow, "  -opts \"opciones\"")
 	fmt.Print("     Opciones adicionales para la herramienta de compresión\n")
 	w(Yellow, "  -i ARCHIVO")
@@ -933,7 +935,7 @@ _crush() {
         {-v,--verbose}'[Modo verbose]' \
         {-k,--keep}'[Conservar originales]' \
         {-n,--dry-run}'[Modo simulacro]' \
-        {-s,--split}'[Dividir en partes MB]:tamaño:' \
+        {-s,--split}'[Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)]' \
         '--opts[Opciones adicionales]:opciones:' \
         '--exclude[Patrón de exclusión]:patrón:' \
         '*:archivo:_files'
@@ -969,7 +971,7 @@ complete -c crush -s quick -l quick -d "Verificación rápida"
 complete -c crush -s v -d "Modo verbose"
 complete -c crush -s k -d "Conservar originales"
 complete -c crush -s n -d "Modo simulacro"
-complete -c crush -s s -d "Dividir en partes de N MB"
+complete -c crush -s s -d "Dividir en partes de N MB (formatos de flujo: gz, xz, etc.)"
 complete -c crush -s opts -l opts -d "Opciones adicionales"
 complete -c crush -s exclude -l exclude -d "Patrón de exclusión" -r
 complete -c crush -s install -l install -d "Instalar crush + dependencias"

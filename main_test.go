@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -261,6 +263,61 @@ func TestMainColoredWarningsAndErrors(t *testing.T) {
 			t.Errorf("expected colored error with %q and 'debe especificar un modo de operación', got:\n%s", wantPrefix, output)
 		}
 	})
+}
+
+func TestSplitHelpAndFlagDescription(t *testing.T) {
+	// 1. Verificar printHelp()
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe failed: %v", err)
+	}
+	os.Stdout = w
+
+	printHelp()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	helpOutput := buf.String()
+
+	foundHelp := false
+	expectedDesc := "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*)"
+	for _, line := range strings.Split(helpOutput, "\n") {
+		if strings.Contains(line, "-s N") && strings.Contains(line, expectedDesc) {
+			foundHelp = true
+			break
+		}
+	}
+	if !foundHelp {
+		t.Errorf("printHelp() does not contain expected -s line with %q, got:\n%s", expectedDesc, helpOutput)
+	}
+
+	// 2. Verificar flag -s description en flag usage
+	cmd := exec.Command("go", "run", ".", "-invalid-flag-for-test")
+	out, _ := cmd.CombinedOutput()
+	flagUsage := string(out)
+
+	expectedFlagDesc := "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*)"
+	if !strings.Contains(flagUsage, expectedFlagDesc) {
+		t.Errorf("crush flag usage does not contain %q, got:\n%s", expectedFlagDesc, flagUsage)
+	}
+}
+
+func TestSplitAutocompleteScripts(t *testing.T) {
+	// Zsh completion
+	expectedZsh := `{-s,--split}'[Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)]'`
+	if !strings.Contains(zshCompletion, expectedZsh) {
+		t.Errorf("zshCompletion does not contain expected split completion %q", expectedZsh)
+	}
+
+	// Fish completion
+	expectedFish := `complete -c crush -s s -d "Dividir en partes de N MB (formatos de flujo: gz, xz, etc.)"`
+	if !strings.Contains(fishCompletion, expectedFish) {
+		t.Errorf("fishCompletion does not contain expected split completion %q", expectedFish)
+	}
 }
 
 

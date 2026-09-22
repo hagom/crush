@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -463,6 +466,88 @@ func TestCompressFromFile(t *testing.T) {
 	}
 	if len(outPaths) != 2 {
 		t.Fatalf("esperaba 2 archivos comprimidos (paralelo), obtuve %d: %v", len(outPaths), outPaths)
+	}
+}
+
+func TestSplitUnsupportedFormatsWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("contenido de prueba"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	unsupported := []struct {
+		format Format
+		name   string
+	}{
+		{Lrz, "lrz"},
+		{Zip, "zip"},
+		{SevenZ, "7z"},
+		{Tar, "tar"},
+		{Rar, "rar"},
+	}
+
+	for _, tc := range unsupported {
+		t.Run(tc.name, func(t *testing.T) {
+			oldStderr := os.Stderr
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("os.Pipe failed: %v", err)
+			}
+			os.Stderr = w
+
+			opts := CompressOptions{
+				Format:    tc.format,
+				SplitSize: 10,
+				DryRun:    true,
+				OutputDir: tmpDir,
+			}
+			_, _ = DoCompress([]string{testFile}, opts)
+
+			w.Close()
+			os.Stderr = oldStderr
+
+			var buf bytes.Buffer
+			io.Copy(&buf, r)
+			got := buf.String()
+
+			expected := fmt.Sprintf("⚠ split (-s) no soportado para %s (solo disponible para gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*); se ignora", tc.format)
+			if !strings.Contains(got, expected) {
+				t.Errorf("DoCompress con formato no soportado %s no emitió el warning esperado.\nEsperado contener: %q\nObtenido: %q", tc.format, expected, got)
+			}
+		})
+	}
+
+	// Verificar que formatos soportados no emiten el warning
+	supported := []Format{Gz, Xz, Bz2, Bz3, Zst, Lz, Lz4, Br}
+	for _, fmtVal := range supported {
+		t.Run("supported_"+fmtVal.String(), func(t *testing.T) {
+			oldStderr := os.Stderr
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("os.Pipe failed: %v", err)
+			}
+			os.Stderr = w
+
+			opts := CompressOptions{
+				Format:    fmtVal,
+				SplitSize: 10,
+				DryRun:    true,
+				OutputDir: tmpDir,
+			}
+			_, _ = DoCompress([]string{testFile}, opts)
+
+			w.Close()
+			os.Stderr = oldStderr
+
+			var buf bytes.Buffer
+			io.Copy(&buf, r)
+			got := buf.String()
+
+			if strings.Contains(got, "split (-s) no soportado") {
+				t.Errorf("DoCompress con formato soportado %s emitió warning de split no soportado: %q", fmtVal, got)
+			}
+		})
 	}
 }
 

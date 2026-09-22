@@ -113,8 +113,12 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 208 tests nativos pasando con race detector (-race). ~9350 líneas. 0 bugs conocidos.
+- Go: migración completa. 248 tests nativos pasando con race detector (-race). ~9500 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Preservación de extensiones y rutas de directorio en descompresión:
+    - Preservación estricta de extensiones en formatos de flujo (`ArchiveBaseName` / `IsStream`): archivos como `juego.iso` empaquetados en formatos stream (`bz3`, `gz`, `xz`, `zst`, etc.) retienen su extensión original (`juego.iso.bz3`) para que al descomprimirse se recupere `juego.iso` en lugar de un binario sin extensión.
+    - Detección mágica preventiva de imágenes ISO 9660: inspección de firma `CD001` en offset 32769 (`0x8001`) al descomprimir archivos individuales para reasignar automáticamente la extensión `.iso` ante archivos legacy desprovistos de extensión.
+    - Respeto de rutas de subdirectorios en descompresión interactiva y recursiva: cuando no se explicita `-o`, los archivos en subcarpetas (ej. `dir1/dir2/archivo.7z`) se extraen directamente en su propio subdirectorio (`dir1/dir2/`), y los archivos divididos alojados en `dir1/dir2/archivo_parts/` se desempaquetan en el directorio contenedor de la partición (`dir1/dir2/`).
   - Refactorización de Arquitectura SOLID:
     - Encapsulación de rasgos de formato en `Format` y `FormatInfo` (`format.go`): métodos polimórficos `IsContainer()` (verdadero para Zip, SevenZ, Tar, Rar), `IsStream()` (`!IsContainer()`) y `ArchiveBaseName(inputPath)`.
     - Centralización de resolución de directorios en `ResolveDecompressDir` (`util.go`): regla única para derivar carpetas destino de descompresión desempaquetando directorios residuales de división (`_parts`, `_split`) hacia el directorio padre sin acoplar detalles de partición en `decompress.go`.

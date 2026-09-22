@@ -82,8 +82,10 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 203 tests nativos pasando con race detector (-race). ~9200 líneas. 0 bugs conocidos.
+- Go: migración completa. 205 tests nativos pasando con race detector (-race). ~9300 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Ordenamiento natural numérico en unión de fragmentos split: corrección en `globSplitParts` (`util.go`) para ordenar numéricamente los fragmentos `.part*` en lugar de léxicamente, resolviendo el error de flujo corrupto (`exit status 1`) que ocurría en archivos segmentados en 100 o más partes (donde el orden alfabético colocaba `.part100` antes de `.part11`).
+  - Prevención de carpetas residuales (`crush_YYYYMMDD_parts`) en compresión paralela: cálculo diferido de rutas de salida en `DoCompress` para evitar crear directorios combinados vacíos cuando se ejecuta compresión multi-archivo paralela, y limpieza garantizada de carpetas vacías si una operación se cancela o falla.
   - Autocompletado inteligente contextual para división en partes (`-s`): sugerencia exclusiva de tamaños comunes de partición en megabytes (`10`, `50`, `100`, `500`, `1000` MB) al pulsar TAB en `-s` / `--split` en Bash, Zsh y Fish con descripciones explícitas de unidad, desacoplando los formatos de `-s` y trasladando el filtrado dinámico de formatos compatibles (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lz4`, `br`) a `-f` condicionado a la presencia de `-s` en la línea de comando.
   - Carpeta resultante dedicada para compresión con split (`-s`): empaquetado estructurado dentro de `<OutputDir>/<baseName>_parts` conteniendo el archivo comprimido base y todos sus fragmentos `.part01`, `.part02`, etc., aplicable a compresión individual, paralela y secuencial.
   - Búsqueda recursiva y agrupación inteligente en descompresión interactiva (`crush -d` sin argumentos): recorrido de subdirectorios mediante `filepath.WalkDir` (omitiendo ocultos), unificando archivos divididos para mostrar únicamente el elemento base con su tamaño total consolidado en la lista de selección.

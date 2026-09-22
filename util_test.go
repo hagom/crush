@@ -783,6 +783,44 @@ func TestColoredMessages(t *testing.T) {
 	})
 }
 
+func TestFindSplitPartsNaturalSort(t *testing.T) {
+	tmpDir := t.TempDir()
+	base := filepath.Join(tmpDir, "test.bz3")
+	if err := os.WriteFile(base, []byte("part0"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
+	partNames := []string{
+		"test.bz3.part01",
+		"test.bz3.part02",
+		"test.bz3.part10",
+		"test.bz3.part11",
+		"test.bz3.part99",
+		"test.bz3.part100",
+		"test.bz3.part101",
+		"test.bz3.part184",
+	}
+	for _, p := range partNames {
+		if err := os.WriteFile(filepath.Join(tmpDir, p), []byte("content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
+	parts := findSplitParts(base)
+	want := append([]string{base}, func() []string {
+		var full []string
+		for _, p := range partNames {
+			full = append(full, filepath.Join(tmpDir, p))
+		}
+		return full
+	}()...)
 
+	if len(parts) != len(want) {
+		t.Fatalf("cantidad de partes obtenida %d, esperada %d", len(parts), len(want))
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Errorf("pos %d: obtenido %s, esperado %s", i, parts[i], want[i])
+		}
+	}
+}

@@ -116,7 +116,22 @@ func globSplitParts(file string) []string {
 	if err != nil {
 		return nil
 	}
-	sort.Strings(matches)
+	sort.Slice(matches, func(i, j int) bool {
+		idxI := strings.LastIndex(matches[i], ".part")
+		idxJ := strings.LastIndex(matches[j], ".part")
+		if idxI != -1 && idxJ != -1 {
+			baseI := matches[i][:idxI]
+			baseJ := matches[j][:idxJ]
+			if baseI == baseJ {
+				numI, errI := strconv.Atoi(matches[i][idxI+len(".part"):])
+				numJ, errJ := strconv.Atoi(matches[j][idxJ+len(".part"):])
+				if errI == nil && errJ == nil {
+					return numI < numJ
+				}
+			}
+		}
+		return matches[i] < matches[j]
+	})
 	return matches
 }
 

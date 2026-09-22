@@ -82,25 +82,22 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		}
 	}
 
-	if singleItem {
-		base := filepath.Base(files[0])
-		baseName := strings.TrimSuffix(base, filepath.Ext(base))
-		targetDir := opts.OutputDir
-		if opts.SplitSize > 0 {
-			targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
+	calcOutPath := func() string {
+		if singleItem {
+			base := filepath.Base(files[0])
+			baseName := strings.TrimSuffix(base, filepath.Ext(base))
+			targetDir := opts.OutputDir
+			if opts.SplitSize > 0 {
+				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
+			}
+			return GetUniqueName(filepath.Join(targetDir, baseName), ext)
 		}
-		outPath = GetUniqueName(filepath.Join(targetDir, baseName), ext)
-	} else {
 		baseName := "crush_" + time.Now().Format("20060102_150405")
 		targetDir := opts.OutputDir
 		if opts.SplitSize > 0 {
 			targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
 		}
-		outPath = GetUniqueName(filepath.Join(targetDir, baseName), ext)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", filepath.Dir(outPath), err)
+		return GetUniqueName(filepath.Join(targetDir, baseName), ext)
 	}
 
 	if opts.DryRun {
@@ -119,7 +116,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 				WriteLogf("%s[Simulacro] Formato: %s%s\n", Blue, ext, NC)
 			}
 		} else {
-			WriteLogf("%s[Simulacro] Salida: %s%s\n", Blue, outPath, NC)
+			WriteLogf("%s[Simulacro] Salida: %s%s\n", Blue, calcOutPath(), NC)
 			if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
 				opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
 				opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br {
@@ -222,6 +219,11 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return outPaths, err
 	}
 
+	outPath = calcOutPath()
+	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", filepath.Dir(outPath), err)
+	}
+
 	startTime := time.Now()
 
 	WriteLogf("%sComprimiendo %d archivo(s)...%s\n", Bold, len(filteredFiles), NC)
@@ -244,6 +246,9 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		if preExistErr != nil {
 			if rmErr := os.Remove(realOut); rmErr == nil {
 				WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, realOut, NC)
+			}
+			if opts.SplitSize > 0 {
+				_ = os.Remove(filepath.Dir(outPath))
 			}
 		}
 		return nil, err

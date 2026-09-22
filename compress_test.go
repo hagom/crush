@@ -627,4 +627,38 @@ func TestCompressSplitReportPortions(t *testing.T) {
 	}
 }
 
+func TestCompressParallelNoGhostDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "fileA.txt")
+	f2 := filepath.Join(tmpDir, "fileB.txt")
+	if err := os.WriteFile(f1, []byte("data1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("data2"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		SplitSize: 10,
+		KeepOrig:  true,
+		Parallel:  2,
+	}
+
+	_, err := DoCompress([]string{f1, f2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress falló: %v", err)
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "crush_") {
+			t.Errorf("se detectó directorio fantasma/residual no utilizado: %s", e.Name())
+		}
+	}
+}

@@ -205,6 +205,11 @@ Actuar como **equipo de desarrollo completo**, que cada actor del equipo sea un 
   3. Verificar compilación y tests en cada worktree
   4. `git merge fix/algo --no-edit` en `main`
   5. `git worktree remove ../crush-fix-algo && git branch -d fix/algo`
+- **Protocolo de resolución de conflictos:**
+  1. **Rebase obligatorio sobre main:** Cuando varias ramas se trabajan en paralelo y una de ellas se fusiona primero a `main`, las ramas restantes deben actualizarse de inmediato en su propio worktree ejecutando `git rebase main` (o `git merge main`).
+  2. **Resolución semántica (no ciega):** Nunca resolver conflictos usando automáticamente `--ours` o `--theirs`. Debe examinarse el diff completo e integrar armónicamente ambos requerimientos conservando los contratos de interfaz y tipos.
+  3. **Verificación post-conflicto:** Tras resolver cualquier conflicto en el worktree, es estrictamente obligatorio volver a ejecutar `go test -v -race ./...` y `go vet ./...`. Ninguna rama se mergea a `main` con tests fallando o código roto.
+  4. **Merge limpio a main:** `main` solo recibe merges libres de conflictos y completamente verificados.
 - **Revisión exhaustiva de bugs:** Tras implementar fixes, hacer re-revisión completa del código en busca de bugs restantes. Si se encuentran nuevos bugs, fixearlos y repetir el ciclo. No detenerse hasta que queden **0 bugs conocidos** en todo el proyecto.
 - **Commits por fix/feature:** Cada fix o feature debe tener su propio commit. No mezclar cambios distintos en un mismo commit.
 - **Test obligatorio antes de commit:** Todo fix o feature debe compilar y pasar `go test ./...` (con `-race` si es concurrente) y `go vet ./...` sin errores, y el test correspondiente debe haberse escrito y visto fallar ANTES de la implementación. Si falla algún test o aparece un bug, debe corregirse hasta que quede 0 bugs antes de hacer commit.

@@ -303,6 +303,8 @@ func rarBin() string {
 
 // --- Memory ---
 
+var getMemLimit = GetMemLimit
+
 func GetMemLimit() int {
 	data, err := os.ReadFile("/proc/meminfo")
 	if err == nil {

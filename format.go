@@ -123,11 +123,18 @@ func ParseFormat(s string) (Format, error) {
 func FormatInfoFromFormat(f Format) FormatInfo {
 	switch f {
 	case Gz:
-		return FormatInfo{Format: Gz, Tool: "pigz", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+		return FormatInfo{Format: Gz, Tool: "pigz", PipeFlags: "-dc -p " + ncpuStr(), DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case Xz:
 		return FormatInfo{Format: Xz, Tool: "xz", PipeFlags: "-dc -T0", DirectFlags: "-d -T0 -k", IsTar: false, TestFlag: "-t"}
 	case Bz2:
-		return FormatInfo{Format: Bz2, Tool: bzip2Bin(), PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+		tool := bzip2Bin()
+		pipeFlags := "-dc"
+		directFlags := "-dk"
+		if tool == "lbzip2" {
+			pipeFlags += " -n " + ncpuStr()
+			directFlags += " -n " + ncpuStr()
+		}
+		return FormatInfo{Format: Bz2, Tool: tool, PipeFlags: pipeFlags, DirectFlags: directFlags, IsTar: false, TestFlag: "-t"}
 	case Bz3:
 		return FormatInfo{Format: Bz3, Tool: "bzip3", PipeFlags: "-dc -j " + ncpuStr(), DirectFlags: "-d -kj " + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case Zst:

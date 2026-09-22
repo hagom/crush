@@ -719,3 +719,98 @@ func TestCompressParallelPreservesExtension(t *testing.T) {
 	}
 }
 
+func TestCompressionRatioAndMultithreadFlags(t *testing.T) {
+	// 1. zstd: --ultra -22
+	t.Run("zstd flags", func(t *testing.T) {
+		cmd := buildCompressCmd(CompressOptions{Format: Zst})
+		args := strings.Join(cmd.Args, " ")
+		if !strings.Contains(args, "--ultra") || !strings.Contains(args, "-22") {
+			t.Errorf("zstd args want --ultra -22, got %v", cmd.Args)
+		}
+		cmdFast := buildCompressCmd(CompressOptions{Format: Zst, CompressionOpts: "-fast"})
+		argsFast := strings.Join(cmdFast.Args, " ")
+		if !strings.Contains(argsFast, "--ultra") || !strings.Contains(argsFast, "-1") {
+			t.Errorf("zstd fast args want --ultra -1, got %v", cmdFast.Args)
+		}
+	})
+
+	// 2. 7z: -mx=9 -md=256m -mfb=273 -ms=on -mmt=on (fallback to -md=128m if RAM < 8GB)
+	t.Run("7z flags high memory", func(t *testing.T) {
+		origMem := getMemLimit
+		defer func() { getMemLimit = origMem }()
+		getMemLimit = func() int { return 16384 } // 16GB RAM
+
+		args := build7zArgs([]string{"test.txt"}, "test.7z", CompressOptions{Format: SevenZ})
+		joined := strings.Join(args, " ")
+		expected := []string{"-mx=9", "-md=256m", "-mfb=273", "-ms=on", "-mmt=on"}
+		for _, exp := range expected {
+			if !strings.Contains(joined, exp) {
+				t.Errorf("7z args missing %q, got %v", exp, args)
+			}
+		}
+	})
+
+	t.Run("7z flags low memory fallback", func(t *testing.T) {
+		origMem := getMemLimit
+		defer func() { getMemLimit = origMem }()
+		getMemLimit = func() int { return 4096 } // 4GB RAM (< 8GB)
+
+		args := build7zArgs([]string{"test.txt"}, "test.7z", CompressOptions{Format: SevenZ})
+		joined := strings.Join(args, " ")
+		expected := []string{"-mx=9", "-md=128m", "-mfb=273", "-ms=on", "-mmt=on"}
+		for _, exp := range expected {
+			if !strings.Contains(joined, exp) {
+				t.Errorf("7z args missing %q, got %v", exp, args)
+			}
+		}
+	})
+
+	// 3. bzip3: -b 64 -j + threadStr(opts.ThreadLimit)
+	t.Run("bzip3 flags", func(t *testing.T) {
+		opts := CompressOptions{Format: Bz3, ThreadLimit: 4}
+		cmd := buildCompressCmd(opts)
+		args := strings.Join(cmd.Args, " ")
+		if !strings.Contains(args, "-b 64") && (!containsArg(cmd.Args, "-b") || !containsArg(cmd.Args, "64")) {
+			t.Errorf("bzip3 args missing -b 64, got %v", cmd.Args)
+		}
+		if !strings.Contains(args, "-j 4") && (!containsArg(cmd.Args, "-j") || !containsArg(cmd.Args, "4")) {
+			t.Errorf("bzip3 args missing -j 4, got %v", cmd.Args)
+		}
+	})
+
+	// 4. lz4: change default from 1 to 9 (fastOrSlow(opts, 9)), using LZ4HC high compression
+	t.Run("lz4 flags", func(t *testing.T) {
+		cmd := buildCompressCmd(CompressOptions{Format: Lz4})
+		if !containsArg(cmd.Args, "-9") {
+			t.Errorf("lz4 default args want -9 (LZ4HC), got %v", cmd.Args)
+		}
+
+		cmdFast := buildCompressCmd(CompressOptions{Format: Lz4, CompressionOpts: "-fast"})
+		if !containsArg(cmdFast.Args, "-1") {
+			t.Errorf("lz4 fast args want -1, got %v", cmdFast.Args)
+		}
+	})
+
+	// 5. pigz: ensure -p + threadStr(opts.ThreadLimit) is always passed
+	t.Run("pigz flags", func(t *testing.T) {
+		opts := CompressOptions{Format: Gz, ThreadLimit: 6}
+		cmd := buildCompressCmd(opts)
+		if cmd.Path == "pigz" || strings.HasSuffix(cmd.Path, "/pigz") {
+			args := strings.Join(cmd.Args, " ")
+			if !strings.Contains(args, "-p 6") && (!containsArg(cmd.Args, "-p") || !containsArg(cmd.Args, "6")) {
+				t.Errorf("pigz args missing -p 6, got %v", cmd.Args)
+			}
+		}
+	})
+}
+
+func containsArg(args []string, target string) bool {
+	for _, a := range args {
+		if a == target {
+			return true
+		}
+	}
+	return false
+}
+
+

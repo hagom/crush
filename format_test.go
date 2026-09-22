@@ -266,3 +266,28 @@ func TestArchiveBaseName(t *testing.T) {
 	}
 }
 
+func TestDecompressMultithreadFlags(t *testing.T) {
+	// Gz: pigz PipeFlags should include -p + ncpuStr()
+	gzInfo := FormatInfoFromFormat(Gz)
+	if gzInfo.Tool == "pigz" {
+		wantPipe := "-dc -p " + ncpuStr()
+		if gzInfo.PipeFlags != wantPipe {
+			t.Errorf("FormatInfoFromFormat(Gz).PipeFlags = %q, want %q", gzInfo.PipeFlags, wantPipe)
+		}
+	}
+
+	// Bz2: when tool is lbzip2, PipeFlags and DirectFlags should include -n + ncpuStr()
+	bz2Info := FormatInfoFromFormat(Bz2)
+	if bz2Info.Tool == "lbzip2" {
+		wantPipe := "-dc -n " + ncpuStr()
+		wantDirect := "-dk -n " + ncpuStr()
+		if bz2Info.PipeFlags != wantPipe {
+			t.Errorf("FormatInfoFromFormat(Bz2).PipeFlags = %q, want %q", bz2Info.PipeFlags, wantPipe)
+		}
+		if bz2Info.DirectFlags != wantDirect {
+			t.Errorf("FormatInfoFromFormat(Bz2).DirectFlags = %q, want %q", bz2Info.DirectFlags, wantDirect)
+		}
+	}
+}
+
+

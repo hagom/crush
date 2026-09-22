@@ -433,13 +433,15 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 	ext := opts.Format.String()
 	switch ext {
 	case "gz":
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
-		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		cmd := exec.Command("pigz", args...)
-		if !hasTool("pigz") {
-			cmd = exec.Command("gzip", args...)
+		level := fmt.Sprintf("-%d", fastOrSlow(opts, 9))
+		if hasTool("pigz") {
+			args := []string{"-c", "-p", threadStr(opts.ThreadLimit), level}
+			args = append(args, strings.Fields(opts.CompressionOpts)...)
+			return exec.Command("pigz", args...)
 		}
-		return cmd
+		args := []string{"-c", level}
+		args = append(args, strings.Fields(opts.CompressionOpts)...)
+		return exec.Command("gzip", args...)
 	case "xz":
 		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "-e"}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
@@ -450,11 +452,11 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command(bin, args...)
 	case "bz3":
-		args := []string{"-c", "-j" + threadStr(opts.ThreadLimit)}
+		args := []string{"-c", "-b", "64", "-j", threadStr(opts.ThreadLimit)}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("bzip3", args...)
 	case "zst":
-		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), fmt.Sprintf("-%d", fastOrSlow(opts, 19))}
+		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), "--ultra", fmt.Sprintf("-%d", fastOrSlow(opts, 22))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("zstd", args...)
 	case "lz":
@@ -466,7 +468,7 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command(tool, args...)
 	case "lz4":
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 1))}
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("lz4", args...)
 	case "br":
@@ -859,15 +861,23 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 	return err
 }
 
-func compress7z(files []string, outPath string, opts CompressOptions, fp *FileProgress) error {
-	sevenz := sevenzBin()
-	args := []string{"a", "-mx=9", "-md=128m", "-ms=on", "-bsp1"}
+func build7zArgs(files []string, outPath string, opts CompressOptions) []string {
+	md := "-md=256m"
+	if getMemLimit() < 8192 {
+		md = "-md=128m"
+	}
+	args := []string{"a", "-mx=9", md, "-mfb=273", "-ms=on", "-mmt=on", "-bsp1"}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
-	args = append(args, "-mmt="+threadStr(opts.ThreadLimit))
 	args = append(args, outPath)
 	args = append(args, "--")
 	args = append(args, files...)
+	return args
+}
+
+func compress7z(files []string, outPath string, opts CompressOptions, fp *FileProgress) error {
+	sevenz := sevenzBin()
+	args := build7zArgs(files, outPath, opts)
 
 	cmd := exec.Command(sevenz, args...)
 

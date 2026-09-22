@@ -152,7 +152,8 @@ crush -c -f xz -o /backup/ base_datos.sql
 
 # Dividir la salida comprimida en volúmenes de 10 MB (-s)
 # Compatible con formatos de flujo (gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*); no soportado para lrz, zip, 7z, tar ni rar.
-crush -c -f zst -s 10 archivo_pesado.iso      # → archivo_pesado.tar.zst.part00, part01...
+# Cada elemento dividido se almacena ordenadamente en su propia carpeta: <baseName>_parts/
+crush -c -f zst -s 10 archivo_pesado.iso      # → archivo_pesado_parts/archivo_pesado.tar.zst + .part01...
 
 # Comprimir excluyendo patrones (-exclude)
 crush -c -f zip -exclude "*.log" -exclude "node_modules/*" proyecto/
@@ -168,7 +169,7 @@ crush -c -f gz -i lista_archivos.txt
 La descompresión detecta automáticamente el formato a partir de la extensión del archivo y muestra el progreso de extracción en tiempo real:
 
 ```bash
-# Descompresión interactiva: detecta todos los comprimidos del directorio y pide confirmación
+# Descompresión interactiva: busca recursivamente todos los comprimidos, unifica partes divididas y pide confirmación
 crush -d
 
 # Descomprimir en el directorio actual

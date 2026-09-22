@@ -82,8 +82,13 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 176 tests nativos pasando con race detector (-race). ~8750 líneas. 0 bugs conocidos.
+- Go: migración completa. 203 tests nativos pasando con race detector (-race). ~9200 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Autocompletado inteligente contextual para división en partes (`-s`): sugerencia de formatos de flujo compatibles (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lz4`, `br`) y tamaños comunes en Bash (`_crush_completions`), Zsh (`zshCompletion` con estados `:tamaño o formato:->split`) y Fish (`__crush_split_formats`). Filtrado dinámico de `-f` condicionado a la presencia de `-s`/`--split` en la línea de comando.
+  - Carpeta resultante dedicada para compresión con split (`-s`): empaquetado estructurado dentro de `<OutputDir>/<baseName>_parts` conteniendo el archivo comprimido base y todos sus fragmentos `.part01`, `.part02`, etc., aplicable a compresión individual, paralela y secuencial.
+  - Búsqueda recursiva y agrupación inteligente en descompresión interactiva (`crush -d` sin argumentos): recorrido de subdirectorios mediante `filepath.WalkDir` (omitiendo ocultos), unificando archivos divididos para mostrar únicamente el elemento base con su tamaño total consolidado en la lista de selección.
+  - Descompresión continua en streaming con `io.MultiReader`: extracción directa de archivos divididos concatenando todas sus partes sin requerir concatenación manual `cat` previa ni espacio en disco adicional.
+  - Conteo y reporte de porciones completadas (`Porciones: X / X partes`): visualización clara en el resumen final de compresión y descompresión, así como en el seguimiento en tiempo real del ProgressTracker.
   - Documentación explícita de compatibilidad para división en partes (`-s`): especificación clara en ayuda (`crush -h`), flag usage y autocompletados (Zsh, Fish, Bash) indicando que `-s` opera sobre formatos de flujo (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lz4`, `br` y `tar.*`), emitiendo advertencia descriptiva en tiempo de ejecución para formatos no soportados (`7z`, `rar`, `zip`, `tar`, `lrz`).
   - Estandarización de colores ANSI en mensajes de consola: funciones auxiliares `WriteWarning` (amarillo con prefijo `⚠ Advertencia:`), `WriteError` (rojo con prefijo `✗ Error:`), `WriteInfo` (azul con prefijo `ℹ `) y `WriteSuccess` (verde con prefijo `✓ `), con salida thread-safe sobre `lockedWriter` dinámico y eliminación de prefijos redundantes.
   - Protocolo formal de resolución de conflictos entre ramas y worktrees paralelos (rebase sobre `main`, integración semántica no ciega y re-verificación obligatoria post-conflicto con `go test -race` y `go vet`).

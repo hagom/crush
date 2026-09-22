@@ -859,17 +859,37 @@ func (m *multiFlag) Set(value string) error {
 }
 
 const bashCompletion = `# bash completion for crush
-_crush() {
+_crush_completions() {
     local cur prev words cword
-    _init_completion || return
+    if declare -F _init_completion >/dev/null 2>&1; then
+        _init_completion || return
+    else
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+    fi
 
     local formats="gz xz bz2 bz3 zst lz lrz zip 7z rar lz4 br tar"
+    local split_formats="gz xz bz2 bz3 zst lz lz4 br"
+    local split_sizes="10 50 100 500 1000"
     local short="-c -d -l -t -r -h -v -k -n -f -o -s -force -quick -opts -exclude"
     local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version"
 
+    local has_split=0
+    local w
+    for w in "${COMP_WORDS[@]}"; do
+        if [[ "$w" == "-s" || "$w" == "--split" || "$w" == --split=* ]]; then
+            has_split=1
+            break
+        fi
+    done
+
     case "${prev}" in
         -f|--format)
-            COMPREPLY=( $(compgen -W "${formats}" -- "${cur}") )
+            if [[ $has_split -eq 1 ]]; then
+                COMPREPLY=( $(compgen -W "${split_formats}" -- "${cur}") )
+            else
+                COMPREPLY=( $(compgen -W "${formats}" -- "${cur}") )
+            fi
             return 0
             ;;
         --completion)
@@ -881,7 +901,7 @@ _crush() {
             return 0
             ;;
         -s|--split)
-            COMPREPLY=()
+            COMPREPLY=( $(compgen -W "${split_sizes} ${split_formats}" -- "${cur}") )
             return 0
             ;;
     esac
@@ -893,13 +913,16 @@ _crush() {
     else
         _filedir
     fi
-} && complete -F _crush crush
+}
+_crush() {
+    _crush_completions "$@"
+} && complete -F _crush_completions crush
 `
 
 const zshCompletion = `#compdef crush
 
 _crush() {
-    local -a formats
+    local -a formats split_formats split_sizes
     formats=(
         'gz:Gzip'
         'xz:XZ'
@@ -914,6 +937,23 @@ _crush() {
         'lz4:LZ4'
         'br:Brotli'
         'tar:Tar'
+    )
+    split_formats=(
+        'gz:Gzip (compatible con split)'
+        'xz:XZ (compatible con split)'
+        'bz2:Bzip2 (compatible con split)'
+        'bz3:Bzip3 (compatible con split)'
+        'zst:Zstd (compatible con split)'
+        'lz:Lzip (compatible con split)'
+        'lz4:LZ4 (compatible con split)'
+        'br:Brotli (compatible con split)'
+    )
+    split_sizes=(
+        '10:10 MB'
+        '50:50 MB'
+        '100:100 MB'
+        '500:500 MB'
+        '1000:1000 MB'
     )
 
     _arguments \
@@ -935,14 +975,22 @@ _crush() {
         {-v,--verbose}'[Modo verbose]' \
         {-k,--keep}'[Conservar originales]' \
         {-n,--dry-run}'[Modo simulacro]' \
-        {-s,--split}'[Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)]' \
+        {-s,--split}'[Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)]:tamaño o formato:->split' \
         '--opts[Opciones adicionales]:opciones:' \
         '--exclude[Patrón de exclusión]:patrón:' \
         '*:archivo:_files'
 
     case "$state" in
         formats)
-            _describe -t formats "formato" formats
+            if (( ${+opt_args[-s]} || ${+opt_args[--split]} )) || [[ " ${words[*]} " == *" -s "* || " ${words[*]} " == *" --split "* ]]; then
+                _describe -t formats "formato compatible con split" split_formats
+            else
+                _describe -t formats "formato" formats
+            fi
+            ;;
+        split)
+            _describe -t split_sizes "tamaño sugerido" split_sizes
+            _describe -t split_formats "formato compatible" split_formats
             ;;
     esac
 }
@@ -956,6 +1004,22 @@ function __crush_formats
     echo gz xz bz2 bz3 zst lz lrz zip 7z rar lz4 br tar
 end
 
+function __crush_split_formats
+    echo gz xz bz2 bz3 zst lz lz4 br
+end
+
+function __crush_has_split
+    if type -q __fish_contains_opt
+        __fish_contains_opt -s s -l split; and return 0
+    end
+    for arg in (commandline -poc)
+        if string match -qr '^(-s|--split)$' -- $arg
+            return 0
+        end
+    end
+    return 1
+end
+
 # Mode flags (mutually exclusive group)
 complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s c -d "Comprimir archivos"
 complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s d -d "Descomprimir archivos"
@@ -964,14 +1028,15 @@ complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s t -d "V
 complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s r -d "Leer contenido a stdout"
 
 # General flags
-complete -c crush -s f -d "Formato de compresión" -xa "(__crush_formats)"
+complete -c crush -n "__crush_has_split" -s f -l format -d "Formato de compresión (compatible con split)" -xa "(__crush_split_formats)"
+complete -c crush -n "not __crush_has_split" -s f -l format -d "Formato de compresión" -xa "(__crush_formats)"
 complete -c crush -s o -d "Directorio de salida" -xa "(__fish_complete_directories)"
 complete -c crush -s force -l force -d "Sobrescribir existentes"
 complete -c crush -s quick -l quick -d "Verificación rápida"
 complete -c crush -s v -d "Modo verbose"
 complete -c crush -s k -d "Conservar originales"
 complete -c crush -s n -d "Modo simulacro"
-complete -c crush -s s -d "Dividir en partes de N MB (formatos de flujo: gz, xz, etc.)"
+complete -c crush -s s -l split -d "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)" -xa "10 50 100 500 1000 gz xz bz2 bz3 zst lz lz4 br"
 complete -c crush -s opts -l opts -d "Opciones adicionales"
 complete -c crush -s exclude -l exclude -d "Patrón de exclusión" -r
 complete -c crush -s install -l install -d "Instalar crush + dependencias"

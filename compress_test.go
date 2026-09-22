@@ -127,7 +127,7 @@ func TestCompressParallelSplit(t *testing.T) {
 	if len(out) != 2 {
 		t.Fatalf("outPaths = %v, quiere 2", out)
 	}
-	for _, want := range []string{filepath.Join(tmpDir, "a.gz.part"), filepath.Join(tmpDir, "b.gz.part")} {
+	for _, want := range []string{filepath.Join(tmpDir, "a_parts", "a.gz"), filepath.Join(tmpDir, "b_parts", "b.gz")} {
 		if _, statErr := os.Stat(want); statErr != nil {
 			t.Errorf("Con -s en paralelo esperaba %s: %v", want, statErr)
 		}
@@ -548,6 +548,82 @@ func TestSplitUnsupportedFormatsWarning(t *testing.T) {
 				t.Errorf("DoCompress con formato soportado %s emitió warning de split no soportado: %q", fmtVal, got)
 			}
 		})
+	}
+}
+
+func TestCompressSplitDedicatedDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "myfile.txt")
+	if err := os.WriteFile(src, []byte("contenido de prueba para split"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		SplitSize: 1,
+		KeepOrig:  true,
+	}
+
+	out, err := DoCompress([]string{src}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress falló: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("esperado 1 archivo de salida, obtenido %d: %v", len(out), out)
+	}
+
+	expectedDir := filepath.Join(tmpDir, "myfile_parts")
+	fi, err := os.Stat(expectedDir)
+	if err != nil || !fi.IsDir() {
+		t.Fatalf("se esperaba la creación del directorio dedicado %s", expectedDir)
+	}
+
+	// El archivo base debe encontrarse dentro del directorio dedicado
+	if !strings.HasPrefix(out[0], expectedDir) {
+		t.Errorf("el archivo de salida %s no está dentro del directorio dedicado %s", out[0], expectedDir)
+	}
+	if _, err := os.Stat(out[0]); err != nil {
+		t.Errorf("el archivo base %s no existe en disco: %v", out[0], err)
+	}
+}
+
+func TestCompressSplitReportPortions(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "report_test.txt")
+	if err := os.WriteFile(src, []byte("contenido de prueba para reporte de porciones"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		SplitSize: 1,
+		KeepOrig:  true,
+	}
+
+	_, err = DoCompress([]string{src}, opts)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if err != nil {
+		t.Fatalf("DoCompress falló: %v", err)
+	}
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Porciones:") || !strings.Contains(output, "partes") {
+		t.Errorf("reporte de compresión no incluye campo de porciones (X / X partes): %q", output)
 	}
 }
 

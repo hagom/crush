@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,8 @@ type FileProgress struct {
 	status              string
 	start               time.Time
 	outPath             string
+	partsDone           int
+	partsTotal          int
 	mu                  sync.Mutex
 }
 
@@ -94,6 +97,48 @@ func (fp *FileProgress) SetOutPath(p string) {
 	fp.outPath = p
 }
 
+func (fp *FileProgress) Parts() (int, int) {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	return fp.partsDone, fp.partsTotal
+}
+
+func (fp *FileProgress) SetParts(done, total int) {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	fp.partsDone = done
+	fp.partsTotal = total
+}
+
+func globSplitParts(file string) []string {
+	pattern := file + ".part*"
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+	sort.Strings(matches)
+	return matches
+}
+
+func findSplitParts(file string) []string {
+	file = resolveSplitBase(file)
+	matches := globSplitParts(file)
+	if len(matches) == 0 {
+		return []string{file}
+	}
+	return append([]string{file}, matches...)
+}
+
+func resolveSplitBase(file string) string {
+	if idx := strings.Index(file, ".part"); idx != -1 {
+		base := file[:idx]
+		if _, err := os.Stat(base); err == nil {
+			return base
+		}
+	}
+	return file
+}
+
 func pollFileProgress(fp *FileProgress) {
 	if fp == nil || fp.Status() != "active" || fp.OutPath() == "" || fp.Size <= 0 {
 		return
@@ -106,6 +151,11 @@ func pollFileProgress(fp *FileProgress) {
 		return
 	}
 	newSize := fi.Size()
+	for _, p := range globSplitParts(fp.OutPath()) {
+		if pfi, err := os.Stat(p); err == nil {
+			newSize += pfi.Size()
+		}
+	}
 	for {
 		curr := fp.Current.Load()
 		if newSize <= curr {
@@ -1200,7 +1250,10 @@ func fileLine(fp *FileProgress) string {
 		bar := makeBar(pct, 10)
 		sizeStr := fmt.Sprintf("%8s / %-8s", fmtSizeDec(current), fmtSizeDec(fp.Size))
 		etaStr := "         "
-		if current > 0 && fp.Size > 0 && current < fp.Size {
+		doneParts, totalParts := fp.Parts()
+		if totalParts > 1 {
+			etaStr = fmt.Sprintf("%-9s", fmt.Sprintf("%d/%d", doneParts, totalParts))
+		} else if current > 0 && fp.Size > 0 && current < fp.Size {
 			start := fp.StartTime()
 			if !start.IsZero() {
 				elapsed := time.Since(start)
@@ -1214,7 +1267,12 @@ func fileLine(fp *FileProgress) string {
 	case "done":
 		bar := makeBar(100, 10)
 		sizeStr := fmt.Sprintf("%8s / %-8s", fmtSizeDec(fp.Size), fmtSizeDec(fp.Size))
-		line := fmt.Sprintf("%s [%s] 100%%  %s        ✓", name, bar, sizeStr)
+		doneParts, totalParts := fp.Parts()
+		statusMark := "        ✓"
+		if totalParts > 1 {
+			statusMark = fmt.Sprintf(" (%d/%d) ✓", doneParts, totalParts)
+		}
+		line := fmt.Sprintf("%s [%s] 100%%  %s%s", name, bar, sizeStr, statusMark)
 		return fmt.Sprintf("%s%s%s", Green, line, NC)
 	case "error":
 		current := fp.Current.Load()

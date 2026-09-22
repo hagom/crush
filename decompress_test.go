@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"io"
 	"os"
@@ -741,6 +742,182 @@ func TestPromptDecompressAll(t *testing.T) {
 				t.Errorf("salida esperada contenía %q, obtenida: %q", tt.wantInOut, out.String())
 			}
 		})
+	}
+}
+
+func TestFindDecompressibleFilesRecursiveAndSplit(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sub1 := filepath.Join(tmpDir, "sub1")
+	sub2 := filepath.Join(tmpDir, "sub2", "nested")
+	hidden := filepath.Join(tmpDir, ".hidden")
+	if err := os.MkdirAll(sub1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sub2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(hidden, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Archivo en subdirectorio 1
+	if err := os.WriteFile(filepath.Join(sub1, "archive.tar.gz"), []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Archivo dividido en subdirectorio 2 (base + partes)
+	if err := os.WriteFile(filepath.Join(sub2, "divided.zst"), []byte("dummy base"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub2, "divided.zst.part01"), []byte("part 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub2, "divided.zst.part02"), []byte("part 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Archivo regular y archivo oculto que deben ignorarse
+	if err := os.WriteFile(filepath.Join(sub2, "notes.txt"), []byte("text"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hidden, "secret.tar.gz"), []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := FindDecompressibleFiles(tmpDir)
+	if err != nil {
+		t.Fatalf("FindDecompressibleFiles falló: %v", err)
+	}
+
+	// Debe encontrar sub1/archive.tar.gz y sub2/nested/divided.zst, ignorando las partes .part*
+	if len(found) != 2 {
+		t.Fatalf("esperados 2 archivos base, obtenidos %d: %v", len(found), found)
+	}
+
+	for _, f := range found {
+		if strings.Contains(f, ".part") {
+			t.Errorf("FindDecompressibleFiles incluyó fragmento .part: %s", f)
+		}
+		if strings.Contains(f, ".hidden") {
+			t.Errorf("FindDecompressibleFiles incluyó directorio oculto: %s", f)
+		}
+	}
+}
+
+func TestDecompressSplitMultiReader(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalData := []byte("Antigravity MultiReader split decompression test data payload repeated! " + strings.Repeat("ABCDEF1234567890\n", 50))
+
+	// Comprimir datos a gzip
+	var compressedBuf bytes.Buffer
+	gw := gzip.NewWriter(&compressedBuf)
+	if _, err := gw.Write(originalData); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	compBytes := compressedBuf.Bytes()
+	if len(compBytes) < 30 {
+		t.Fatalf("datos comprimidos demasiado pequeños: %d bytes", len(compBytes))
+	}
+
+	// Dividir en 3 partes
+	chunkSize := len(compBytes) / 3
+	part0 := compBytes[:chunkSize]
+	part1 := compBytes[chunkSize : chunkSize*2]
+	part2 := compBytes[chunkSize*2:]
+
+	basePath := filepath.Join(tmpDir, "split_archive.gz")
+	part1Path := basePath + ".part01"
+	part2Path := basePath + ".part02"
+
+	if err := os.WriteFile(basePath, part0, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part1Path, part1, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part2Path, part2, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+
+	err := decompressFile(basePath, opts, nil)
+	if err != nil {
+		t.Fatalf("decompressFile para archivo dividido falló: %v", err)
+	}
+
+	resultFile := filepath.Join(outDir, "split_archive")
+	decompressed, err := os.ReadFile(resultFile)
+	if err != nil {
+		t.Fatalf("no se encontró archivo descomprimido: %v", err)
+	}
+
+	if !bytes.Equal(decompressed, originalData) {
+		t.Fatalf("los datos descomprimidos no coinciden con el original (esperado %d bytes, obtenido %d bytes)", len(originalData), len(decompressed))
+	}
+}
+
+func TestDecompressSplitReportPortions(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalData := []byte("Portions test data " + strings.Repeat("0123456789", 40))
+
+	var compressedBuf bytes.Buffer
+	gw := gzip.NewWriter(&compressedBuf)
+	gw.Write(originalData)
+	gw.Close()
+
+	compBytes := compressedBuf.Bytes()
+	mid := len(compBytes) / 2
+	part0 := compBytes[:mid]
+	part1 := compBytes[mid:]
+
+	basePath := filepath.Join(tmpDir, "portion_archive.gz")
+	part1Path := basePath + ".part01"
+
+	if err := os.WriteFile(basePath, part0, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part1Path, part1, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+
+	err = decompressFile(basePath, opts, nil)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if err != nil {
+		t.Fatalf("decompressFile falló: %v", err)
+	}
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Porciones:") || !strings.Contains(output, "2 / 2 partes") {
+		t.Errorf("reporte de descompresión no contiene 'Porciones:' o '2 / 2 partes': %q", output)
 	}
 }
 

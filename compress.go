@@ -85,14 +85,22 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if singleItem {
 		base := filepath.Base(files[0])
 		baseName := strings.TrimSuffix(base, filepath.Ext(base))
-		outPath = GetUniqueName(filepath.Join(opts.OutputDir, baseName), ext)
+		targetDir := opts.OutputDir
+		if opts.SplitSize > 0 {
+			targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
+		}
+		outPath = GetUniqueName(filepath.Join(targetDir, baseName), ext)
 	} else {
 		baseName := "crush_" + time.Now().Format("20060102_150405")
-		outPath = GetUniqueName(filepath.Join(opts.OutputDir, baseName), ext)
+		targetDir := opts.OutputDir
+		if opts.SplitSize > 0 {
+			targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
+		}
+		outPath = GetUniqueName(filepath.Join(targetDir, baseName), ext)
 	}
 
-	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
-		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
+	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", filepath.Dir(outPath), err)
 	}
 
 	if opts.DryRun {
@@ -245,8 +253,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	origSize := totalSize
 	finalSize := int64(0)
-	if info, err := os.Stat(realOut); err == nil {
-		finalSize = info.Size()
+	for _, p := range append([]string{realOut}, globSplitParts(realOut)...) {
+		if info, err := os.Stat(p); err == nil {
+			finalSize += info.Size()
+		}
 	}
 
 	WriteLogf("\n")
@@ -257,6 +267,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	WriteLogf("%sAhorro de espacio:%s %s%s%%%s\n", Blue, NC, Green, CalcPct(origSize, finalSize), NC)
 	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
 	WriteLogf("%sHilos utilizados:%s  %s%d%s\n", Blue, NC, Bold, effectiveThreads(ext, opts.ThreadLimit), NC)
+	if opts.SplitSize > 0 {
+		totalParts := 1 + len(globSplitParts(realOut))
+		WriteLogf("%sPorciones:%s          %s%d / %d partes%s\n", Blue, NC, Bold, totalParts, totalParts, NC)
+	}
 	WriteLogf("%s=============================%s\n", Green, NC)
 
 	CompressCleanupFiles = filteredFiles
@@ -334,9 +348,6 @@ func allRegularFiles(files []string) bool {
 }
 
 func splitOutPath(outPath string, opts CompressOptions) string {
-	if opts.SplitSize > 0 {
-		return outPath + ".part"
-	}
 	return outPath
 }
 
@@ -625,7 +636,15 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 
 			base := filepath.Base(file)
 			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-			outPath := GetUniqueName(filepath.Join(opts.OutputDir, baseNoExt), ext)
+			targetDir := opts.OutputDir
+			if opts.SplitSize > 0 {
+				targetDir = filepath.Join(opts.OutputDir, baseNoExt+"_parts")
+				if err := os.MkdirAll(targetDir, 0755); err != nil {
+					errCh <- fmt.Errorf("%s: %w", file, err)
+					return
+				}
+			}
+			outPath := GetUniqueName(filepath.Join(targetDir, baseNoExt), ext)
 			outPath = splitOutPath(outPath, opts)
 
 			fp.SetOutPath(outPath)
@@ -671,6 +690,13 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(files), NC)
 	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
 	WriteLogf("%sHilos:%s             %s%d × %d concurrentes%s\n", Blue, NC, Bold, opts.ThreadLimit, numWorkers, NC)
+	if opts.SplitSize > 0 {
+		totalParts := 0
+		for _, out := range outFiles {
+			totalParts += 1 + len(globSplitParts(out))
+		}
+		WriteLogf("%sPorciones:%s          %s%d / %d partes%s\n", Blue, NC, Bold, totalParts, totalParts, NC)
+	}
 	if len(errors) > 0 {
 		WriteLogf("%sErrores:%s           %s%d%s\n", Blue, NC, Red, len(errors), NC)
 		for _, e := range errors {
@@ -715,10 +741,6 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
 		}
 		pvCmd = exec.Command("pv", pvArgs...)
-	}
-
-	if opts.SplitSize > 0 {
-		outPath = outPath + ".part"
 	}
 
 	outFile, err := os.Create(outPath)

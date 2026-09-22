@@ -78,6 +78,17 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		return fmt.Errorf("No se encontraron archivos válidos")
 	}
 
+	seenFiles := make(map[string]bool)
+	var uniqueFiles []string
+	for _, f := range allFiles {
+		base := resolveSplitBase(f)
+		if !seenFiles[base] {
+			seenFiles[base] = true
+			uniqueFiles = append(uniqueFiles, base)
+		}
+	}
+	allFiles = uniqueFiles
+
 	neededByDir := make(map[string]int64)
 	for _, f := range allFiles {
 		targetDir := opts.OutputDir
@@ -87,8 +98,14 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		var sz int64
 		if s := EstimateUncompressedSize(f); s > 0 {
 			sz = s
-		} else if fi, err := os.Stat(f); err == nil {
-			sz = fi.Size() * 3
+		} else {
+			var compSz int64
+			for _, p := range findSplitParts(f) {
+				if fi, err := os.Stat(p); err == nil {
+					compSz += fi.Size()
+				}
+			}
+			sz = compSz * 3
 		}
 		neededByDir[targetDir] += sz
 	}
@@ -102,8 +119,10 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 	var totalSize int64
 	for _, f := range allFiles {
-		if fi, err := os.Stat(f); err == nil {
-			totalSize += fi.Size()
+		for _, p := range findSplitParts(f) {
+			if fi, err := os.Stat(p); err == nil {
+				totalSize += fi.Size()
+			}
 		}
 	}
 	opts.Progress = NewProgressTracker(totalSize, len(allFiles))
@@ -115,12 +134,17 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 	fps := make([]*FileProgress, len(allFiles))
 	for i, f := range allFiles {
-		fi, err := os.Stat(f)
+		parts := findSplitParts(f)
 		var sz int64
-		if err == nil {
-			sz = fi.Size()
+		for _, p := range parts {
+			if fi, err := os.Stat(p); err == nil {
+				sz += fi.Size()
+			}
 		}
 		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz}
+		if len(parts) > 1 {
+			fps[i].SetParts(len(parts), len(parts))
+		}
 		fps[i].SetStatus("waiting")
 	}
 	opts.Progress.SetFiles(fps)
@@ -321,6 +345,9 @@ func resolveOutputs(members []string, dir string) []string {
 }
 
 func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error {
+	file = resolveSplitBase(file)
+	parts := findSplitParts(file)
+
 	if opts.Progress != nil {
 		opts.Progress.SetCurrentFile(file)
 	}
@@ -356,7 +383,21 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		return fmt.Errorf("Error creando directorio de salida: %w", err)
 	}
 
+	compressedSize := int64(0)
+	for _, p := range parts {
+		if fi, err := os.Stat(p); err == nil {
+			compressedSize += fi.Size()
+		}
+	}
+	if fp != nil && len(parts) > 1 {
+		fp.Size = compressedSize
+		fp.SetParts(len(parts), len(parts))
+	}
+
 	needed := EstimateUncompressedSize(file)
+	if len(parts) > 1 && needed < compressedSize {
+		needed = compressedSize * 4
+	}
 	if needed > 0 {
 		if err := CheckDiskSpace(needed*110/100, dir, "descomprimir"); err != nil {
 			return err
@@ -391,21 +432,20 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 
 	elapsed := time.Since(startTime)
 
-	compressedSize := int64(0)
-	if fi, err := os.Stat(file); err == nil {
-		compressedSize = fi.Size()
-	}
-
 	uncompressedSize := needed
 	if uncompressedSize == 0 {
-		if fi, err := os.Stat(file); err == nil {
-			uncompressedSize = fi.Size() * 4
-		}
+		uncompressedSize = compressedSize * 4
 	}
 
 	if !opts.KeepOrig {
-		if err := os.Remove(file); err != nil {
-			WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, file, err, NC)
+		for _, p := range parts {
+			if err := os.Remove(p); err != nil {
+				WriteLogf("  %s⚠ No se pudo eliminar %s: %v%s\n", Yellow, p, err, NC)
+			}
+		}
+		parentDir := filepath.Dir(file)
+		if strings.HasSuffix(parentDir, "_parts") || strings.HasSuffix(parentDir, "_split") {
+			_ = os.Remove(parentDir)
 		}
 	}
 	var report strings.Builder
@@ -415,6 +455,9 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	fmt.Fprintf(&report, "%sTamaño Descomprimido:%s %s%s%s\n", Blue, NC, Green, FormatSize(uncompressedSize), NC)
 	fmt.Fprintf(&report, "%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
 	fmt.Fprintf(&report, "%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file, opts.ThreadLimit), NC)
+	if len(parts) > 1 {
+		fmt.Fprintf(&report, "%sPorciones:%s          %s%d / %d partes%s\n", Blue, NC, Bold, len(parts), len(parts), NC)
+	}
 	fmt.Fprintf(&report, "%s=============================%s\n", Green, NC)
 	WriteLog(report.String())
 
@@ -427,12 +470,14 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 
 func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
 	if info.Tool == "" {
-			return fmt.Errorf("No se detectó herramienta para: %s", file)
-		}
+		return fmt.Errorf("No se detectó herramienta para: %s", file)
+	}
 
-		WriteLogf("  → %s/\n", dir)
+	WriteLogf("  → %s/\n", dir)
 
-	if opts.Progress == nil && hasTool("pv") {
+	parts := findSplitParts(file)
+
+	if len(parts) == 1 && opts.Progress == nil && hasTool("pv") {
 		tarExtract := exec.Command("tar", "-xf", "-", "-C", dir)
 		// Build decompressor pipe: decompress -> pv -> tar -xf -
 		var decompCmd *exec.Cmd
@@ -480,7 +525,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 	} else {
 		// Decompress the compression layer, writing the tar into dir
 		tarName := GetUniqueName(filepath.Join(dir, filepath.Base(stripTarExt(file))), "tar")
-		decompCmd, closer, err := pipeCmdForProgress(info, file, opts.Progress, fp)
+		decompCmd, closer, err := pipeCmdForParts(info, parts, opts.Progress, fp)
 		if err != nil {
 			return fmt.Errorf("Error preparando descompresión de %s: %w", file, err)
 		}
@@ -532,22 +577,54 @@ func pipeCmdFor(info FormatInfo, file string) (*exec.Cmd, io.Closer) {
 	return cmd, nil
 }
 
-func pipeCmdForProgress(info FormatInfo, file string, pt *ProgressTracker, fp *FileProgress) (*exec.Cmd, io.Closer, error) {
+type multiCloser struct {
+	closers []io.Closer
+}
+
+func (mc *multiCloser) Close() error {
+	var firstErr error
+	for _, c := range mc.closers {
+		if err := c.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func pipeCmdForParts(info FormatInfo, parts []string, pt *ProgressTracker, fp *FileProgress) (*exec.Cmd, io.Closer, error) {
 	cmd := exec.Command(info.Tool, strings.Fields(info.PipeFlags)...)
-	if info.Tool == "lrzip" {
-		cmd.Args = append(cmd.Args, "--", file)
+	if len(parts) == 1 && info.Tool == "lrzip" {
+		cmd.Args = append(cmd.Args, "--", parts[0])
 		return cmd, nil, nil
 	}
-	in, err := os.Open(file)
-	if err != nil {
-		return nil, nil, err
+
+	readers := make([]io.Reader, len(parts))
+	closers := make([]io.Closer, len(parts))
+	for i, p := range parts {
+		f, err := os.Open(p)
+		if err != nil {
+			for j := 0; j < i; j++ {
+				_ = closers[j].Close()
+			}
+			return nil, nil, err
+		}
+		readers[i] = f
+		closers[i] = f
 	}
-	var inReader io.Reader = in
+
+	mc := &multiCloser{closers: closers}
+	multiReader := io.MultiReader(readers...)
+
+	var inReader io.Reader = multiReader
 	if pt != nil || fp != nil {
-		inReader = &countingReader{r: in, pt: pt, fp: fp}
+		inReader = &countingReader{r: multiReader, pt: pt, fp: fp}
 	}
 	cmd.Stdin = inReader
-	return cmd, in, nil
+	return cmd, mc, nil
+}
+
+func pipeCmdForProgress(info FormatInfo, file string, pt *ProgressTracker, fp *FileProgress) (*exec.Cmd, io.Closer, error) {
+	return pipeCmdForParts(info, findSplitParts(file), pt, fp)
 }
 
 func decompressSingle(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
@@ -651,7 +728,8 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 				return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", outputPath)
 			}
 		}
-		if opts.Progress == nil && hasTool("pv") {
+		parts := findSplitParts(file)
+		if len(parts) == 1 && opts.Progress == nil && hasTool("pv") {
 			decompCmd, closer := pipeCmdFor(info, file)
 			if closer != nil {
 				defer closer.Close()
@@ -671,7 +749,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			}
 			return nil
 		}
-		decompCmd, closer, err := pipeCmdForProgress(info, file, opts.Progress, fp)
+		decompCmd, closer, err := pipeCmdForParts(info, parts, opts.Progress, fp)
 		if err != nil {
 			return fmt.Errorf("Error preparando descompresión de %s: %w", file, err)
 		}
@@ -789,29 +867,38 @@ func (w *splitWriter) Close() error {
 }
 
 func FindDecompressibleFiles(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
+	if dir == "" {
+		dir = "."
 	}
 	var files []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		name := entry.Name()
+		name := d.Name()
+		if d.IsDir() {
+			if path != dir && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if strings.HasPrefix(name, ".") {
-			continue
+			return nil
 		}
 		if strings.Contains(name, ".part") {
-			continue
+			return nil
 		}
 		if _, err := DetectFormat(name); err == nil {
-			if dir == "." || dir == "" {
-				files = append(files, name)
-			} else {
-				files = append(files, filepath.Join(dir, name))
+			relPath := path
+			if dir == "." {
+				relPath = strings.TrimPrefix(path, "./")
 			}
+			files = append(files, relPath)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	sort.Strings(files)
 	return files, nil
@@ -825,8 +912,15 @@ func PromptDecompressAll(r io.Reader, w io.Writer, files []string) (bool, error)
 	fmt.Fprintf(w, "%sArchivos comprimidos detectados en el directorio actual (%d):%s\n", Bold, len(files), NC)
 	for _, f := range files {
 		sizeStr := ""
-		if fi, err := os.Stat(f); err == nil {
-			sizeStr = fmt.Sprintf(" (%s)", FormatSize(fi.Size()))
+		parts := findSplitParts(f)
+		var totalSz int64
+		for _, p := range parts {
+			if fi, err := os.Stat(p); err == nil {
+				totalSz += fi.Size()
+			}
+		}
+		if totalSz > 0 {
+			sizeStr = fmt.Sprintf(" (%s)", FormatSize(totalSz))
 		}
 		fmt.Fprintf(w, "  • %s%s%s%s\n", Blue, f, NC, sizeStr)
 	}

@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -600,16 +599,11 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 }
 
 func compressParallel(files []string, opts CompressOptions) ([]string, error) {
-	fileSizes := make(map[string]int64, len(files))
-	for _, f := range files {
+	fileSizes := SortByLPT(files, func(f string) int64 {
 		if fi, err := os.Stat(f); err == nil {
-			fileSizes[f] = fi.Size()
-		} else {
-			fileSizes[f] = -1
+			return fi.Size()
 		}
-	}
-	sort.SliceStable(files, func(i, j int) bool {
-		return fileSizes[files[i]] > fileSizes[files[j]]
+		return -1
 	})
 
 	ext := opts.Format.String()

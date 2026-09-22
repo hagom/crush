@@ -154,12 +154,46 @@ func resolveSplitBase(file string) string {
 	return file
 }
 
+func SortByLPT(items []string, sizeFn func(string) int64) map[string]int64 {
+	sizes := make(map[string]int64, len(items))
+	if len(items) == 0 {
+		return sizes
+	}
+	for _, item := range items {
+		sizes[item] = sizeFn(item)
+	}
+	if len(items) > 1 {
+		sort.SliceStable(items, func(i, j int) bool {
+			return sizes[items[i]] > sizes[items[j]]
+		})
+	}
+	return sizes
+}
+
+func PartsTotalSize(parts []string) int64 {
+	var total int64
+	for _, p := range parts {
+		if fi, err := os.Stat(p); err == nil {
+			total += fi.Size()
+		}
+	}
+	return total
+}
+
+func TotalArchiveSize(archivePath string) int64 {
+	return PartsTotalSize(findSplitParts(archivePath))
+}
+
+func IsSplitPartsDir(dir string) bool {
+	return strings.HasSuffix(dir, "_parts") || strings.HasSuffix(dir, "_split")
+}
+
 func ResolveDecompressDir(archivePath string, configuredOutputDir string) string {
 	if configuredOutputDir != "" {
 		return configuredOutputDir
 	}
 	dir := filepath.Dir(archivePath)
-	if strings.HasSuffix(dir, "_parts") || strings.HasSuffix(dir, "_split") {
+	if IsSplitPartsDir(dir) {
 		return filepath.Dir(dir)
 	}
 	return dir

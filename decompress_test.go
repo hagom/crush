@@ -1274,6 +1274,72 @@ func TestDecompressTarSplitStreaming(t *testing.T) {
 	}
 }
 
+func TestDecompressLPTScheduling(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	smallFile := filepath.Join(tmpDir, "small.txt")
+	mediumFile := filepath.Join(tmpDir, "medium.txt")
+	largeFile := filepath.Join(tmpDir, "large.txt")
+
+	if err := os.WriteFile(smallFile, bytes.Repeat([]byte("s"), 500), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mediumFile, bytes.Repeat([]byte("m"), 20*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(largeFile, bytes.Repeat([]byte("l"), 100*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gzSmall := filepath.Join(tmpDir, "small.txt.gz")
+	gzMedium := filepath.Join(tmpDir, "medium.txt.gz")
+	gzLarge := filepath.Join(tmpDir, "large.txt.gz")
+
+	makeGz(t, smallFile, gzSmall)
+	makeGz(t, mediumFile, gzMedium)
+	makeGz(t, largeFile, gzLarge)
+
+	os.Remove(smallFile)
+	os.Remove(mediumFile)
+	os.Remove(largeFile)
+
+	outDir := filepath.Join(tmpDir, "out")
+	pt := NewProgressTracker(0, 0)
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Force:     true,
+		Progress:  pt,
+	}
+
+	inputFiles := []string{gzSmall, gzMedium, gzLarge}
+	if err := DoDecompress(inputFiles, opts); err != nil {
+		t.Fatalf("DoDecompress failed: %v", err)
+	}
+
+	if len(pt.files) != 3 {
+		t.Fatalf("expected 3 files in pt.files, got %d", len(pt.files))
+	}
+
+	wantOrder := []string{"large.txt.gz", "medium.txt.gz", "small.txt.gz"}
+	for i, want := range wantOrder {
+		if pt.files[i].Name != want {
+			t.Errorf("pos %d: file %q, want %q", i, pt.files[i].Name, want)
+		}
+	}
+	if pt.files[0].Size <= pt.files[1].Size || pt.files[1].Size <= pt.files[2].Size {
+		t.Errorf("sizes are not strictly descending: [%d, %d, %d]",
+			pt.files[0].Size, pt.files[1].Size, pt.files[2].Size)
+	}
+
+	for _, name := range []string{"large.txt", "medium.txt", "small.txt"} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
+			t.Errorf("extracted file %s does not exist: %v", name, err)
+		}
+	}
+}
+
+
 
 
 

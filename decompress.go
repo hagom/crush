@@ -88,6 +88,7 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		}
 	}
 	allFiles = uniqueFiles
+	archiveSizes := SortByLPT(allFiles, TotalArchiveSize)
 
 	neededByDir := make(map[string]int64)
 	for _, f := range allFiles {
@@ -96,13 +97,7 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		if s := EstimateUncompressedSize(f); s > 0 {
 			sz = s
 		} else {
-			var compSz int64
-			for _, p := range findSplitParts(f) {
-				if fi, err := os.Stat(p); err == nil {
-					compSz += fi.Size()
-				}
-			}
-			sz = compSz * 3
+			sz = archiveSizes[f] * 3
 		}
 		neededByDir[targetDir] += sz
 	}
@@ -116,14 +111,16 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 	var totalSize int64
 	for _, f := range allFiles {
-		for _, p := range findSplitParts(f) {
-			if fi, err := os.Stat(p); err == nil {
-				totalSize += fi.Size()
-			}
-		}
+		totalSize += archiveSizes[f]
 	}
-	opts.Progress = NewProgressTracker(totalSize, len(allFiles))
 	pt := opts.Progress
+	if pt == nil {
+		pt = NewProgressTracker(totalSize, len(allFiles))
+		opts.Progress = pt
+	} else {
+		pt.total = totalSize
+		pt.filesTotal = len(allFiles)
+	}
 
 	if opts.Parallel < 1 {
 		opts.Parallel = NCPU()
@@ -132,19 +129,13 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	fps := make([]*FileProgress, len(allFiles))
 	for i, f := range allFiles {
 		parts := findSplitParts(f)
-		var sz int64
-		for _, p := range parts {
-			if fi, err := os.Stat(p); err == nil {
-				sz += fi.Size()
-			}
-		}
-		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz}
+		fps[i] = &FileProgress{Name: filepath.Base(f), Size: archiveSizes[f]}
 		if len(parts) > 1 {
 			fps[i].SetParts(len(parts), len(parts))
 		}
 		fps[i].SetStatus("waiting")
 	}
-	opts.Progress.SetFiles(fps)
+	pt.SetFiles(fps)
 
 	results := make(chan error, len(allFiles))
 	var successes, errors int
@@ -373,12 +364,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		return fmt.Errorf("Error creando directorio de salida: %w", err)
 	}
 
-	compressedSize := int64(0)
-	for _, p := range parts {
-		if fi, err := os.Stat(p); err == nil {
-			compressedSize += fi.Size()
-		}
-	}
+	compressedSize := PartsTotalSize(parts)
 	if fp != nil && len(parts) > 1 {
 		fp.Size = compressedSize
 		fp.SetParts(len(parts), len(parts))
@@ -434,7 +420,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 			}
 		}
 		parentDir := filepath.Dir(file)
-		if strings.HasSuffix(parentDir, "_parts") || strings.HasSuffix(parentDir, "_split") {
+		if IsSplitPartsDir(parentDir) {
 			_ = os.Remove(parentDir)
 		}
 	}
@@ -917,12 +903,7 @@ func PromptDecompressAll(r io.Reader, w io.Writer, files []string) (bool, error)
 	for _, f := range files {
 		sizeStr := ""
 		parts := findSplitParts(f)
-		var totalSz int64
-		for _, p := range parts {
-			if fi, err := os.Stat(p); err == nil {
-				totalSz += fi.Size()
-			}
-		}
+		totalSz := PartsTotalSize(parts)
 		if totalSz > 0 {
 			sizeStr = fmt.Sprintf(" (%s)", FormatSize(totalSz))
 		}

@@ -983,3 +983,215 @@ func TestSetPipeCapacity(t *testing.T) {
 	})
 }
 
+func TestSortByLPT(t *testing.T) {
+	t.Run("empty slice", func(t *testing.T) {
+		var items []string
+		calls := 0
+		sizes := SortByLPT(items, func(s string) int64 {
+			calls++
+			return 100
+		})
+		if len(sizes) != 0 {
+			t.Errorf("expected empty sizes map, got %v", sizes)
+		}
+		if len(items) != 0 {
+			t.Errorf("expected items to remain empty, got %v", items)
+		}
+		if calls != 0 {
+			t.Errorf("expected 0 calls for empty slice, got %d", calls)
+		}
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		items := []string{"only.txt"}
+		calls := 0
+		sizes := SortByLPT(items, func(s string) int64 {
+			calls++
+			return 42
+		})
+		if len(sizes) != 1 || sizes["only.txt"] != 42 {
+			t.Errorf("unexpected sizes map: %v", sizes)
+		}
+		if len(items) != 1 || items[0] != "only.txt" {
+			t.Errorf("unexpected items slice: %v", items)
+		}
+		if calls != 1 {
+			t.Errorf("expected 1 call, got %d", calls)
+		}
+	})
+
+	t.Run("multiple items descending sort and O(N) calls", func(t *testing.T) {
+		items := []string{"small.txt", "large.txt", "medium.txt", "tiny.txt"}
+		mockSizes := map[string]int64{
+			"small.txt":  500,
+			"large.txt":  50000,
+			"medium.txt": 5000,
+			"tiny.txt":   50,
+		}
+		calls := 0
+		sizes := SortByLPT(items, func(s string) int64 {
+			calls++
+			return mockSizes[s]
+		})
+
+		if calls != 4 {
+			t.Errorf("expected exactly 4 calls (O(N)), got %d", calls)
+		}
+
+		wantOrder := []string{"large.txt", "medium.txt", "small.txt", "tiny.txt"}
+		for i, want := range wantOrder {
+			if items[i] != want {
+				t.Errorf("items[%d] = %q, want %q", i, items[i], want)
+			}
+			if sizes[want] != mockSizes[want] {
+				t.Errorf("sizes[%q] = %d, want %d", want, sizes[want], mockSizes[want])
+			}
+		}
+	})
+
+	t.Run("stable sort with identical sizes", func(t *testing.T) {
+		items := []string{"file_a.txt", "file_b.txt", "file_c.txt"}
+		sizes := SortByLPT(items, func(s string) int64 {
+			return 100
+		})
+		wantOrder := []string{"file_a.txt", "file_b.txt", "file_c.txt"}
+		for i, want := range wantOrder {
+			if items[i] != want {
+				t.Errorf("items[%d] = %q, want %q (stable sort violated)", i, items[i], want)
+			}
+		}
+		if len(sizes) != 3 {
+			t.Errorf("expected 3 entries in sizes map, got %d", len(sizes))
+		}
+	})
+
+	t.Run("handles negative sizes", func(t *testing.T) {
+		items := []string{"err.txt", "ok.txt", "zero.txt"}
+		mockSizes := map[string]int64{
+			"err.txt":  -1,
+			"ok.txt":   100,
+			"zero.txt": 0,
+		}
+		SortByLPT(items, func(s string) int64 {
+			return mockSizes[s]
+		})
+		wantOrder := []string{"ok.txt", "zero.txt", "err.txt"}
+		for i, want := range wantOrder {
+			if items[i] != want {
+				t.Errorf("items[%d] = %q, want %q", i, items[i], want)
+			}
+		}
+	})
+}
+
+func TestPartsTotalSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	p1 := filepath.Join(tmpDir, "part1.bin")
+	p2 := filepath.Join(tmpDir, "part2.bin")
+	p3 := filepath.Join(tmpDir, "part3.bin")
+
+	if err := os.WriteFile(p1, make([]byte, 100), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p2, make([]byte, 250), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p3, make([]byte, 500), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name  string
+		parts []string
+		want  int64
+	}{
+		{"empty parts", []string{}, 0},
+		{"single part", []string{p1}, 100},
+		{"all parts", []string{p1, p2, p3}, 850},
+		{"with nonexistent parts", []string{p1, filepath.Join(tmpDir, "missing.bin"), p2}, 350},
+		{"only nonexistent parts", []string{filepath.Join(tmpDir, "missing.bin")}, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PartsTotalSize(tt.parts)
+			if got != tt.want {
+				t.Errorf("PartsTotalSize(%v) = %d, want %d", tt.parts, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTotalArchiveSize(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Single archive
+	singleArchive := filepath.Join(tmpDir, "archive.tar.gz")
+	if err := os.WriteFile(singleArchive, make([]byte, 1234), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Split archive
+	splitBase := filepath.Join(tmpDir, "split.tar.gz")
+	splitPart01 := filepath.Join(tmpDir, "split.tar.gz.part01")
+	splitPart02 := filepath.Join(tmpDir, "split.tar.gz.part02")
+	if err := os.WriteFile(splitBase, make([]byte, 1000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(splitPart01, make([]byte, 1000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(splitPart02, make([]byte, 500), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		archivePath string
+		want        int64
+	}{
+		{"single archive", singleArchive, 1234},
+		{"split archive via base", splitBase, 2500},
+		{"split archive via part01", splitPart01, 2500},
+		{"split archive via part02", splitPart02, 2500},
+		{"nonexistent archive", filepath.Join(tmpDir, "missing.tar.gz"), 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TotalArchiveSize(tt.archivePath)
+			if got != tt.want {
+				t.Errorf("TotalArchiveSize(%q) = %d, want %d", tt.archivePath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsSplitPartsDir(t *testing.T) {
+	tests := []struct {
+		dir  string
+		want bool
+	}{
+		{"backup_parts", true},
+		{"backup_split", true},
+		{"/var/tmp/data_parts", true},
+		{"/var/tmp/data_split", true},
+		{"backup_parts/", false},
+		{"backup_part", false},
+		{"parts", false},
+		{"split", false},
+		{"backup", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.dir, func(t *testing.T) {
+			got := IsSplitPartsDir(tt.dir)
+			if got != tt.want {
+				t.Errorf("IsSplitPartsDir(%q) = %v, want %v", tt.dir, got, tt.want)
+			}
+		})
+	}
+}
+
+

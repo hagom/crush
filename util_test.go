@@ -658,5 +658,131 @@ func TestEstimateUncompressedSizeLz4Realistic(t *testing.T) {
 	}
 }
 
+func TestColoredMessages(t *testing.T) {
+	outBuf := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	restore := setOutputWriters(outBuf, errBuf)
+	defer restore()
+
+	t.Run("WriteWarning format and colors", func(t *testing.T) {
+		errBuf.Reset()
+		WriteWarning("disco casi lleno: %d MB restantes\n", 50)
+		got := errBuf.String()
+		wantPrefix := Yellow + "⚠ Advertencia: "
+		wantSuffix := NC + "\n"
+		if !strings.HasPrefix(got, wantPrefix) {
+			t.Errorf("WriteWarning got prefix %q, want %q", got, wantPrefix)
+		}
+		if !strings.HasSuffix(got, wantSuffix) {
+			t.Errorf("WriteWarning got suffix %q, want %q", got, wantSuffix)
+		}
+		if !strings.Contains(got, "disco casi lleno: 50 MB restantes") {
+			t.Errorf("WriteWarning message content missing: %q", got)
+		}
+		if strings.Contains(got, "\n\n") {
+			t.Errorf("WriteWarning produced redundant newline: %q", got)
+		}
+	})
+
+	t.Run("WriteWarning strips redundant prefix", func(t *testing.T) {
+		errBuf.Reset()
+		WriteWarning("Warning: -s solo tiene efecto con -c (ignorado)")
+		got := errBuf.String()
+		want := Yellow + "⚠ Advertencia: -s solo tiene efecto con -c (ignorado)" + NC + "\n"
+		if got != want {
+			t.Errorf("WriteWarning = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("WriteError format and colors", func(t *testing.T) {
+		errBuf.Reset()
+		WriteError("archivo %s no existe\n", "test.tar")
+		got := errBuf.String()
+		wantPrefix := Red + "✗ Error: "
+		wantSuffix := NC + "\n"
+		if !strings.HasPrefix(got, wantPrefix) {
+			t.Errorf("WriteError got prefix %q, want %q", got, wantPrefix)
+		}
+		if !strings.HasSuffix(got, wantSuffix) {
+			t.Errorf("WriteError got suffix %q, want %q", got, wantSuffix)
+		}
+		if !strings.Contains(got, "archivo test.tar no existe") {
+			t.Errorf("WriteError message content missing: %q", got)
+		}
+		if strings.Contains(got, "\n\n") {
+			t.Errorf("WriteError produced redundant newline: %q", got)
+		}
+	})
+
+	t.Run("WriteError strips redundant prefix", func(t *testing.T) {
+		errBuf.Reset()
+		WriteError("Error: permiso denegado")
+		got := errBuf.String()
+		want := Red + "✗ Error: permiso denegado" + NC + "\n"
+		if got != want {
+			t.Errorf("WriteError = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("WriteInfo format and colors", func(t *testing.T) {
+		errBuf.Reset()
+		WriteInfo("proceso en curso: paso %d", 2)
+		got := errBuf.String()
+		wantPrefix := Blue + "ℹ "
+		wantSuffix := NC + "\n"
+		if !strings.HasPrefix(got, wantPrefix) {
+			t.Errorf("WriteInfo got prefix %q, want %q", got, wantPrefix)
+		}
+		if !strings.HasSuffix(got, wantSuffix) {
+			t.Errorf("WriteInfo got suffix %q, want %q", got, wantSuffix)
+		}
+		if !strings.Contains(got, "proceso en curso: paso 2") {
+			t.Errorf("WriteInfo message content missing: %q", got)
+		}
+	})
+
+	t.Run("WriteSuccess format and colors", func(t *testing.T) {
+		outBuf.Reset()
+		WriteSuccess("compresión completada con éxito: %s", "demo.tar.gz")
+		got := outBuf.String()
+		wantPrefix := Green + "✓ "
+		wantSuffix := NC + "\n"
+		if !strings.HasPrefix(got, wantPrefix) {
+			t.Errorf("WriteSuccess got prefix %q, want %q", got, wantPrefix)
+		}
+		if !strings.HasSuffix(got, wantSuffix) {
+			t.Errorf("WriteSuccess got suffix %q, want %q", got, wantSuffix)
+		}
+		if !strings.Contains(got, "compresión completada con éxito: demo.tar.gz") {
+			t.Errorf("WriteSuccess message content missing: %q", got)
+		}
+	})
+
+	t.Run("Concurrent messages safety", func(t *testing.T) {
+		var wg sync.WaitGroup
+		for i := 0; i < 50; i++ {
+			wg.Add(4)
+			go func(val int) {
+				defer wg.Done()
+				WriteWarning("alerta concurrente %d", val)
+			}(i)
+			go func(val int) {
+				defer wg.Done()
+				WriteError("error concurrente %d", val)
+			}(i)
+			go func(val int) {
+				defer wg.Done()
+				WriteInfo("info concurrente %d", val)
+			}(i)
+			go func(val int) {
+				defer wg.Done()
+				WriteSuccess("éxito concurrente %d", val)
+			}(i)
+		}
+		wg.Wait()
+	})
+}
+
+
 
 

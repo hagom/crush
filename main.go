@@ -177,7 +177,7 @@ func main() {
 
 	defer CloseLog()
 	if err := SetupLogging(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error configurando logging: %v\n", err)
+		WriteWarning("configurando logging: %v", err)
 	}
 
 	// Handle -h / no args
@@ -226,7 +226,7 @@ func main() {
 				conflictFlags = append(conflictFlags, f.name)
 			}
 		}
-		fmt.Fprintf(os.Stderr, "Error: los flags %s no se pueden combinar\n", strings.Join(conflictFlags, " + "))
+		WriteError("los flags %s no se pueden combinar", strings.Join(conflictFlags, " + "))
 		os.Exit(1)
 	}
 
@@ -242,13 +242,13 @@ func main() {
 		installModeCount++
 	}
 	if installModeCount > 1 {
-		fmt.Fprintln(os.Stderr, "Error: --install, --install-deps y --uninstall son mutuamente excluyentes")
+		WriteError("--install, --install-deps y --uninstall son mutuamente excluyentes")
 		os.Exit(1)
 	}
 	if installModeCount > 0 {
 		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag, *benchFlag} {
 			if m {
-				fmt.Fprintln(os.Stderr, "Error: --install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -r o --bench")
+				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -r o --bench")
 				os.Exit(1)
 			}
 		}
@@ -263,7 +263,7 @@ func main() {
 			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {readFlag, "-r"},
 		} {
 			if *m.v {
-				fmt.Fprintf(os.Stderr, "Error: --bench no se puede combinar con %s\n", m.name)
+				WriteError("--bench no se puede combinar con %s", m.name)
 				os.Exit(1)
 			}
 		}
@@ -271,19 +271,19 @@ func main() {
 
 	// -f solo tiene sentido con -c (excepto en modo pipe stdin)
 	if *formatStr != "" && !*compressFlag && !stdinIsPipe {
-		fmt.Fprintln(os.Stderr, "Warning: -f solo tiene efecto con -c (ignorado)")
+		WriteWarning("-f solo tiene efecto con -c (ignorado)")
 	}
 	// -s solo tiene sentido con -c
 	if *splitSize > 0 && !*compressFlag {
-		fmt.Fprintln(os.Stderr, "Warning: -s solo tiene efecto con -c (ignorado)")
+		WriteWarning("-s solo tiene efecto con -c (ignorado)")
 	}
 	// -n solo tiene sentido con -c o -d
 	if *dryRun && !*compressFlag && !*decompressFlag {
-		fmt.Fprintln(os.Stderr, "Warning: -n solo tiene efecto con -c o -d (ignorado)")
+		WriteWarning("-n solo tiene efecto con -c o -d (ignorado)")
 	}
 	// -C requiere -o
 	if *combineFlag && !outDirSet {
-		fmt.Fprintln(os.Stderr, "Error: -C requiere -o DIRECTORIO")
+		WriteError("-C requiere -o DIRECTORIO")
 		os.Exit(1)
 	}
 
@@ -313,7 +313,7 @@ func main() {
 	if len(files) == 0 && *fromFile != "" {
 		lines, err := ReadFileLines(*fromFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error leyendo archivo de lista %s: %v\n", *fromFile, err)
+			WriteError("leyendo archivo de lista %s: %v", *fromFile, err)
 			os.Exit(1)
 		}
 		for _, line := range lines {
@@ -333,24 +333,24 @@ func main() {
 	} else if len(files) == 0 && *decompressFlag {
 		found, err := FindDecompressibleFiles(".")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error buscando archivos comprimidos: %v\n", err)
+			WriteError("buscando archivos comprimidos: %v", err)
 			os.Exit(1)
 		}
 		if len(found) == 0 {
-			fmt.Println("No se encontraron archivos comprimidos en el directorio actual.")
+			WriteInfo("No se encontraron archivos comprimidos en el directorio actual.")
 			return
 		}
 		confirmed, err := PromptDecompressAll(os.Stdin, os.Stdout, found)
 		if err != nil || !confirmed {
 			if !confirmed {
-				fmt.Println("Operación cancelada.")
+				WriteInfo("Operación cancelada.")
 			}
 			return
 		}
 		fmt.Println()
 		files = found
 	} else if len(files) == 0 && opMode {
-		fmt.Fprintln(os.Stderr, "Error: debe especificar archivos como argumentos o con -i")
+		WriteError("debe especificar archivos como argumentos o con -i")
 		os.Exit(1)
 	}
 
@@ -361,7 +361,7 @@ func main() {
 			customFile = files[0]
 		}
 		if err := DoBench(customFile, *benchSizeFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "%sError en benchmark: %v%s\n", Red, err, NC)
+			WriteError("en benchmark: %v", err)
 			os.Exit(1)
 		}
 		return
@@ -372,11 +372,11 @@ func main() {
 		for _, f := range files {
 			file, err := os.Open(f)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error abriendo %s: %v\n", f, err)
+				WriteError("abriendo %s: %v", f, err)
 				continue
 			}
 			if err := ListCompressed(file); err != nil {
-				fmt.Fprintf(os.Stderr, "Error listando %s: %v\n", f, err)
+				WriteError("listando %s: %v", f, err)
 			}
 			file.Close()
 		}
@@ -388,12 +388,12 @@ func main() {
 		for _, f := range files {
 			file, err := os.Open(f)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error abriendo %s: %v\n", f, err)
+				WriteError("abriendo %s: %v", f, err)
 				continue
 			}
 			data, err := CompressRead(file)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error leyendo %s: %v\n", f, err)
+				WriteError("leyendo %s: %v", f, err)
 				file.Close()
 				continue
 			}
@@ -410,7 +410,7 @@ func main() {
 			Quick:   *quick,
 		}
 		if err := DoTest(files, opts); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			WriteError("%v", err)
 			os.Exit(1)
 		}
 		return
@@ -419,14 +419,14 @@ func main() {
 	// Handle -c (compress), optionally followed by -t (test)
 	if *compressFlag {
 		if *formatStr == "" {
-			fmt.Fprintf(os.Stderr, "Error: debe especificar formato con -f\n")
-			fmt.Fprintf(os.Stderr, "Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br\n")
+			WriteError("debe especificar formato con -f")
+			WriteInfo("Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br")
 			printHelp()
 			os.Exit(1)
 		}
 		format, err := ParseFormat(*formatStr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			WriteError("%v", err)
 			printHelp()
 			os.Exit(1)
 		}
@@ -453,13 +453,13 @@ func main() {
 		var outPaths []string
 		if stdinIsPipe {
 			if err := compressStream(os.Stdin, os.Stdout, opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				WriteError("%v", err)
 				os.Exit(1)
 			}
 		} else {
 			outPaths, err = DoCompress(files, opts)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				WriteError("%v", err)
 				os.Exit(1)
 			}
 		}
@@ -504,17 +504,17 @@ func main() {
 		if stdinIsPipe && *formatStr != "" && len(files) == 0 {
 			f, err := ParseFormat(*formatStr)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				WriteError("%v", err)
 				os.Exit(1)
 			}
 			info := FormatInfoFromFormat(f)
 			if err := decompressStream(os.Stdin, os.Stdout, info); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				WriteError("%v", err)
 				os.Exit(1)
 			}
 		} else {
 			if err := DoDecompress(files, opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				WriteError("%v", err)
 				os.Exit(1)
 			}
 		}
@@ -522,7 +522,7 @@ func main() {
 	}
 
 	// If we get here, no mode flag was specified
-	fmt.Fprintln(os.Stderr, "Error: debe especificar un modo de operación (-c, -d, -l, -t, -r)")
+	WriteError("debe especificar un modo de operación (-c, -d, -l, -t, -r)")
 	printHelp()
 	os.Exit(1)
 }
@@ -543,7 +543,7 @@ func installBinary() error {
 func installBinaryTo(src, dest string) error {
 	// Try direct copy
 	if err := copyFile(src, dest); err == nil {
-		WriteLogf("  %s✓ Binario instalado en %s%s\n", Green, dest, NC)
+		WriteSuccess("Binario instalado en %s", dest)
 		return nil
 	}
 
@@ -553,7 +553,7 @@ func installBinaryTo(src, dest string) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err == nil {
-			WriteLogf("  %s✓ Binario instalado en %s%s\n", Green, dest, NC)
+			WriteSuccess("Binario instalado en %s", dest)
 			return nil
 		}
 	}
@@ -564,7 +564,7 @@ func installBinaryTo(src, dest string) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err == nil {
-			WriteLogf("  %s✓ Binario instalado en %s%s\n", Green, dest, NC)
+			WriteSuccess("Binario instalado en %s", dest)
 			return nil
 		}
 	}
@@ -598,10 +598,10 @@ func copyFile(src, dst string) error {
 }
 
 func handleInstall() {
-	WriteLogf("%sInstalando crush en el sistema...%s\n", Blue, NC)
+	WriteInfo("Instalando crush en el sistema...")
 
 	if err := installBinary(); err != nil {
-		fmt.Fprintf(os.Stderr, "%sError: %v%s\n", Red, err, NC)
+		WriteError("%v", err)
 		os.Exit(1)
 	}
 }
@@ -618,20 +618,20 @@ func handleInstallDeps() {
 	}
 
 	if len(neededTools) == 0 {
-		WriteLogf("  %s✓ Todas las herramientas están instaladas.%s\n", Green, NC)
+		WriteSuccess("Todas las herramientas están instaladas.")
 		return
 	}
 
 	mgr := DetectPkgManager()
 	if mgr == nil {
-		fmt.Fprintln(os.Stderr, "Error: No se pudo detectar el gestor de paquetes")
+		WriteError("No se pudo detectar el gestor de paquetes")
 		os.Exit(1)
 	}
 
-	WriteLogf("  Detectado gestor de paquetes: %s\n", mgr.Name)
+	WriteInfo("Detectado gestor de paquetes: %s", mgr.Name)
 	remaining := InstallMissingDeps(neededTools, mgr)
 	if remaining != nil {
-		fmt.Fprintf(os.Stderr, "%sError: No se pudieron instalar: %v%s\n", Red, remaining, NC)
+		WriteError("No se pudieron instalar: %v", remaining)
 		os.Exit(1)
 	}
 }
@@ -647,7 +647,7 @@ func doInstallCompletion(shell string) {
 		case strings.HasSuffix(shellPath, "/fish"):
 			shell = "fish"
 		default:
-			fmt.Fprintf(os.Stderr, "Error: no se pudo detectar shell desde $SHELL (%s). Use: crush --completion bash|zsh|fish\n", shellPath)
+			WriteError("no se pudo detectar shell desde $SHELL (%s). Use: crush --completion bash|zsh|fish", shellPath)
 			os.Exit(1)
 		}
 	}
@@ -667,22 +667,22 @@ func doInstallCompletion(shell string) {
 		script = fishCompletion
 		dest = "/etc/fish/completions/crush.fish"
 	default:
-		fmt.Fprintf(os.Stderr, "Error: shell no soportada: %s (use bash, zsh o fish)\n", shell)
+		WriteError("shell no soportada: %s (use bash, zsh o fish)", shell)
 		os.Exit(1)
 	}
 
-	WriteLogf("%sInstalando completado para %s...%s\n", Blue, shell, NC)
+	WriteInfo("Instalando completado para %s...", shell)
 
 	tmpFile, err := os.CreateTemp("", "crush-completion-*")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%sError: no se pudo crear archivo temporal%s\n", Red, NC)
+		WriteError("no se pudo crear archivo temporal")
 		os.Exit(1)
 	}
 	tmpPath := tmpFile.Name()
 	if _, err := tmpFile.WriteString(script); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "%sError escribiendo archivo temporal%s\n", Red, NC)
+		WriteError("escribiendo archivo temporal")
 		os.Exit(1)
 	}
 	tmpFile.Close()
@@ -693,24 +693,24 @@ func doInstallCompletion(shell string) {
 
 	if err := runElevated("install", "-m", "644", tmpPath, dest); err != nil {
 		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "%sError: no se pudo instalar completado en %s%s\n", Red, dest, NC)
+		WriteError("no se pudo instalar completado en %s", dest)
 		os.Exit(1)
 	}
 	os.Remove(tmpPath)
-	WriteLogf("  %s✓ Autocompletado para %s instalado en %s%s\n", Green, shell, dest, NC)
+	WriteSuccess("Autocompletado para %s instalado en %s", shell, dest)
 }
 
 func handleUninstall() {
 	dest := "/usr/local/bin/crush"
 
 	if _, err := os.Stat(dest); os.IsNotExist(err) {
-		WriteLogf("  %s✗ crush no está instalado en %s%s\n", Yellow, dest, NC)
+		WriteWarning("crush no está instalado en %s", dest)
 		return
 	}
 
 	// Try direct remove
 	if err := os.Remove(dest); err == nil {
-		WriteLogf("  %s✓ crush desinstalado de %s%s\n", Green, dest, NC)
+		WriteSuccess("crush desinstalado de %s", dest)
 		return
 	}
 
@@ -720,7 +720,7 @@ func handleUninstall() {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err == nil {
-			WriteLogf("  %s✓ crush desinstalado de %s%s\n", Green, dest, NC)
+			WriteSuccess("crush desinstalado de %s", dest)
 			return
 		}
 	}
@@ -731,12 +731,12 @@ func handleUninstall() {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err == nil {
-			WriteLogf("  %s✓ crush desinstalado de %s%s\n", Green, dest, NC)
+			WriteSuccess("crush desinstalado de %s", dest)
 			return
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "%sError: no se pudo desinstalar (intente con sudo manualmente)%s\n", Red, NC)
+	WriteError("no se pudo desinstalar (intente con sudo manualmente)")
 	os.Exit(1)
 }
 

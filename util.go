@@ -667,10 +667,12 @@ func WriteLog(s string) {
 		logBuf.WriteString(s)
 		logMu.Unlock()
 	} else {
-		fmt.Fprint(os.Stderr, s)
+		lockedStderr.Write([]byte(s))
 	}
 	if logFile != nil {
+		logMu.Lock()
 		logFile.WriteString(s)
+		logMu.Unlock()
 	}
 }
 
@@ -695,6 +697,103 @@ const (
 	BoldBlue = "\033[1;34m"
 	NC       = "\033[0m"
 )
+
+var (
+	lockedStderr = &lockedWriter{w: os.Stderr}
+	lockedStdout = &lockedWriter{w: os.Stdout}
+)
+
+func setOutputWriters(stdout, stderr io.Writer) func() {
+	lockedStdout.mu.Lock()
+	lockedStderr.mu.Lock()
+	oldStdout := lockedStdout.w
+	oldStderr := lockedStderr.w
+	if stdout != nil {
+		lockedStdout.w = stdout
+	}
+	if stderr != nil {
+		lockedStderr.w = stderr
+	}
+	lockedStderr.mu.Unlock()
+	lockedStdout.mu.Unlock()
+
+	return func() {
+		lockedStdout.mu.Lock()
+		lockedStderr.mu.Lock()
+		lockedStdout.w = oldStdout
+		lockedStderr.w = oldStderr
+		lockedStderr.mu.Unlock()
+		lockedStdout.mu.Unlock()
+	}
+}
+
+func cleanConsoleMsg(msg string, prefixes ...string) string {
+	msg = strings.TrimSpace(msg)
+	for _, code := range []string{Red, Yellow, Green, Blue, Bold, BoldBlue, NC} {
+		msg = strings.TrimPrefix(msg, code)
+		msg = strings.TrimSuffix(msg, code)
+	}
+	msg = strings.TrimSpace(msg)
+	for _, prefix := range prefixes {
+		msg = strings.TrimPrefix(msg, prefix)
+	}
+	return strings.TrimSpace(msg)
+}
+
+func formatConsoleMsg(format string, a []any, prefixes ...string) string {
+	var msg string
+	if len(a) > 0 {
+		msg = fmt.Sprintf(format, a...)
+	} else {
+		msg = format
+	}
+	return cleanConsoleMsg(msg, prefixes...)
+}
+
+func writeStderrFormatted(out string) {
+	if loggingActive.Load() {
+		logMu.Lock()
+		logBuf.WriteString(out)
+		logMu.Unlock()
+	} else {
+		lockedStderr.Write([]byte(out))
+	}
+	if logFile != nil {
+		logMu.Lock()
+		logFile.WriteString(out)
+		logMu.Unlock()
+	}
+}
+
+func writeStdoutFormatted(out string) {
+	lockedStdout.Write([]byte(out))
+	if logFile != nil {
+		logMu.Lock()
+		logFile.WriteString(out)
+		logMu.Unlock()
+	}
+}
+
+func WriteWarning(format string, a ...any) {
+	msg := formatConsoleMsg(format, a, "⚠ Advertencia: ", "Warning: ", "Advertencia: ")
+	writeStderrFormatted(Yellow + "⚠ Advertencia: " + msg + NC + "\n")
+}
+
+func WriteError(format string, a ...any) {
+	msg := formatConsoleMsg(format, a, "✗ Error: ", "Error: ", "error: ")
+	writeStderrFormatted(Red + "✗ Error: " + msg + NC + "\n")
+}
+
+func WriteInfo(format string, a ...any) {
+	msg := formatConsoleMsg(format, a, "ℹ ", "Info: ", "Información: ")
+	writeStderrFormatted(Blue + "ℹ " + msg + NC + "\n")
+}
+
+func WriteSuccess(format string, a ...any) {
+	msg := formatConsoleMsg(format, a, "✓ ", "Success: ", "Éxito: ")
+	writeStdoutFormatted(Green + "✓ " + msg + NC + "\n")
+}
+
 
 // --- Helpers ---
 

@@ -210,3 +210,57 @@ func TestMainDecompressScanConfirm(t *testing.T) {
 	}
 }
 
+func TestMainColoredWarningsAndErrors(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "crush_bin")
+	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build falló: %v, salida: %s", err, string(out))
+	}
+
+	t.Run("Warning -s without -c has Yellow color and prefix", func(t *testing.T) {
+		cmd := exec.Command(binPath, "-s", "10", "-l", "dummy.tar")
+		out, _ := cmd.CombinedOutput()
+		output := string(out)
+		wantWarn := Yellow + "⚠ Advertencia: -s solo tiene efecto con -c (ignorado)" + NC
+		if !strings.Contains(output, wantWarn) {
+			t.Errorf("expected colored warning %q in output, got:\n%s", wantWarn, output)
+		}
+	})
+
+	t.Run("Warning -f without -c has Yellow color and prefix", func(t *testing.T) {
+		cmd := exec.Command(binPath, "-f", "gz", "-l", "dummy.tar")
+		out, _ := cmd.CombinedOutput()
+		output := string(out)
+		wantWarn := Yellow + "⚠ Advertencia: -f solo tiene efecto con -c (ignorado)" + NC
+		if !strings.Contains(output, wantWarn) {
+			t.Errorf("expected colored warning %q in output, got:\n%s", wantWarn, output)
+		}
+	})
+
+	t.Run("Error conflict flags has Red color and prefix", func(t *testing.T) {
+		cmd := exec.Command(binPath, "-c", "-d", "file.txt")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Error("expected failure on conflicting flags, got exit 0")
+		}
+		output := string(out)
+		wantPrefix := Red + "✗ Error: "
+		if !strings.Contains(output, wantPrefix) || !strings.Contains(output, "no se pueden combinar") {
+			t.Errorf("expected colored error with %q and 'no se pueden combinar', got:\n%s", wantPrefix, output)
+		}
+	})
+
+	t.Run("Error missing mode has Red color and prefix", func(t *testing.T) {
+		cmd := exec.Command(binPath, "file.txt")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Error("expected failure on missing mode, got exit 0")
+		}
+		output := string(out)
+		wantPrefix := Red + "✗ Error: "
+		if !strings.Contains(output, wantPrefix) || !strings.Contains(output, "debe especificar un modo de operación") {
+			t.Errorf("expected colored error with %q and 'debe especificar un modo de operación', got:\n%s", wantPrefix, output)
+		}
+	})
+}
+
+

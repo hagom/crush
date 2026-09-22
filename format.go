@@ -173,6 +173,26 @@ var knownTarSuffixes = []struct {
 	{".tar.lrz", Lrz}, {".tar.lz4", Lz4}, {".tar.br", Br},
 }
 
+func HasTarSuffix(filename string) bool {
+	lower := strings.ToLower(filename)
+	for _, entry := range knownTarSuffixes {
+		if strings.HasSuffix(lower, entry.suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func StripTarSuffix(filename string) string {
+	lower := strings.ToLower(filename)
+	for _, entry := range knownTarSuffixes {
+		if strings.HasSuffix(lower, entry.suffix) {
+			return filename[:len(filename)-len(entry.suffix)]
+		}
+	}
+	return filename
+}
+
 func ParseFormatFromExt(filename string) (Format, bool) {
 	lower := strings.ToLower(filename)
 	for _, entry := range knownTarSuffixes {
@@ -194,13 +214,7 @@ func DetectFormat(filename string) (FormatInfo, error) {
 		return FormatInfo{}, fmt.Errorf("formato no reconocido: %s", filename)
 	}
 	fi := FormatInfoFromFormat(ext)
-	lower := strings.ToLower(filename)
-	fi.IsTar = strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") ||
-		strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".txz") ||
-		strings.HasSuffix(lower, ".tar.bz2") || strings.HasSuffix(lower, ".tbz2") ||
-		strings.HasSuffix(lower, ".tar.bz3") || strings.HasSuffix(lower, ".tar.zst") ||
-		strings.HasSuffix(lower, ".tzst") || strings.HasSuffix(lower, ".tar.lz") ||
-		strings.HasSuffix(lower, ".tlz") || strings.HasSuffix(lower, ".tar.lrz") ||
-		strings.HasSuffix(lower, ".tar.lz4") || strings.HasSuffix(lower, ".tar.br")
+	fi.IsTar = HasTarSuffix(filename)
 	return fi, nil
 }
+

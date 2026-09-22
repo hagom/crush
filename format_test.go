@@ -290,4 +290,107 @@ func TestDecompressMultithreadFlags(t *testing.T) {
 	}
 }
 
+func TestHasTarSuffix(t *testing.T) {
+	tests := []struct {
+		filename string
+		want     bool
+	}{
+		{"archive.tar.gz", true},
+		{"backup.tgz", true},
+		{"data.tar.xz", true},
+		{"PHOTO.TAR.XZ", true},
+		{"package.txz", true},
+		{"archive.tar.bz2", true},
+		{"backup.tbz2", true},
+		{"bundle.tar.bz3", true},
+		{"mydata.tar.zst", true},
+		{"image.tzst", true},
+		{"doc.tar.lz", true},
+		{"doc.tlz", true},
+		{"file.tar.lrz", true},
+		{"pack.tar.lz4", true},
+		{"web.tar.br", true},
+		{"Project.Tgz", true},
+		{"/path/to/archive.TAR.GZ", true},
+		// Non-tar files
+		{"file.tar", false},
+		{"file.gz", false},
+		{"file.xz", false},
+		{"file.bz2", false},
+		{"file.bz3", false},
+		{"file.zst", false},
+		{"file.lz", false},
+		{"file.lrz", false},
+		{"file.lz4", false},
+		{"file.br", false},
+		{"file.zip", false},
+		{"file.7z", false},
+		{"file.rar", false},
+		{"file.txt", false},
+		{"archive", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			got := HasTarSuffix(tt.filename)
+			if got != tt.want {
+				t.Errorf("HasTarSuffix(%q) = %v, want %v", tt.filename, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStripTarSuffix(t *testing.T) {
+	tests := []struct {
+		filename string
+		want     string
+	}{
+		{"archive.tar.gz", "archive"},
+		{"backup.tgz", "backup"},
+		{"data.tar.xz", "data"},
+		{"PHOTO.TAR.XZ", "PHOTO"},
+		{"package.txz", "package"},
+		{"archive.tar.bz2", "archive"},
+		{"backup.tbz2", "backup"},
+		{"bundle.tar.bz3", "bundle"},
+		{"mydata.tar.zst", "mydata"},
+		{"image.tzst", "image"},
+		{"doc.tar.lz", "doc"},
+		{"doc.tlz", "doc"},
+		{"file.tar.lrz", "file"},
+		{"pack.tar.lz4", "pack"},
+		{"web.tar.br", "web"},
+		{"Project.Tgz", "Project"},
+		{"/path/to/archive.TAR.GZ", "/path/to/archive"},
+		// Non-tar files should remain unchanged
+		{"file.tar", "file.tar"},
+		{"file.gz", "file.gz"},
+		{"file.xz", "file.xz"},
+		{"file.bz2", "file.bz2"},
+		{"file.bz3", "file.bz3"},
+		{"file.zst", "file.zst"},
+		{"file.lz", "file.lz"},
+		{"file.lrz", "file.lrz"},
+		{"file.lz4", "file.lz4"},
+		{"file.br", "file.br"},
+		{"file.zip", "file.zip"},
+		{"file.7z", "file.7z"},
+		{"file.rar", "file.rar"},
+		{"file.txt", "file.txt"},
+		{"archive", "archive"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			got := StripTarSuffix(tt.filename)
+			if got != tt.want {
+				t.Errorf("StripTarSuffix(%q) = %q, want %q", tt.filename, got, tt.want)
+			}
+		})
+	}
+}
+
+
 

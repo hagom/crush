@@ -760,18 +760,8 @@ func resolveTargetDir(outputDir, file string) string {
 }
 
 
-var tarSuffixes = []string{".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2",
-	".tar.bz3", ".tar.zst", ".tzst", ".tar.lz", ".tlz",
-	".tar.lrz", ".tar.lz4", ".tar.br"}
-
 func stripTarExt(file string) string {
-	lower := strings.ToLower(file)
-	for _, s := range tarSuffixes {
-		if strings.HasSuffix(lower, s) {
-			return file[:len(file)-len(s)]
-		}
-	}
-	return file
+	return StripTarSuffix(file)
 }
 
 var singleCompExts = []string{".gz", ".xz", ".bz2", ".bz3", ".zst", ".lz", ".lrz", ".lz4", ".br"}

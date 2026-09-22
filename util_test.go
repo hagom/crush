@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -897,5 +898,88 @@ func TestResolveDecompressDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSetPipeCapacity(t *testing.T) {
+	t.Run("nil and non-file safety", func(t *testing.T) {
+		setPipeCapacity(nil, nil, 1048576)
+		buf := &bytes.Buffer{}
+		setPipeCapacity(buf, buf, 1048576)
+		setPipeCapacity(nil, nil, -1)
+		setPipeCapacity(nil, nil, 0)
+	})
+
+	t.Run("real os pipe capacity", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		defer w.Close()
+
+		defaultCap := getPipeCapacity(r, w)
+		wantCap := 1048576 // 1 MiB
+
+		setPipeCapacity(r, w, wantCap)
+		gotCap := getPipeCapacity(r, w)
+
+		if runtime.GOOS == "linux" {
+			if defaultCap > 0 && defaultCap < wantCap {
+				if gotCap != wantCap {
+					t.Errorf("getPipeCapacity() = %d, want %d", gotCap, wantCap)
+				}
+			}
+		}
+	})
+
+	t.Run("set capacity via reader only", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		defer w.Close()
+
+		wantCap := 1048576
+		setPipeCapacity(r, nil, wantCap)
+		gotCap := getPipeCapacity(r, nil)
+
+		if runtime.GOOS == "linux" {
+			if gotCap != wantCap {
+				t.Errorf("getPipeCapacity(r, nil) = %d, want %d", gotCap, wantCap)
+			}
+		}
+	})
+
+	t.Run("set capacity via writer only", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		defer w.Close()
+
+		wantCap := 1048576
+		setPipeCapacity(nil, w, wantCap)
+		gotCap := getPipeCapacity(nil, w)
+
+		if runtime.GOOS == "linux" {
+			if gotCap != wantCap {
+				t.Errorf("getPipeCapacity(nil, w) = %d, want %d", gotCap, wantCap)
+			}
+		}
+	})
+
+	t.Run("pipeline sets intermediate pipe capacity", func(t *testing.T) {
+		cmd1 := exec.Command("echo", "pipeline test")
+		cmd2 := exec.Command("cat")
+		var out bytes.Buffer
+		if err := pipeline(&out, nil, cmd1, cmd2); err != nil {
+			t.Fatalf("pipeline failed: %v", err)
+		}
+		if !strings.Contains(out.String(), "pipeline test") {
+			t.Errorf("pipeline output = %q, want containing 'pipeline test'", out.String())
+		}
+	})
 }
 

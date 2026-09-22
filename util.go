@@ -1456,6 +1456,19 @@ func (lw *lockedWriter) Write(p []byte) (int, error) {
 	return w.Write(p)
 }
 
+const defaultPipeCapacity = 1048576 // 1 MiB
+
+func setPipeCapacity(r io.Reader, w io.Writer, size int) {
+	if size <= 0 {
+		return
+	}
+	setPipeCapacityOS(r, w, size)
+}
+
+func getPipeCapacity(r io.Reader, w io.Writer) int {
+	return getPipeCapacityOS(r, w)
+}
+
 func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	if len(cmds) == 0 {
 		return nil
@@ -1466,6 +1479,7 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 		if err != nil {
 			return fmt.Errorf("pipeline pipe %d: %w", i, err)
 		}
+		setPipeCapacity(cmds[i+1].Stdin, cmds[i].Stdout, defaultPipeCapacity)
 	}
 	cmds[len(cmds)-1].Stdout = stdout
 	if stderr != nil {

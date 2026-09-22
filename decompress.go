@@ -513,8 +513,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 	} else {
-		// Decompress the compression layer, writing the tar into dir
-		tarName := GetUniqueName(filepath.Join(dir, filepath.Base(stripTarExt(file))), "tar")
+		tarExtract := exec.Command("tar", "-xf", "-", "-C", dir)
 		decompCmd, closer, err := pipeCmdForParts(info, parts, opts.Progress, fp)
 		if err != nil {
 			return fmt.Errorf("Error preparando descompresión de %s: %w", file, err)
@@ -522,28 +521,9 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		if closer != nil {
 			defer closer.Close()
 		}
-		tarFile, err := os.Create(tarName)
-		if err != nil {
-			return fmt.Errorf("Error creando tar temporal: %w", err)
-		}
-		defer func() {
-			tarFile.Close()
-			os.Remove(tarName)
-		}()
-		decompCmd.Stdout = tarFile
-		decompCmd.Stderr = stderrFor(opts.Progress)
-		if err := decompCmd.Run(); err != nil {
-			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
-		}
-		_ = tarFile.Close()
 
-		if info.IsTar {
-			extractCmd := exec.Command("tar", "-xf", tarName, "-C", dir)
-			extractCmd.Stdout = stdoutFor(opts.Progress)
-			extractCmd.Stderr = stderrFor(opts.Progress)
-			if err := extractCmd.Run(); err != nil {
-				return fmt.Errorf("Error extrayendo tar de %s: %w", tarName, err)
-			}
+		if err := pipeline(stdoutFor(opts.Progress), stderrFor(opts.Progress), decompCmd, tarExtract); err != nil {
+			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 	}
 

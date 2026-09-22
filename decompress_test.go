@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDecompressNoFiles(t *testing.T) {
@@ -1077,6 +1079,198 @@ func TestDecompressRecursivePreservesDirectoryPaths(t *testing.T) {
 	unwantedInParts := filepath.Join(partsDir, "part.txt")
 	if _, err := os.Stat(unwantedInParts); err == nil {
 		t.Errorf("el archivo no debería estar dentro de _parts: %s", unwantedInParts)
+	}
+}
+
+func TestDecompressTarNoIntermediateDiskFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "payload.txt")
+	chunk := []byte(strings.Repeat("Crush streaming pipe decompression test data without temporary tar on disk!\n", 1000))
+	f, err := os.Create(txtFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 30; i++ {
+		if _, err := f.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.Close()
+
+	tarGzFile := filepath.Join(tmpDir, "archive.tar.gz")
+	cmd := exec.Command("tar", "-czf", tarGzFile, "-C", tmpDir, "payload.txt")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "extracted")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := os.Stat(tarGzFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pt := NewProgressTracker(fi.Size(), 1)
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+		Progress:  pt,
+	}
+
+	var foundIntermediateTar atomic.Bool
+	stopWatcher := make(chan struct{})
+	watcherDone := make(chan struct{})
+
+	go func() {
+		defer close(watcherDone)
+		ticker := time.NewTicker(500 * time.Microsecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopWatcher:
+				return
+			case <-ticker.C:
+				matches, err := filepath.Glob(filepath.Join(outDir, "*.tar"))
+				if err == nil && len(matches) > 0 {
+					foundIntermediateTar.Store(true)
+				}
+			}
+		}
+	}()
+
+	fp := &FileProgress{Name: filepath.Base(tarGzFile), Size: fi.Size()}
+	decompErr := decompressFile(tarGzFile, opts, fp)
+	close(stopWatcher)
+	<-watcherDone
+
+	if decompErr != nil {
+		t.Fatalf("decompressFile falló: %v", decompErr)
+	}
+
+	if foundIntermediateTar.Load() {
+		t.Errorf("decompressTar escribió un archivo .tar intermedio a disco en %s", outDir)
+	}
+
+	extractedFile := filepath.Join(outDir, "payload.txt")
+	extFi, err := os.Stat(extractedFile)
+	if err != nil {
+		t.Fatalf("archivo extraído no encontrado: %v", err)
+	}
+
+	origFi, _ := os.Stat(txtFile)
+	if extFi.Size() != origFi.Size() {
+		t.Errorf("tamaño extraído = %d, esperado = %d", extFi.Size(), origFi.Size())
+	}
+}
+
+func TestDecompressTarCorruptArchive(t *testing.T) {
+	tmpDir := t.TempDir()
+	corruptTarGz := filepath.Join(tmpDir, "corrupt.tar.gz")
+	// Write invalid gzip payload (starts with magic 0x1f 0x8b but corrupted data)
+	if err := os.WriteFile(corruptTarGz, []byte("\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xffcorrupt_data_payload_that_fails_gunzip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+
+	err := decompressFile(corruptTarGz, opts, nil)
+	if err == nil {
+		t.Error("esperaba error al descomprimir tar.gz corrupto, pero no hubo error")
+	}
+
+	// Verify no intermediate .tar file is left behind
+	matches, _ := filepath.Glob(filepath.Join(outDir, "*.tar"))
+	if len(matches) > 0 {
+		t.Errorf("se encontraron archivos .tar residuales: %v", matches)
+	}
+}
+
+func TestDecompressTarSplitStreaming(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "file.txt")
+	content := []byte(strings.Repeat("split streaming data block\n", 5000))
+	if err := os.WriteFile(txtFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fullTarGz := filepath.Join(tmpDir, "split_arch.tar.gz")
+	cmd := exec.Command("tar", "-czf", fullTarGz, "-C", tmpDir, "file.txt")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	gzData, err := os.ReadFile(fullTarGz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(fullTarGz)
+
+	mid := len(gzData) / 2
+	part00 := filepath.Join(tmpDir, "split_arch.tar.gz")
+	part01 := filepath.Join(tmpDir, "split_arch.tar.gz.part01")
+	if err := os.WriteFile(part00, gzData[:mid], 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part01, gzData[mid:], 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out_split")
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+
+	var foundIntermediateTar atomic.Bool
+	stopWatcher := make(chan struct{})
+	watcherDone := make(chan struct{})
+
+	go func() {
+		defer close(watcherDone)
+		ticker := time.NewTicker(500 * time.Microsecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopWatcher:
+				return
+			case <-ticker.C:
+				matches, err := filepath.Glob(filepath.Join(outDir, "*.tar"))
+				if err == nil && len(matches) > 0 {
+					foundIntermediateTar.Store(true)
+				}
+			}
+		}
+	}()
+
+	err = decompressFile(part00, opts, nil)
+	close(stopWatcher)
+	<-watcherDone
+
+	if err != nil {
+		t.Fatalf("descompresión de split tar.gz falló: %v", err)
+	}
+
+	if foundIntermediateTar.Load() {
+		t.Errorf("se detectó un archivo .tar intermedio durante la descompresión split")
+	}
+
+	extractedFile := filepath.Join(outDir, "file.txt")
+	gotData, err := os.ReadFile(extractedFile)
+	if err != nil {
+		t.Fatalf("no se pudo leer archivo extraído: %v", err)
+	}
+	if !bytes.Equal(gotData, content) {
+		t.Errorf("contenido extraído no coincide con el original")
 	}
 }
 

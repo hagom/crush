@@ -813,4 +813,112 @@ func containsArg(args []string, target string) bool {
 	return false
 }
 
+func TestCompressParallelLPTScheduling(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	f500b := filepath.Join(tmpDir, "f500b.txt")
+	f50kb := filepath.Join(tmpDir, "f50kb.txt")
+	f5kb := filepath.Join(tmpDir, "f5kb.txt")
+	f200kb := filepath.Join(tmpDir, "f200kb.txt")
+
+	if err := os.WriteFile(f500b, bytes.Repeat([]byte("a"), 500), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f50kb, bytes.Repeat([]byte("b"), 50*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f5kb, bytes.Repeat([]byte("c"), 5*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f200kb, bytes.Repeat([]byte("d"), 200*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	files := []string{f500b, f50kb, f5kb, f200kb}
+	outDir := filepath.Join(tmpDir, "out")
+
+	totalSize := int64(500 + 50*1024 + 5*1024 + 200*1024)
+	pt := NewProgressTracker(totalSize, len(files))
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Parallel:  2,
+		Progress:  pt,
+	}
+
+	outPaths, err := compressParallel(files, opts)
+	if err != nil {
+		t.Fatalf("compressParallel falló: %v", err)
+	}
+	if len(outPaths) != 4 {
+		t.Fatalf("se esperaban 4 archivos de salida, obtenido %d", len(outPaths))
+	}
+
+	wantOrder := []string{"f200kb.txt", "f50kb.txt", "f5kb.txt", "f500b.txt"}
+	wantSizes := []int64{200 * 1024, 50 * 1024, 5 * 1024, 500}
+
+	if len(pt.files) != len(wantOrder) {
+		t.Fatalf("pt.files tiene %d elementos, se esperaban %d", len(pt.files), len(wantOrder))
+	}
+
+	for i, wantName := range wantOrder {
+		if pt.files[i].Name != wantName {
+			t.Errorf("pos %d: progreso archivo %s, se esperaba %s", i, pt.files[i].Name, wantName)
+		}
+		if pt.files[i].Size != wantSizes[i] {
+			t.Errorf("pos %d: tamaño %d, se esperaba %d", i, pt.files[i].Size, wantSizes[i])
+		}
+		if filepath.Base(files[i]) != wantName {
+			t.Errorf("pos %d: slice files ordenado %s, se esperaba %s", i, filepath.Base(files[i]), wantName)
+		}
+	}
+
+	fEq1 := filepath.Join(tmpDir, "eq1.txt")
+	fEq2 := filepath.Join(tmpDir, "eq2.txt")
+	if err := os.WriteFile(fEq1, bytes.Repeat([]byte("1"), 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fEq2, bytes.Repeat([]byte("2"), 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	filesEq := []string{fEq1, fEq2}
+	ptEq := NewProgressTracker(2048, 2)
+	optsEq := CompressOptions{
+		Format:    Gz,
+		OutputDir: filepath.Join(tmpDir, "out_eq"),
+		KeepOrig:  true,
+		Parallel:  2,
+		Progress:  ptEq,
+	}
+	_, err = compressParallel(filesEq, optsEq)
+	if err != nil {
+		t.Fatalf("compressParallel estabilidad falló: %v", err)
+	}
+	if ptEq.files[0].Name != "eq1.txt" || ptEq.files[1].Name != "eq2.txt" {
+		t.Errorf("estabilidad no preservada en archivos de igual tamaño: got [%s, %s]", ptEq.files[0].Name, ptEq.files[1].Name)
+	}
+
+	fNon1 := filepath.Join(tmpDir, "nonexistent1.txt")
+	fNon2 := filepath.Join(tmpDir, "nonexistent2.txt")
+	fReal := filepath.Join(tmpDir, "real.txt")
+	if err := os.WriteFile(fReal, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	filesNon := []string{fNon1, fReal, fNon2}
+	ptNon := NewProgressTracker(4, 3)
+	optsNon := CompressOptions{
+		Format:    Gz,
+		OutputDir: filepath.Join(tmpDir, "out_non"),
+		KeepOrig:  true,
+		Parallel:  2,
+		Progress:  ptNon,
+	}
+	_, _ = compressParallel(filesNon, optsNon)
+	if ptNon.files[0].Name != "real.txt" || ptNon.files[1].Name != "nonexistent1.txt" || ptNon.files[2].Name != "nonexistent2.txt" {
+		t.Errorf("estabilidad de fallos de stat no preservada: got [%s, %s, %s]", ptNon.files[0].Name, ptNon.files[1].Name, ptNon.files[2].Name)
+	}
+}
+
 

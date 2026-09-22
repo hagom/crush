@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -599,6 +600,18 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 }
 
 func compressParallel(files []string, opts CompressOptions) ([]string, error) {
+	fileSizes := make(map[string]int64, len(files))
+	for _, f := range files {
+		if fi, err := os.Stat(f); err == nil {
+			fileSizes[f] = fi.Size()
+		} else {
+			fileSizes[f] = -1
+		}
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		return fileSizes[files[i]] > fileSizes[files[j]]
+	})
+
 	ext := opts.Format.String()
 	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
@@ -617,15 +630,16 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 
 	fps := make([]*FileProgress, len(files))
 	for i, f := range files {
-		fi, err := os.Stat(f)
 		var sz int64
-		if err == nil {
-			sz = fi.Size()
+		if s, ok := fileSizes[f]; ok && s >= 0 {
+			sz = s
 		}
 		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz}
 		fps[i].SetStatus("waiting")
 	}
-	opts.Progress.SetFiles(fps)
+	if opts.Progress != nil {
+		opts.Progress.SetFiles(fps)
+	}
 
 	startTime := time.Now()
 

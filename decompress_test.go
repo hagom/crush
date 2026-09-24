@@ -1386,6 +1386,38 @@ func TestPasswordProtected7z(t *testing.T) {
 	}
 }
 
+func TestListArchiveOutputsPasswordProtected(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "secret.txt")
+	if err := os.WriteFile(src, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	archive7z := filepath.Join(tmpDir, "archive.7z")
+	cmd := exec.Command(sevenzBin(), "a", "-psecretpass", "-mhe=on", archive7z, src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("error creando 7z cifrado: %v, out: %s", err, string(out))
+	}
+
+	// Sin password no puede leer cabecera cifrada
+	membersNoPass := listArchiveOutputs(archive7z, tmpDir, FormatInfo{Format: SevenZ, Tool: sevenzBin()})
+	if len(membersNoPass) != 0 {
+		t.Errorf("sin contraseña no debería listar miembros de cabecera cifrada: %v", membersNoPass)
+	}
+
+	// Con password devuelve los miembros
+	membersWithPass := listArchiveOutputs(archive7z, tmpDir, FormatInfo{Format: SevenZ, Tool: sevenzBin()}, "secretpass")
+	if len(membersWithPass) == 0 {
+		t.Fatalf("con contraseña debería listar miembros del archivo cifrado")
+	}
+	expected := filepath.Join(tmpDir, "secret.txt")
+	if membersWithPass[0] != expected {
+		t.Errorf("esperado %s, obtenido %s", expected, membersWithPass[0])
+	}
+}
+
 func TestPasswordProtectedZip(t *testing.T) {
 	tmpDir := t.TempDir()
 	src := filepath.Join(tmpDir, "secretzip.txt")

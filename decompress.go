@@ -215,7 +215,11 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	return nil
 }
 
-func listArchiveOutputs(file string, dir string, info FormatInfo) []string {
+func listArchiveOutputs(file string, dir string, info FormatInfo, passwords ...string) []string {
+	password := ""
+	if len(passwords) > 0 {
+		password = passwords[0]
+	}
 	if info.Tool == "" {
 		if fi, err := DetectFormat(file); err == nil {
 			info = fi
@@ -229,14 +233,14 @@ func listArchiveOutputs(file string, dir string, info FormatInfo) []string {
 		return nil
 	}
 	if info.Format == SevenZ || info.Format == Zip {
-		if members, ok := listSevenZipMembers(file); ok {
+		if members, ok := listSevenZipMembers(file, password); ok {
 			return resolveOutputs(members, dir)
 		}
 		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
 		return nil
 	}
 	if info.Format == Rar {
-		if members, ok := listRarMembers(file); ok {
+		if members, ok := listRarMembers(file, password); ok {
 			return resolveOutputs(members, dir)
 		}
 		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
@@ -273,12 +277,17 @@ func listTarMembers(file string) ([]string, bool) {
 	return members, len(members) > 0
 }
 
-func listSevenZipMembers(file string) ([]string, bool) {
+func listSevenZipMembers(file string, password string) ([]string, bool) {
 	sevenz := sevenzBin()
 	if !hasTool(sevenz) {
 		return nil, false
 	}
-	cmd := exec.Command(sevenz, "l", "-ba", "-slt", "--", file)
+	args := []string{"l", "-ba", "-slt"}
+	if password != "" {
+		args = append(args, "-p"+password)
+	}
+	args = append(args, "--", file)
+	cmd := exec.Command(sevenz, args...)
 	var out strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
@@ -293,12 +302,17 @@ func listSevenZipMembers(file string) ([]string, bool) {
 	return members, len(members) > 0
 }
 
-func listRarMembers(file string) ([]string, bool) {
+func listRarMembers(file string, password string) ([]string, bool) {
 	tool := rarBin()
 	if !hasTool(tool) {
 		return nil, false
 	}
-	cmd := exec.Command(tool, "lb", file)
+	args := []string{"lb"}
+	if password != "" {
+		args = append(args, "-p"+password)
+	}
+	args = append(args, file)
+	cmd := exec.Command(tool, args...)
 	var out strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
@@ -387,7 +401,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		}
 	}
 
-	outputs := listArchiveOutputs(file, dir, info)
+	outputs := listArchiveOutputs(file, dir, info, opts.Password)
 	preExisting := make(map[string]bool, len(outputs))
 	for _, o := range outputs {
 		if _, err := os.Stat(o); err == nil {

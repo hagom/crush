@@ -72,6 +72,21 @@ func TestReorderArgs(t *testing.T) {
 			args: []string{"crush", "extra.txt", "-i", "list.txt"},
 			want: []string{"crush", "-i", "list.txt", "extra.txt"},
 		},
+		{
+			name: "watch flag with value",
+			args: []string{"crush", "-watch", "/tmp", "-c", "-f", "gz"},
+			want: []string{"crush", "-watch", "/tmp", "-c", "-f", "gz"},
+		},
+		{
+			name: "watch flag after positional",
+			args: []string{"crush", "extra.txt", "-watch", "/tmp"},
+			want: []string{"crush", "-watch", "/tmp", "extra.txt"},
+		},
+		{
+			name: "double dash watch flag",
+			args: []string{"crush", "--watch", "/tmp", "-c"},
+			want: []string{"crush", "--watch", "/tmp", "-c"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

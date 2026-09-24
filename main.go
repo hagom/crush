@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // knownShortFlags lists single-dash short flags that can be combined (-tkv).
@@ -34,6 +37,8 @@ func flagTakesValue(a string) bool {
 	case a == "-f", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion", a == "-filter", a == "--filter":
 		return true
 	case a == "-bench-size" || a == "--bench-size":
+		return true
+	case a == "-watch" || a == "--watch":
 		return true
 	case a == "-exclude" || strings.HasPrefix(a, "-exclude="):
 		return true
@@ -228,6 +233,7 @@ func main() {
 	flag.IntVar(&splitSizeVal, "s", 0, "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*)")
 	splitSize := &splitSizeVal
 	compressionOpts := flag.String("opts", "", "Opciones adicionales para la herramienta de compresión")
+	watchDir := flag.String("watch", "", "Monitorear directorio para procesar archivos nuevos continuamente")
 
 	hashFlag := flag.Bool("hash", false, "Generar archivo de checksum SHA-256 (.sha256)")
 	verifyFlag := flag.Bool("verify", false, "Verificar checksum SHA-256 si existe archivo .sha256")
@@ -342,9 +348,9 @@ func main() {
 		os.Exit(1)
 	}
 	if installModeCount > 0 {
-		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *verifyFlag, *readFlag, *benchFlag} {
+		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *verifyFlag, *readFlag, *benchFlag, *watchDir != ""} {
 			if m {
-				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -r o --bench")
+				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -verify, -r, --bench o -watch")
 				os.Exit(1)
 			}
 		}
@@ -352,6 +358,10 @@ func main() {
 
 	// Check --bench conflicts with operation modes
 	if *benchFlag {
+		if *watchDir != "" {
+			WriteError("--bench no se puede combinar con -watch")
+			os.Exit(1)
+		}
 		for _, m := range []struct {
 			v    *bool
 			name string
@@ -362,6 +372,25 @@ func main() {
 				WriteError("--bench no se puede combinar con %s", m.name)
 				os.Exit(1)
 			}
+		}
+	}
+
+	// Validations for -watch
+	if *watchDir != "" {
+		if !*compressFlag && !*decompressFlag {
+			WriteError("-watch requiere -c (comprimir) o -d (descomprimir)")
+			os.Exit(1)
+		}
+		fi, err := os.Stat(*watchDir)
+		if err != nil || !fi.IsDir() {
+			WriteError("directorio de observación no válido: %s", *watchDir)
+			os.Exit(1)
+		}
+		if *compressFlag && *formatStr == "" {
+			WriteError("debe especificar formato con -f")
+			WriteInfo("Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br")
+			printHelp()
+			os.Exit(1)
 		}
 	}
 
@@ -424,7 +453,9 @@ func main() {
 		}
 	}
 	opMode := *compressFlag || *decompressFlag || *listFlag || *readFlag || *testFlag || *verifyFlag
-	if len(files) == 0 && stdinIsPipe && *formatStr != "" && (*compressFlag || *decompressFlag) {
+	if *watchDir != "" {
+		// Modo watcher: los archivos se procesan según se detectan en el directorio
+	} else if len(files) == 0 && stdinIsPipe && *formatStr != "" && (*compressFlag || *decompressFlag) {
 		// Read from stdin pipe
 	} else if len(files) == 0 && *decompressFlag {
 		found, err := FindDecompressibleFiles(".")
@@ -511,6 +542,76 @@ func main() {
 			WriteError("%v", err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// Handle -watch mode
+	if *watchDir != "" {
+		var mode WatcherMode
+		var cOpts CompressOptions
+		var dOpts DecompressOptions
+
+		outDir := *outputDir
+		if !outDirSet {
+			outDir = *watchDir
+		}
+
+		if *compressFlag {
+			mode = WatchModeCompress
+			format, err := ParseFormat(*formatStr)
+			if err != nil {
+				WriteError("%v", err)
+				printHelp()
+				os.Exit(1)
+			}
+			parallel := NCPU()
+			if parallel < 2 {
+				parallel = 2
+			}
+			cOpts = CompressOptions{
+				Format:          format,
+				DryRun:          *dryRun,
+				Verbose:         *verbose,
+				OutputDir:       outDir,
+				SplitSize:       *splitSize,
+				KeepOrig:        *keepOrig,
+				Parallel:        parallel,
+				CompressionOpts: *compressionOpts,
+				Exclude:         exclude,
+				Combine:         *combineFlag,
+			}
+		} else if *decompressFlag {
+			mode = WatchModeDecompress
+			parallel := NCPU()
+			if parallel < 2 {
+				parallel = 2
+			}
+			dOpts = DecompressOptions{
+				DryRun:    *dryRun,
+				Verbose:   *verbose,
+				OutputDir: outDir,
+				KeepOrig:  *keepOrig,
+				Force:     *force,
+				Parallel:  parallel,
+			}
+		}
+
+		wOpts := WatcherOptions{
+			Dir:            *watchDir,
+			Mode:           mode,
+			CompressOpts:   cOpts,
+			DecompressOpts: dOpts,
+		}
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
+		WriteInfo("Iniciando observador de directorios en %s...", *watchDir)
+		if err := RunWatcher(ctx, wOpts); err != nil && ctx.Err() == nil {
+			WriteError("observador finalizado con error: %v", err)
+			os.Exit(1)
+		}
+		WriteInfo("Observador detenido.")
 		return
 	}
 
@@ -854,6 +955,8 @@ func printHelp() {
 	w(BoldBlue, "Uso:\n")
 	w(Yellow, "  crush -c -f FORMATO [opciones] archivo...\n")
 	w(Yellow, "  crush -d [opciones] archivo...\n")
+	w(Yellow, "  crush -watch DIRECTORIO -c -f FORMATO [opciones]\n")
+	w(Yellow, "  crush -watch DIRECTORIO -d [opciones]\n")
 	w(Yellow, "  crush -l archivo...\n")
 	w(Yellow, "  crush -t archivo...\n")
 	w(Yellow, "  crush -r archivo...\n")
@@ -866,6 +969,8 @@ func printHelp() {
 	fmt.Print("                   Comprimir archivos\n")
 	w(Yellow, "  -d")
 	fmt.Print("                   Descomprimir archivos\n")
+	w(Yellow, "  -watch DIR")
+	fmt.Print("           Monitorear directorio para procesar archivos nuevos\n")
 	w(Yellow, "  -l")
 	fmt.Print("                   Listar contenido de archivo comprimido\n")
 	w(Yellow, "  -t")

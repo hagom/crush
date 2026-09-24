@@ -1477,6 +1477,142 @@ func TestDecompressPasswordWarningOnStream(t *testing.T) {
 	}
 }
 
+func TestDecompressSelectiveFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	docFile := filepath.Join(srcDir, "doc.txt")
+	imgFile := filepath.Join(srcDir, "image.png")
+	if err := os.WriteFile(docFile, []byte("document content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imgFile, []byte("image content png"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Tar archive (.tar.gz)
+	tarArchive := filepath.Join(tmpDir, "archive.tar.gz")
+	cmd := exec.Command("tar", "-czf", tarArchive, "-C", srcDir, "doc.txt", "image.png")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("creando tar.gz de prueba: %v", err)
+	}
+
+	tarOutDir := filepath.Join(tmpDir, "out_tar")
+	optsTar := DecompressOptions{
+		OutputDir: tarOutDir,
+		KeepOrig:  true,
+		Filter:    "*.txt",
+	}
+	if err := DoDecompress([]string{tarArchive}, optsTar); err != nil {
+		t.Fatalf("DoDecompress tar.gz con filter falló: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tarOutDir, "doc.txt")); err != nil {
+		t.Errorf("doc.txt debería haber sido extraído: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tarOutDir, "image.png")); !os.IsNotExist(err) {
+		t.Errorf("image.png NO debería haber sido extraído con filter *.txt")
+	}
+
+	// 2. Plain Tar archive (.tar)
+	plainTarArchive := filepath.Join(tmpDir, "archive.tar")
+	cmdPlain := exec.Command("tar", "-cf", plainTarArchive, "-C", srcDir, "doc.txt", "image.png")
+	if err := cmdPlain.Run(); err != nil {
+		t.Fatalf("creando tar de prueba: %v", err)
+	}
+
+	plainTarOutDir := filepath.Join(tmpDir, "out_plain_tar")
+	optsPlainTar := DecompressOptions{
+		OutputDir: plainTarOutDir,
+		KeepOrig:  true,
+		Filter:    "*.txt",
+	}
+	if err := DoDecompress([]string{plainTarArchive}, optsPlainTar); err != nil {
+		t.Fatalf("DoDecompress plain tar con filter falló: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(plainTarOutDir, "doc.txt")); err != nil {
+		t.Errorf("doc.txt debería haber sido extraído en plain tar: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(plainTarOutDir, "image.png")); !os.IsNotExist(err) {
+		t.Errorf("image.png NO debería haber sido extraído en plain tar con filter *.txt")
+	}
+
+	// 3. Zip archive (.zip)
+	if hasTool("zip") || hasTool(sevenzBin()) {
+		zipArchive := filepath.Join(tmpDir, "archive.zip")
+		var cmdZip *exec.Cmd
+		if hasTool("zip") {
+			cmdZip = exec.Command("zip", "-j", zipArchive, docFile, imgFile)
+		} else {
+			cmdZip = exec.Command(sevenzBin(), "a", "-tzip", zipArchive, docFile, imgFile)
+		}
+		if err := cmdZip.Run(); err == nil {
+			zipOutDir := filepath.Join(tmpDir, "out_zip")
+			optsZip := DecompressOptions{
+				OutputDir: zipOutDir,
+				KeepOrig:  true,
+				Filter:    "*.txt",
+			}
+			if err := DoDecompress([]string{zipArchive}, optsZip); err != nil {
+				t.Fatalf("DoDecompress zip con filter falló: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(zipOutDir, "doc.txt")); err != nil {
+				t.Errorf("doc.txt debería haber sido extraído de zip: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(zipOutDir, "image.png")); !os.IsNotExist(err) {
+				t.Errorf("image.png NO debería haber sido extraído de zip con filter *.txt")
+			}
+		}
+	}
+
+	// 4. 7z archive (.7z)
+	if hasTool(sevenzBin()) {
+		szArchive := filepath.Join(tmpDir, "archive.7z")
+		cmd7z := exec.Command(sevenzBin(), "a", szArchive, docFile, imgFile)
+		if err := cmd7z.Run(); err == nil {
+			szOutDir := filepath.Join(tmpDir, "out_7z")
+			opts7z := DecompressOptions{
+				OutputDir: szOutDir,
+				KeepOrig:  true,
+				Filter:    "*.txt",
+			}
+			if err := DoDecompress([]string{szArchive}, opts7z); err != nil {
+				t.Fatalf("DoDecompress 7z con filter falló: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(szOutDir, "doc.txt")); err != nil {
+				t.Errorf("doc.txt debería haber sido extraído de 7z: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(szOutDir, "image.png")); !os.IsNotExist(err) {
+				t.Errorf("image.png NO debería haber sido extraído de 7z con filter *.txt")
+			}
+		}
+	}
+
+	// 5. Rar archive (.rar)
+	if hasTool("rar") {
+		rarArchive := filepath.Join(tmpDir, "archive.rar")
+		cmdRar := exec.Command("rar", "a", "-ep", rarArchive, docFile, imgFile)
+		if err := cmdRar.Run(); err == nil {
+			rarOutDir := filepath.Join(tmpDir, "out_rar")
+			optsRar := DecompressOptions{
+				OutputDir: rarOutDir,
+				KeepOrig:  true,
+				Filter:    "*.txt",
+			}
+			if err := DoDecompress([]string{rarArchive}, optsRar); err != nil {
+				t.Fatalf("DoDecompress rar con filter falló: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(rarOutDir, "doc.txt")); err != nil {
+				t.Errorf("doc.txt debería haber sido extraído de rar: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(rarOutDir, "image.png")); !os.IsNotExist(err) {
+				t.Errorf("image.png NO debería haber sido extraído de rar con filter *.txt")
+			}
+		}
+	}
+}
+
 
 
 

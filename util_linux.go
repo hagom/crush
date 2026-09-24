@@ -70,3 +70,32 @@ func disableTerminalEchoOS(fd uintptr) (func(), error) {
 	return restore, nil
 }
 
+func splicePipe(r io.Reader, w io.Writer) (int64, error) {
+	rfd, okR := extractFd(r)
+	wfd, okW := extractFd(w)
+	if !okR || !okW {
+		buf := make([]byte, 1024*1024)
+		return io.CopyBuffer(w, r, buf)
+	}
+
+	var total int64
+	chunkSize := uintptr(1024 * 1024)
+	for {
+		n, _, errno := syscall.Syscall6(syscall.SYS_SPLICE, rfd, 0, wfd, 0, chunkSize, 0)
+		if errno != 0 {
+			if errno == syscall.EINTR {
+				continue
+			}
+			if total == 0 && (errno == syscall.ENOSYS || errno == syscall.EINVAL) {
+				buf := make([]byte, 1024*1024)
+				return io.CopyBuffer(w, r, buf)
+			}
+			return total, errno
+		}
+		if n == 0 {
+			break
+		}
+		total += int64(n)
+	}
+	return total, nil
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1009,6 +1010,102 @@ func TestCompressHashParallel(t *testing.T) {
 	}
 }
 
+func TestCompressSparseTarFlag(t *testing.T) {
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	var capturedPlainArgs []string
+	var capturedPipeArgs []string
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "sparse.bin")
+	f, err := os.Create(f1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Truncate(10 * 1024 * 1024)
+	f.Close()
+
+	// 1. Plain tar with Sparse: true
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "tar" {
+			capturedPlainArgs = append([]string(nil), args...)
+		}
+		return origExec(name, args...)
+	}
+
+	optsPlain := CompressOptions{
+		Format:    Tar,
+		Sparse:    true,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	_, err = DoCompress([]string{f1}, optsPlain)
+	if err != nil {
+		t.Fatalf("DoCompress Plain Tar failed: %v", err)
+	}
+
+	hasSparse := false
+	for _, a := range capturedPlainArgs {
+		if a == "--sparse" {
+			hasSparse = true
+			break
+		}
+	}
+	if !hasSparse {
+		t.Errorf("compressPlainTar did not include --sparse in tar args: %v", capturedPlainArgs)
+	}
+
+	// 2. Tar pipe with Sparse: true
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "tar" {
+			capturedPipeArgs = append([]string(nil), args...)
+		}
+		return origExec(name, args...)
+	}
+
+	optsPipe := CompressOptions{
+		Format:    Gz,
+		Sparse:    true,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Combine:   true,
+	}
+	_, err = DoCompress([]string{f1}, optsPipe)
+	if err != nil {
+		t.Fatalf("DoCompress Tar Pipe failed: %v", err)
+	}
+
+	hasSparsePipe := false
+	for _, a := range capturedPipeArgs {
+		if a == "--sparse" {
+			hasSparsePipe = true
+			break
+		}
+	}
+	if !hasSparsePipe {
+		t.Errorf("compressTarPipe did not include --sparse in tar args: %v", capturedPipeArgs)
+	}
+
+	// 3. Plain tar with Sparse: false (verify --sparse is NOT present)
+	capturedPlainArgs = nil
+	optsNoSparse := CompressOptions{
+		Format:    Tar,
+		Sparse:    false,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	_, err = DoCompress([]string{f1}, optsNoSparse)
+	if err != nil {
+		t.Fatalf("DoCompress Plain Tar without sparse failed: %v", err)
+	}
+	for _, a := range capturedPlainArgs {
+		if a == "--sparse" {
+			t.Errorf("compressPlainTar should not include --sparse when Sparse is false: %v", capturedPlainArgs)
+		}
+	}
+}
+
 func TestCompressPasswordWarningOnStream(t *testing.T) {
 	tmpDir := t.TempDir()
 	src := filepath.Join(tmpDir, "stream_warn.txt")
@@ -1070,5 +1167,3 @@ func TestCompressPassword7zAndZip(t *testing.T) {
 		t.Fatalf("esperado 1 archivo zip")
 	}
 }
-
-

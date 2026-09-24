@@ -31,6 +31,7 @@ type CompressOptions struct {
 	Progress        *ProgressTracker
 	Hash            bool
 	Password        string
+	Sparse          bool
 }
 
 func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
@@ -803,6 +804,9 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 	}
 
 	tarArgs := []string{"-cf", "-"}
+	if opts.Sparse {
+		tarArgs = append(tarArgs, "--sparse")
+	}
 	for _, excl := range opts.Exclude {
 		tarArgs = append(tarArgs, "--exclude="+excl)
 	}
@@ -813,7 +817,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 	tarArgs = tarArgs[:len(tarArgs)-1] // remove trailing --
 	tarArgs = append(tarArgs, files...)
 
-	tarCmd := exec.Command("tar", tarArgs...)
+	tarCmd := execCommand("tar", tarArgs...)
 
 	// For lrzip which writes directly to file instead of stdout
 	if ext == "lrz" {
@@ -940,15 +944,17 @@ func compress7z(files []string, outPath string, opts CompressOptions, fp *FilePr
 }
 
 func compressPlainTar(files []string, outPath string, opts CompressOptions, fp *FileProgress) error {
-	args := []string{"-cf"}
+	args := []string{"-cf", outPath}
+	if opts.Sparse {
+		args = append(args, "--sparse")
+	}
 	for _, excl := range opts.Exclude {
 		args = append(args, "--exclude="+excl)
 	}
-	args = append(args, outPath)
 	args = append(args, "--")
 	args = append(args, files...)
 
-	cmd := exec.Command("tar", args...)
+	cmd := execCommand("tar", args...)
 	cmd.Stdout = stdoutFor(opts.Progress)
 	cmd.Stderr = stderrFor(opts.Progress)
 

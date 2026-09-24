@@ -23,6 +23,7 @@ var knownShortFlags = map[byte]bool{
 	'v': true,
 	'n': true,
 	'C': true,
+	'S': true,
 }
 
 var Version = "dev" // set at build time: go build -ldflags="-X main.Version=x.y.z"
@@ -30,7 +31,7 @@ var Version = "dev" // set at build time: go build -ldflags="-X main.Version=x.y
 // takesValue reports whether a flag token consumes the next argument as its value.
 func flagTakesValue(a string) bool {
 	switch {
-	case a == "-f", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion":
+	case a == "-f", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion", a == "-filter", a == "--filter":
 		return true
 	case a == "-bench-size" || a == "--bench-size":
 		return true
@@ -233,6 +234,10 @@ func main() {
 
 	var exclude multiFlag
 	flag.Var(&exclude, "exclude", "Patrón de exclusión (repetible)")
+
+	sparseFlag := flag.Bool("sparse", false, "Activar soporte para archivos dispersos (sparse) en tar")
+	sparseShortFlag := flag.Bool("S", false, "Activar soporte para archivos dispersos (sparse) en tar (alias de -sparse)")
+	filterFlag := flag.String("filter", "", "Filtro de extracción selectiva por patrón")
 
 	flag.Parse()
 
@@ -544,6 +549,7 @@ func main() {
 			FromFile:        *fromFile,
 			Hash:            *hashFlag,
 			Password:        cliPassword,
+			Sparse:          *sparseFlag || *sparseShortFlag,
 		}
 		var outPaths []string
 		if stdinIsPipe {
@@ -600,6 +606,7 @@ func main() {
 			Force:     *force,
 			Parallel:  parallel,
 			Password:  cliPassword,
+			Filter:    *filterFlag,
 		}
 		if stdinIsPipe && *formatStr != "" && len(files) == 0 {
 			f, err := ParseFormat(*formatStr)
@@ -910,6 +917,10 @@ func printHelp() {
 	fmt.Print("                   Combinar múltiples archivos en un solo archivo comprimido\n")
 	w(Yellow, "  -exclude patrón")
 	fmt.Print("      Patrón de exclusión (se puede repetir)\n")
+	w(Yellow, "  -sparse, -S")
+	fmt.Print("         Activar soporte para archivos dispersos (sparse) en tar\n")
+	w(Yellow, "  -filter patrón")
+	fmt.Print("       Filtro de extracción selectiva por patrón\n")
 	w(Yellow, "  --install")
 	fmt.Print("            Instalar binario crush en /usr/local/bin\n")
 	w(Yellow, "  --install-deps")

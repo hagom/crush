@@ -1301,4 +1301,65 @@ func TestParseSHA256FileVariants(t *testing.T) {
 	}
 }
 
+func TestSplicePipe(t *testing.T) {
+	pr1, pw1, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr2, pw2, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testData := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 50000) // ~1.8 MB
+
+	go func() {
+		pw1.Write(testData)
+		pw1.Close()
+	}()
+
+	var total int64
+	done := make(chan error, 1)
+	go func() {
+		var sErr error
+		total, sErr = splicePipe(pr1, pw2)
+		pw2.Close()
+		done <- sErr
+	}()
+
+	var readBuf bytes.Buffer
+	_, copyErr := io.Copy(&readBuf, pr2)
+	pr2.Close()
+
+	if err := <-done; err != nil {
+		t.Fatalf("splicePipe error: %v", err)
+	}
+	pr1.Close()
+	if copyErr != nil {
+		t.Fatalf("reading destination pipe error: %v", copyErr)
+	}
+
+	if total != int64(len(testData)) {
+		t.Errorf("splicePipe transferred %d bytes, want %d", total, len(testData))
+	}
+	if !bytes.Equal(readBuf.Bytes(), testData) {
+		t.Errorf("transferred data does not match original data")
+	}
+}
+
+func TestSplicePipeFallback(t *testing.T) {
+	src := bytes.NewBufferString("fallback test content for splice")
+	var dst bytes.Buffer
+	n, err := splicePipe(src, &dst)
+	if err != nil {
+		t.Fatalf("splicePipe fallback error: %v", err)
+	}
+	if n != int64(len("fallback test content for splice")) {
+		t.Errorf("splicePipe fallback transferred %d bytes, want %d", n, len("fallback test content for splice"))
+	}
+	if dst.String() != "fallback test content for splice" {
+		t.Errorf("splicePipe fallback got %q, want %q", dst.String(), "fallback test content for splice")
+	}
+}
+
 

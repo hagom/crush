@@ -1339,6 +1339,144 @@ func TestDecompressLPTScheduling(t *testing.T) {
 	}
 }
 
+func TestPasswordProtected7z(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "secret7z.txt")
+	secretContent := []byte("top secret data for 7z password test")
+	if err := os.WriteFile(src, secretContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	archive7z := filepath.Join(tmpDir, "archive.7z")
+	cmd := exec.Command(sevenzBin(), "a", "-pcorrectPass", "-mhe=on", archive7z, src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("error creando 7z cifrado: %v, out: %s", err, string(out))
+	}
+
+	// Case 1: Correct password
+	outDirCorrect := filepath.Join(tmpDir, "out_correct")
+	optsCorrect := DecompressOptions{
+		OutputDir: outDirCorrect,
+		KeepOrig:  true,
+		Password:  "correctPass",
+	}
+	if err := DoDecompress([]string{archive7z}, optsCorrect); err != nil {
+		t.Fatalf("DoDecompress con contraseña correcta falló: %v", err)
+	}
+	extractedData, err := os.ReadFile(filepath.Join(outDirCorrect, "secret7z.txt"))
+	if err != nil {
+		t.Fatalf("no se pudo leer archivo extraído: %v", err)
+	}
+	if string(extractedData) != string(secretContent) {
+		t.Errorf("contenido extraído no coincide: got %q, want %q", string(extractedData), string(secretContent))
+	}
+
+	// Case 2: Wrong password
+	outDirWrong := filepath.Join(tmpDir, "out_wrong")
+	optsWrong := DecompressOptions{
+		OutputDir: outDirWrong,
+		KeepOrig:  true,
+		Password:  "wrongPass",
+	}
+	if err := DoDecompress([]string{archive7z}, optsWrong); err == nil {
+		t.Errorf("DoDecompress con contraseña incorrecta debería haber fallado")
+	}
+}
+
+func TestPasswordProtectedZip(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "secretzip.txt")
+	secretContent := []byte("confidential zip data password test")
+	if err := os.WriteFile(src, secretContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	archiveZip := filepath.Join(tmpDir, "archive.zip")
+	if hasTool(sevenzBin()) {
+		cmd := exec.Command(sevenzBin(), "a", "-tzip", "-pzipPass", archiveZip, src)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("error creando zip cifrado: %v, out: %s", err, string(out))
+		}
+	} else if hasTool("zip") {
+		cmd := exec.Command("zip", "-P", "zipPass", archiveZip, src)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("error creando zip cifrado: %v, out: %s", err, string(out))
+		}
+	} else {
+		t.Skip("ni 7z ni zip disponibles")
+	}
+
+	// Case 1: Correct password
+	outDirCorrect := filepath.Join(tmpDir, "out_correct")
+	optsCorrect := DecompressOptions{
+		OutputDir: outDirCorrect,
+		KeepOrig:  true,
+		Password:  "zipPass",
+	}
+	if err := DoDecompress([]string{archiveZip}, optsCorrect); err != nil {
+		t.Fatalf("DoDecompress zip con contraseña correcta falló: %v", err)
+	}
+	extractedData, err := os.ReadFile(filepath.Join(outDirCorrect, "secretzip.txt"))
+	if err != nil {
+		t.Fatalf("no se pudo leer archivo extraído: %v", err)
+	}
+	if string(extractedData) != string(secretContent) {
+		t.Errorf("contenido extraído no coincide: got %q, want %q", string(extractedData), string(secretContent))
+	}
+
+	// Case 2: Wrong password
+	outDirWrong := filepath.Join(tmpDir, "out_wrong")
+	optsWrong := DecompressOptions{
+		OutputDir: outDirWrong,
+		KeepOrig:  true,
+		Password:  "wrongZipPass",
+	}
+	if err := DoDecompress([]string{archiveZip}, optsWrong); err == nil {
+		t.Errorf("DoDecompress zip con contraseña incorrecta debería haber fallado")
+	}
+}
+
+func TestDecompressPasswordWarningOnStream(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "stream.txt")
+	content := []byte("stream decompress password warning test")
+	if err := os.WriteFile(src, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	gzFile := filepath.Join(tmpDir, "stream.txt.gz")
+	cmd := exec.Command("gzip", "-c", src)
+	outF, err := os.Create(gzFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outF
+	if err := cmd.Run(); err != nil {
+		outF.Close()
+		t.Fatal(err)
+	}
+	outF.Close()
+
+	outDir := filepath.Join(tmpDir, "out_stream")
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Password:  "somepass",
+	}
+	if err := DoDecompress([]string{gzFile}, opts); err != nil {
+		t.Fatalf("DoDecompress con password en stream no debe fallar: %v", err)
+	}
+	extracted, err := os.ReadFile(filepath.Join(outDir, "stream.txt"))
+	if err != nil {
+		t.Fatalf("no se pudo leer archivo extraído: %v", err)
+	}
+	if string(extracted) != string(content) {
+		t.Errorf("contenido no coincide: got %q, want %q", string(extracted), string(content))
+	}
+}
+
 
 
 

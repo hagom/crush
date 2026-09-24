@@ -43,6 +43,79 @@ func flagTakesValue(a string) bool {
 	}
 }
 
+func extractPasswordFlag(args []string) ([]string, string, bool) {
+	if len(args) == 0 {
+		return args, "", false
+	}
+	var cleaned []string
+	cleaned = append(cleaned, args[0])
+	var password string
+	var prompt bool
+
+	hasFromFile := false
+	for _, a := range args {
+		if a == "-i" {
+			hasFromFile = true
+			break
+		}
+	}
+
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-p=") || strings.HasPrefix(a, "-password=") || strings.HasPrefix(a, "--password=") {
+			idx := strings.Index(a, "=")
+			password = a[idx+1:]
+			continue
+		}
+		if a == "-password" || a == "--password" || a == "-p" {
+			if i+1 < len(args) {
+				next := args[i+1]
+				if strings.HasPrefix(next, "-") {
+					prompt = true
+					continue
+				}
+				hasMoreNonFlags := false
+				for j := i + 2; j < len(args); j++ {
+					if !strings.HasPrefix(args[j], "-") {
+						hasMoreNonFlags = true
+						break
+					}
+				}
+				_, statErr := os.Stat(next)
+				if statErr != nil || hasMoreNonFlags || hasFromFile {
+					password = next
+					i++
+					continue
+				}
+				prompt = true
+				continue
+			} else {
+				prompt = true
+				continue
+			}
+		}
+		if len(a) > 2 && a[0] == '-' && a[1] != '-' && strings.ContainsRune(a[1:], 'p') {
+			allShort := true
+			for j := 1; j < len(a); j++ {
+				if a[j] != 'p' && !knownShortFlags[a[j]] {
+					allShort = false
+					break
+				}
+			}
+			if allShort {
+				withoutP := "-" + strings.ReplaceAll(a[1:], "p", "")
+				if withoutP != "-" {
+					cleaned = append(cleaned, withoutP)
+				}
+				prompt = true
+				continue
+			}
+		}
+		cleaned = append(cleaned, a)
+	}
+	return cleaned, password, prompt
+}
+
 // reorderArgs expands combined short flags (-tkv → -t -k -v) and moves
 // all flags before positional arguments so flag.Parse can see them.
 // Flag-value pairs (-f 7z) are kept together.
@@ -104,6 +177,10 @@ func main() {
 		}
 	}
 
+	var cliPassword string
+	var promptPassword bool
+	os.Args, cliPassword, promptPassword = extractPasswordFlag(os.Args)
+
 	// Reorder args: expand combined short flags (-tkv → -t -k -v)
 	// and move all flags before positional args so flag.Parse catches them
 	os.Args = reorderArgs(os.Args)
@@ -151,10 +228,22 @@ func main() {
 	splitSize := &splitSizeVal
 	compressionOpts := flag.String("opts", "", "Opciones adicionales para la herramienta de compresión")
 
+	hashFlag := flag.Bool("hash", false, "Generar archivo de checksum SHA-256 (.sha256)")
+	verifyFlag := flag.Bool("verify", false, "Verificar checksum SHA-256 si existe archivo .sha256")
+
 	var exclude multiFlag
 	flag.Var(&exclude, "exclude", "Patrón de exclusión (repetible)")
 
 	flag.Parse()
+
+	if promptPassword && cliPassword == "" {
+		p, err := readPasswordFunc("Ingrese contraseña: ")
+		if err != nil {
+			WriteError("leyendo contraseña: %v", err)
+			os.Exit(1)
+		}
+		cliPassword = p
+	}
 
 	outDirSet := false
 	flag.Visit(func(f *flag.Flag) {
@@ -188,13 +277,13 @@ func main() {
 		return
 	}
 
-	// Check mode conflicts among -c, -d, -l, -t, -r
+	// Check mode conflicts among -c, -d, -l, -t, -r, -verify
 	// Allowed: -c + -t (compress then test), -d + -t (test before decompress)
 	// Everything else with >= 2 modes is a conflict
 	hasC := *compressFlag
 	hasD := *decompressFlag
 	hasL := *listFlag
-	hasT := *testFlag
+	hasT := *testFlag || *verifyFlag
 	hasR := *readFlag
 
 	writeModes := 0
@@ -222,7 +311,7 @@ func main() {
 			v    *bool
 			name string
 		}{
-			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {readFlag, "-r"},
+			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {verifyFlag, "-verify"}, {readFlag, "-r"},
 		} {
 			if *f.v {
 				conflictFlags = append(conflictFlags, f.name)
@@ -248,7 +337,7 @@ func main() {
 		os.Exit(1)
 	}
 	if installModeCount > 0 {
-		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *readFlag, *benchFlag} {
+		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *verifyFlag, *readFlag, *benchFlag} {
 			if m {
 				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -r o --bench")
 				os.Exit(1)
@@ -262,7 +351,7 @@ func main() {
 			v    *bool
 			name string
 		}{
-			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {readFlag, "-r"},
+			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {verifyFlag, "-verify"}, {readFlag, "-r"},
 		} {
 			if *m.v {
 				WriteError("--bench no se puede combinar con %s", m.name)
@@ -329,7 +418,7 @@ func main() {
 			}
 		}
 	}
-	opMode := *compressFlag || *decompressFlag || *listFlag || *readFlag || *testFlag
+	opMode := *compressFlag || *decompressFlag || *listFlag || *readFlag || *testFlag || *verifyFlag
 	if len(files) == 0 && stdinIsPipe && *formatStr != "" && (*compressFlag || *decompressFlag) {
 		// Read from stdin pipe
 	} else if len(files) == 0 && *decompressFlag {
@@ -406,10 +495,12 @@ func main() {
 	}
 
 	// Handle -t alone (test only)
-	if *testFlag && !*compressFlag && !*decompressFlag {
+	if (*testFlag || *verifyFlag) && !*compressFlag && !*decompressFlag {
 		opts := TestOptions{
-			Verbose: *verbose,
-			Quick:   *quick,
+			Verbose:  *verbose,
+			Quick:    *quick,
+			Verify:   *verifyFlag,
+			Password: cliPassword,
 		}
 		if err := DoTest(files, opts); err != nil {
 			WriteError("%v", err)
@@ -438,7 +529,7 @@ func main() {
 			parallel = 2
 		}
 		// When -c -t, defer deletion until after the test to prevent data loss
-		skipCleanup := *testFlag && !*keepOrig
+		skipCleanup := (*testFlag || *verifyFlag) && !*keepOrig
 		opts := CompressOptions{
 			Format:          format,
 			DryRun:          *dryRun,
@@ -451,6 +542,8 @@ func main() {
 			Exclude:         exclude,
 			Combine:         *combineFlag,
 			FromFile:        *fromFile,
+			Hash:            *hashFlag,
+			Password:        cliPassword,
 		}
 		var outPaths []string
 		if stdinIsPipe {
@@ -465,9 +558,9 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		if *testFlag && len(outPaths) > 0 {
+		if (*testFlag || *verifyFlag) && len(outPaths) > 0 {
 			WriteLogf("\n%sVerificando integridad del archivo comprimido...%s\n", Bold, NC)
-			if err := DoTest(outPaths, TestOptions{Verbose: *verbose, Quick: *quick}); err != nil {
+			if err := DoTest(outPaths, TestOptions{Verbose: *verbose, Quick: *quick, Verify: *verifyFlag, Password: cliPassword}); err != nil {
 				os.Exit(1)
 			}
 			// Test passed — now delete originals if user didn't request -k
@@ -483,9 +576,9 @@ func main() {
 
 	// Handle -d (decompress), optionally preceded by -t (test)
 	if *decompressFlag {
-		if *testFlag {
+		if *testFlag || *verifyFlag {
 			WriteLogf("%sVerificando integridad antes de descomprimir...%s\n", Bold, NC)
-			if err := DoTest(files, TestOptions{Verbose: *verbose, Quick: *quick}); err != nil {
+			if err := DoTest(files, TestOptions{Verbose: *verbose, Quick: *quick, Verify: *verifyFlag, Password: cliPassword}); err != nil {
 				os.Exit(1)
 			}
 			WriteLogf("%s✓ Integridad verificada, descomprimiendo...%s\n\n", Green, NC)
@@ -506,6 +599,7 @@ func main() {
 			KeepOrig:  *keepOrig,
 			Force:     *force,
 			Parallel:  parallel,
+			Password:  cliPassword,
 		}
 		if stdinIsPipe && *formatStr != "" && len(files) == 0 {
 			f, err := ParseFormat(*formatStr)
@@ -769,6 +863,8 @@ func printHelp() {
 	fmt.Print("                   Listar contenido de archivo comprimido\n")
 	w(Yellow, "  -t")
 	fmt.Print("                   Verificar integridad de archivos comprimidos\n")
+	w(Yellow, "  -verify")
+	fmt.Print("              Verificar integridad y checksum SHA-256 si existe .sha256\n")
 	w(Yellow, "  -r")
 	fmt.Print("                   Leer contenido de archivo comprimido a stdout\n")
 	w(Yellow, "  --bench")
@@ -802,6 +898,10 @@ func printHelp() {
 	fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
 	w(Yellow, "  -s N")
 	fmt.Print("                 Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*)\n")
+	w(Yellow, "  -hash")
+	fmt.Print("                Generar archivo de checksum SHA-256 (.sha256)\n")
+	w(Yellow, "  -p, -password [PASS]")
+	fmt.Print(" Contraseña para cifrado/descifrado (7z, zip, rar)\n")
 	w(Yellow, "  -opts \"opciones\"")
 	fmt.Print("     Opciones adicionales para la herramienta de compresión\n")
 	w(Yellow, "  -i ARCHIVO")
@@ -824,6 +924,10 @@ func printHelp() {
 	w(BoldBlue, "Ejemplos:\n")
 	w(Yellow, "  crush -c -f gz documento.txt\n")
 	w(Yellow, "  crush -c -f gz -t documento.txt                       # comprimir y verificar integridad\n")
+	w(Yellow, "  crush -c -f gz -hash documento.txt                    # comprimir y generar checksum SHA-256\n")
+	w(Yellow, "  crush -c -f 7z -p secret archivo.txt                  # comprimir cifrado con contraseña\n")
+	w(Yellow, "  crush -d -p secret archivo.7z                         # descomprimir archivo cifrado\n")
+	w(Yellow, "  crush -verify archivo.tar.gz                          # verificar integridad y checksum\n")
 	w(Yellow, "  crush -c -f zst -v archivo.tar                          # multihilo auto con todos los núcleos\n")
 	w(Yellow, "  crush -c -f xz -k documento.txt                       # conservar original con barra de progreso\n")
 	w(Yellow, "  crush -c -f zip -exclude \"*.bak\" dir/                  # comprimir excluyendo archivos .bak\n")
@@ -875,8 +979,8 @@ _crush_completions() {
     local formats="gz xz bz2 bz3 zst lz lrz zip 7z rar lz4 br tar"
     local split_formats="gz xz bz2 bz3 zst lz lz4 br"
     local split_sizes="10 50 100 500 1000"
-    local short="-c -d -l -t -r -h -v -k -n -f -o -s -force -quick -opts -exclude"
-    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version"
+    local short="-c -d -l -t -r -h -v -k -n -f -o -s -force -quick -opts -exclude -hash -verify -p -password"
+    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version --hash --verify --password"
 
     local has_split=0
     local w
@@ -980,6 +1084,9 @@ _crush() {
         {-k,--keep}'[Conservar originales]' \
         {-n,--dry-run}'[Modo simulacro]' \
         {-s,--split}'[Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)]:tamaño en MB:->split' \
+        '--hash[Generar archivo de checksum SHA-256]' \
+        '--verify[Verificar integridad y checksum SHA-256]' \
+        {-p,--password}'[Contraseña para cifrado/descifrado]:contraseña:' \
         '--opts[Opciones adicionales]:opciones:' \
         '--exclude[Patrón de exclusión]:patrón:' \
         '*:archivo:_files'
@@ -1040,6 +1147,9 @@ complete -c crush -s v -d "Modo verbose"
 complete -c crush -s k -d "Conservar originales"
 complete -c crush -s n -d "Modo simulacro"
 complete -c crush -s s -l split -d "Dividir en partes de N MB (formatos de flujo: gz, xz, bz2, bz3, zst, lz, lz4, br)" -xa "10 50 100 500 1000"
+complete -c crush -s hash -l hash -d "Generar archivo de checksum SHA-256 (.sha256)"
+complete -c crush -s verify -l verify -d "Verificar integridad y checksum SHA-256 si existe .sha256"
+complete -c crush -s p -l password -d "Contraseña para cifrado/descifrado (7z, zip, rar)" -r
 complete -c crush -s opts -l opts -d "Opciones adicionales"
 complete -c crush -s exclude -l exclude -d "Patrón de exclusión" -r
 complete -c crush -s install -l install -d "Instalar crush + dependencias"

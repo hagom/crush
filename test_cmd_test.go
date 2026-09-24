@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -112,5 +115,106 @@ func TestDoTestEdgeCases(t *testing.T) {
 	err = DoTest([]string{dirOnly}, opts)
 	if err == nil {
 		t.Error("esperaba error cuando solo se pasan directorios a DoTest")
+	}
+}
+
+func TestDoTestVerifyMatching(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "file.txt")
+	if err := os.WriteFile(txtFile, []byte("verificación de hash válida"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gzFile := filepath.Join(tmpDir, "file.txt.gz")
+	cmd := exec.Command("gzip", "-c", txtFile)
+	outF, err := os.Create(gzFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outF
+	if err := cmd.Run(); err != nil {
+		outF.Close()
+		t.Fatal(err)
+	}
+	outF.Close()
+
+	// Create matching .sha256 file
+	gzBytes, err := os.ReadFile(gzFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(gzBytes))
+	shaFile := gzFile + ".sha256"
+	shaContent := fmt.Sprintf("%s  %s\n", hash, filepath.Base(gzFile))
+	if err := os.WriteFile(shaFile, []byte(shaContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := TestOptions{Verify: true}
+	err = DoTest([]string{gzFile}, opts)
+	if err != nil {
+		t.Fatalf("DoTest con -verify y hash coincidente falló: %v", err)
+	}
+}
+
+func TestDoTestVerifyMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "file.txt")
+	if err := os.WriteFile(txtFile, []byte("verificación con hash erróneo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gzFile := filepath.Join(tmpDir, "file.txt.gz")
+	cmd := exec.Command("gzip", "-c", txtFile)
+	outF, err := os.Create(gzFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outF
+	if err := cmd.Run(); err != nil {
+		outF.Close()
+		t.Fatal(err)
+	}
+	outF.Close()
+
+	// Create mismatching .sha256 file
+	shaFile := gzFile + ".sha256"
+	fakeHash := "0000000000000000000000000000000000000000000000000000000000000000"
+	shaContent := fmt.Sprintf("%s  %s\n", fakeHash, filepath.Base(gzFile))
+	if err := os.WriteFile(shaFile, []byte(shaContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := TestOptions{Verify: true}
+	err = DoTest([]string{gzFile}, opts)
+	if err == nil {
+		t.Fatal("DoTest con hash no coincidente debería haber fallado")
+	}
+	if !strings.Contains(err.Error(), "con errores") {
+		t.Errorf("error inesperado: %v", err)
+	}
+}
+
+func TestDoTestVerifyNoShaFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "file.txt")
+	if err := os.WriteFile(txtFile, []byte("sin archivo sha256"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gzFile := filepath.Join(tmpDir, "file.txt.gz")
+	cmd := exec.Command("gzip", "-c", txtFile)
+	outF, err := os.Create(gzFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outF
+	if err := cmd.Run(); err != nil {
+		outF.Close()
+		t.Fatal(err)
+	}
+	outF.Close()
+
+	opts := TestOptions{Verify: true}
+	err = DoTest([]string{gzFile}, opts)
+	if err != nil {
+		t.Fatalf("DoTest sin .sha256 debe verificar integridad sin error: %v", err)
 	}
 }

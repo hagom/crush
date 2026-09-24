@@ -5,6 +5,7 @@ package main
 import (
 	"io"
 	"syscall"
+	"unsafe"
 )
 
 const (
@@ -50,3 +51,22 @@ func getPipeCapacityOS(r io.Reader, w io.Writer) int {
 	}
 	return int(res)
 }
+
+func disableTerminalEchoOS(fd uintptr) (func(), error) {
+	var termios syscall.Termios
+	_, _, errNo := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&termios)))
+	if errNo != 0 {
+		return nil, errNo
+	}
+	newTermios := termios
+	newTermios.Lflag &^= syscall.ECHO
+	_, _, errNo = syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&newTermios)))
+	if errNo != 0 {
+		return nil, errNo
+	}
+	restore := func() {
+		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&termios)))
+	}
+	return restore, nil
+}
+

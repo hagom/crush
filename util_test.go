@@ -3,6 +3,8 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -1189,6 +1191,111 @@ func TestIsSplitPartsDir(t *testing.T) {
 			got := IsSplitPartsDir(tt.dir)
 			if got != tt.want {
 				t.Errorf("IsSplitPartsDir(%q) = %v, want %v", tt.dir, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestComputeAndWriteSHA256File(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "testdata.bin")
+	content := []byte("Antigravity checksum test string 123456789")
+	if err := os.WriteFile(filePath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	hash, err := ComputeSHA256(filePath)
+	if err != nil {
+		t.Fatalf("ComputeSHA256 failed: %v", err)
+	}
+	expectedHash := fmt.Sprintf("%x", sha256.Sum256(content))
+	if hash != expectedHash {
+		t.Errorf("ComputeSHA256 got %q, want %q", hash, expectedHash)
+	}
+
+	writtenHash, err := WriteSHA256File(filePath)
+	if err != nil {
+		t.Fatalf("WriteSHA256File failed: %v", err)
+	}
+	if writtenHash != expectedHash {
+		t.Errorf("writtenHash got %q, want %q", writtenHash, expectedHash)
+	}
+
+	shaFile := filePath + ".sha256"
+	data, err := os.ReadFile(shaFile)
+	if err != nil {
+		t.Fatalf("reading sha file failed: %v", err)
+	}
+	expectedFormat := fmt.Sprintf("%s  %s\n", expectedHash, filepath.Base(filePath))
+	if string(data) != expectedFormat {
+		t.Errorf("sha file content got %q, want %q", string(data), expectedFormat)
+	}
+
+	parsedHash, err := ParseSHA256File(shaFile, filePath)
+	if err != nil {
+		t.Fatalf("ParseSHA256File failed: %v", err)
+	}
+	if parsedHash != expectedHash {
+		t.Errorf("ParseSHA256File got %q, want %q", parsedHash, expectedHash)
+	}
+}
+
+func TestParseSHA256FileVariants(t *testing.T) {
+	tmpDir := t.TempDir()
+	dummyFile := filepath.Join(tmpDir, "sample.tar.gz")
+	dummyHash := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+	tests := []struct {
+		name       string
+		content    string
+		targetFile string
+		wantHash   string
+		wantErr    bool
+	}{
+		{
+			name:       "standard sha256sum two spaces",
+			content:    dummyHash + "  sample.tar.gz\n",
+			targetFile: dummyFile,
+			wantHash:   dummyHash,
+		},
+		{
+			name:       "binary mode with asterisk",
+			content:    dummyHash + " *sample.tar.gz\n",
+			targetFile: dummyFile,
+			wantHash:   dummyHash,
+		},
+		{
+			name:       "single line raw hash",
+			content:    dummyHash + "\n",
+			targetFile: dummyFile,
+			wantHash:   dummyHash,
+		},
+		{
+			name:       "multiple files in checksum file",
+			content:    "0000000000000000000000000000000000000000000000000000000000000000  other.tar.gz\n" + dummyHash + "  sample.tar.gz\n",
+			targetFile: dummyFile,
+			wantHash:   dummyHash,
+		},
+		{
+			name:       "invalid format or empty",
+			content:    "\n# comment\n",
+			targetFile: dummyFile,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			shaPath := filepath.Join(tmpDir, "check_"+tt.name+".sha256")
+			if err := os.WriteFile(shaPath, []byte(tt.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ParseSHA256File(shaPath, tt.targetFile)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseSHA256File() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.wantHash {
+				t.Errorf("ParseSHA256File() got = %q, want %q", got, tt.wantHash)
 			}
 		})
 	}

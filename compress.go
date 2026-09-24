@@ -29,6 +29,8 @@ type CompressOptions struct {
 	Combine         bool
 	ThreadLimit     int
 	Progress        *ProgressTracker
+	Hash            bool
+	Password        string
 }
 
 func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
@@ -79,6 +81,11 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 			WriteLogf("  %s⚠ split (-s) no soportado para %s (solo disponible para gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*); se ignora%s\n", Yellow, opts.Format, NC)
 			opts.SplitSize = 0
 		}
+	}
+
+	if opts.Password != "" && opts.Format != SevenZ && opts.Format != Zip && opts.Format != Rar {
+		WriteWarning("el cifrado con contraseña solo está soportado en formatos contenedor (7z, zip, rar); se ignora para %s", opts.Format)
+		opts.Password = ""
 	}
 
 	calcOutPath := func() string {
@@ -255,6 +262,16 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	elapsed := time.Since(startTime)
 
+	var primaryHash string
+	if opts.Hash {
+		for _, p := range append([]string{realOut}, globSplitParts(realOut)...) {
+			h, err := WriteSHA256File(p)
+			if err == nil && p == realOut {
+				primaryHash = h
+			}
+		}
+	}
+
 	origSize := totalSize
 	finalSize := int64(0)
 	for _, p := range append([]string{realOut}, globSplitParts(realOut)...) {
@@ -274,6 +291,9 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if opts.SplitSize > 0 {
 		totalParts := 1 + len(globSplitParts(realOut))
 		WriteLogf("%sPorciones:%s          %s%d / %d partes%s\n", Blue, NC, Bold, totalParts, totalParts, NC)
+	}
+	if opts.Hash && primaryHash != "" {
+		WriteLogf("%sSHA-256:%s           %s%s%s\n", Blue, NC, Bold, primaryHash, NC)
 	}
 	WriteLogf("%s=============================%s\n", Green, NC)
 
@@ -680,6 +700,11 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 				}
 				errCh <- fmt.Errorf("%s: %w", file, err)
 			} else {
+				if opts.Hash {
+					for _, p := range append([]string{outPath}, globSplitParts(outPath)...) {
+						_, _ = WriteSHA256File(p)
+					}
+				}
 				fp.SetStatus("done")
 			}
 		}(f, fp)
@@ -708,6 +733,9 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			totalParts += 1 + len(globSplitParts(out))
 		}
 		WriteLogf("%sPorciones:%s          %s%d / %d partes%s\n", Blue, NC, Bold, totalParts, totalParts, NC)
+	}
+	if opts.Hash {
+		WriteLogf("%sChecksums:%s         %s.sha256 generados%s\n", Blue, NC, Bold, NC)
 	}
 	if len(errors) > 0 {
 		WriteLogf("%sErrores:%s           %s%d%s\n", Blue, NC, Red, len(errors), NC)
@@ -831,6 +859,9 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 	if hasTool(sevenzBin()) {
 		sevenz := sevenzBin()
 		args := []string{"a", "-tzip", "-mx=9", "-bsp1", "-mmt=" + threadStr(opts.ThreadLimit)}
+		if opts.Password != "" {
+			args = append(args, "-p"+opts.Password)
+		}
 		optFlags := strings.Fields(opts.CompressionOpts)
 		args = append(args, optFlags...)
 		args = append(args, outPath)
@@ -851,7 +882,11 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 		return err
 	}
 
-	args := []string{"-r", "-9", outPath}
+	args := []string{"-r", "-9"}
+	if opts.Password != "" {
+		args = append(args, "-P", opts.Password)
+	}
+	args = append(args, outPath)
 	args = append(args, files...)
 
 	cmd := exec.Command("zip", args...)
@@ -875,6 +910,9 @@ func build7zArgs(files []string, outPath string, opts CompressOptions) []string 
 		md = "-md=128m"
 	}
 	args := []string{"a", "-mx=9", md, "-mfb=273", "-ms=on", "-mmt=on", "-bsp1"}
+	if opts.Password != "" {
+		args = append(args, "-p"+opts.Password, "-mhe=on")
+	}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
 	args = append(args, outPath)
@@ -928,6 +966,9 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions, fp *
 func compressRar(files []string, outPath string, opts CompressOptions, fp *FileProgress) error {
 	rar := rarBin()
 	args := []string{"a", "-m" + fmt.Sprintf("%d", fastOrSlow(opts, 5)), "-mt" + threadStr(opts.ThreadLimit)}
+	if opts.Password != "" {
+		args = append(args, "-p"+opts.Password)
+	}
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
 	if !opts.KeepOrig {

@@ -432,5 +432,84 @@ done
 	})
 }
 
+func TestExtractPasswordFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	existingFile := filepath.Join(tmpDir, "archivo.txt")
+	if err := os.WriteFile(existingFile, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name         string
+		args         []string
+		wantPassword string
+		wantPrompt   bool
+		wantCleaned  []string
+	}{
+		{
+			name:         "p con valor explicito =",
+			args:         []string{"crush", "-c", "-f", "7z", "-p=mypass", existingFile},
+			wantPassword: "mypass",
+			wantPrompt:   false,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", existingFile},
+		},
+		{
+			name:         "password con valor explicito =",
+			args:         []string{"crush", "-c", "-f", "7z", "--password=mypass", existingFile},
+			wantPassword: "mypass",
+			wantPrompt:   false,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", existingFile},
+		},
+		{
+			name:         "p con password y archivo",
+			args:         []string{"crush", "-c", "-f", "7z", "-p", "secretPass", existingFile},
+			wantPassword: "secretPass",
+			wantPrompt:   false,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", existingFile},
+		},
+		{
+			name:         "p sin argumento (archivo existente sigue)",
+			args:         []string{"crush", "-c", "-f", "7z", "-p", existingFile},
+			wantPassword: "",
+			wantPrompt:   true,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", existingFile},
+		},
+		{
+			name:         "p al final de la linea",
+			args:         []string{"crush", "-c", "-f", "7z", existingFile, "-p"},
+			wantPassword: "",
+			wantPrompt:   true,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", existingFile},
+		},
+		{
+			name:         "combined flag -cp",
+			args:         []string{"crush", "-cp", "-f", "7z", existingFile},
+			wantPassword: "",
+			wantPrompt:   true,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", existingFile},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleaned, pass, prompt := extractPasswordFlag(tt.args)
+			if pass != tt.wantPassword {
+				t.Errorf("password got %q, want %q", pass, tt.wantPassword)
+			}
+			if prompt != tt.wantPrompt {
+				t.Errorf("prompt got %v, want %v", prompt, tt.wantPrompt)
+			}
+			if len(cleaned) != len(tt.wantCleaned) {
+				t.Fatalf("cleaned length got %d, want %d: %v", len(cleaned), len(tt.wantCleaned), cleaned)
+			}
+			for i := range cleaned {
+				if cleaned[i] != tt.wantCleaned[i] {
+					t.Errorf("cleaned[%d] got %q, want %q", i, cleaned[i], tt.wantCleaned[i])
+				}
+			}
+		})
+	}
+}
+
 
 

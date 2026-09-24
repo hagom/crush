@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -1561,3 +1563,98 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	}
 	return firstErr
 }
+
+func ComputeSHA256(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func WriteSHA256File(archivePath string) (string, error) {
+	hashHex, err := ComputeSHA256(archivePath)
+	if err != nil {
+		return "", err
+	}
+	shaPath := archivePath + ".sha256"
+	content := fmt.Sprintf("%s  %s\n", hashHex, filepath.Base(archivePath))
+	if err := os.WriteFile(shaPath, []byte(content), 0644); err != nil {
+		return "", err
+	}
+	return hashHex, nil
+}
+
+func ParseSHA256File(shaPath, targetFile string) (string, error) {
+	data, err := os.ReadFile(shaPath)
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Base(targetFile)
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			filename := strings.TrimPrefix(fields[1], "*")
+			if filename == base {
+				return strings.ToLower(fields[0]), nil
+			}
+		}
+	}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 && len(fields[0]) == 64 {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	return "", fmt.Errorf("no se encontró hash válido para %s en %s", base, shaPath)
+}
+
+func readPasswordTerminal(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	var fd uintptr
+	var f *os.File
+	if err == nil {
+		defer tty.Close()
+		fd = tty.Fd()
+		f = tty
+	} else {
+		fd = os.Stdin.Fd()
+		f = os.Stdin
+	}
+
+	restore, err := disableTerminalEchoOS(fd)
+	if err == nil && restore != nil {
+		defer func() {
+			restore()
+			fmt.Fprintln(os.Stderr)
+		}()
+	}
+
+	scanner := bufio.NewScanner(f)
+	if scanner.Scan() {
+		return scanner.Text(), nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return "", io.EOF
+}
+
+var readPasswordFunc = readPasswordTerminal
+

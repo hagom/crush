@@ -10,8 +10,10 @@ import (
 )
 
 type TestOptions struct {
-	Verbose bool
-	Quick   bool
+	Verbose  bool
+	Quick    bool
+	Verify   bool
+	Password string
 }
 
 func DoTest(files []string, opts TestOptions) error {
@@ -97,6 +99,36 @@ func DoTest(files []string, opts TestOptions) error {
 }
 
 func TestFile(file string, opts TestOptions) (string, error) {
+	status, err := testArchiveIntegrity(file, opts)
+	if err != nil {
+		return status, err
+	}
+
+	if opts.Verify {
+		shaPath := file + ".sha256"
+		if _, statErr := os.Stat(shaPath); statErr == nil {
+			expectedHash, parseErr := ParseSHA256File(shaPath, file)
+			if parseErr != nil {
+				WriteLogf("%s✗ %s: error leyendo checksum: %v%s\n", Red, file, parseErr, NC)
+				return "FAIL", parseErr
+			}
+			actualHash, hashErr := ComputeSHA256(file)
+			if hashErr != nil {
+				WriteLogf("%s✗ %s: error calculando SHA-256: %v%s\n", Red, file, hashErr, NC)
+				return "FAIL", hashErr
+			}
+			if actualHash != expectedHash {
+				WriteLogf("%s✗ Checksum SHA-256 no coincide para %s (esperado: %s, obtenido: %s)%s\n", Red, file, expectedHash, actualHash, NC)
+				return "FAIL", fmt.Errorf("checksum SHA-256 no coincide para %s", file)
+			}
+			WriteLogf("%s✓ Checksum SHA-256 verificado para %s%s\n", Green, file, NC)
+		}
+	}
+
+	return status, nil
+}
+
+func testArchiveIntegrity(file string, opts TestOptions) (string, error) {
 	ext := strings.ToLower(file)
 
 	switch {
@@ -161,13 +193,29 @@ func TestFile(file string, opts TestOptions) (string, error) {
 		return testWith(file, "lrzip", "-t", "--", file)
 
 	case strings.HasSuffix(ext, ".zip"):
+		if opts.Password != "" {
+			if hasTool(sevenzBin()) {
+				return testWith(file, sevenzBin(), "t", "-p"+opts.Password, "--", file)
+			}
+			return testWith(file, "unzip", "-t", "-P", opts.Password, "--", file)
+		}
 		return testWith(file, "unzip", "-t", "--", file)
 
 	case strings.HasSuffix(ext, ".7z"):
-		return testWith(file, sevenzBin(), "t", "--", file)
+		args := []string{"t"}
+		if opts.Password != "" {
+			args = append(args, "-p"+opts.Password)
+		}
+		args = append(args, "--", file)
+		return testWith(file, sevenzBin(), args...)
 
 	case strings.HasSuffix(ext, ".rar"):
-		return testWith(file, rarBin(), "t", "--", file)
+		args := []string{"t"}
+		if opts.Password != "" {
+			args = append(args, "-p"+opts.Password)
+		}
+		args = append(args, "--", file)
+		return testWith(file, rarBin(), args...)
 
 	case strings.HasSuffix(ext, ".lz4"):
 		return testWith(file, "lz4", "-t", "--", file)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -918,6 +919,155 @@ func TestCompressParallelLPTScheduling(t *testing.T) {
 	_, _ = compressParallel(filesNon, optsNon)
 	if ptNon.files[0].Name != "real.txt" || ptNon.files[1].Name != "nonexistent1.txt" || ptNon.files[2].Name != "nonexistent2.txt" {
 		t.Errorf("estabilidad de fallos de stat no preservada: got [%s, %s, %s]", ptNon.files[0].Name, ptNon.files[1].Name, ptNon.files[2].Name)
+	}
+}
+
+func TestCompressHashOption(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "sample.txt")
+	content := []byte("Hello world for sha256 checksum test!")
+	if err := os.WriteFile(src, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Hash:      true,
+	}
+
+	outPaths, err := DoCompress([]string{src}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress falló: %v", err)
+	}
+	if len(outPaths) != 1 {
+		t.Fatalf("esperado 1 archivo, obtenido %d", len(outPaths))
+	}
+
+	archivePath := outPaths[0]
+	shaPath := archivePath + ".sha256"
+	data, err := os.ReadFile(shaPath)
+	if err != nil {
+		t.Fatalf("no se creó el archivo de checksum %s: %v", shaPath, err)
+	}
+
+	archiveBytes, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedHash := fmt.Sprintf("%x", sha256.Sum256(archiveBytes))
+	expectedLine := fmt.Sprintf("%s  %s\n", expectedHash, filepath.Base(archivePath))
+
+	if string(data) != expectedLine {
+		t.Errorf("contenido de .sha256 incorrecto.\nEsperado: %q\nObtenido: %q", expectedLine, string(data))
+	}
+}
+
+func TestCompressHashParallel(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "p1.txt")
+	f2 := filepath.Join(tmpDir, "p2.txt")
+	if err := os.WriteFile(f1, []byte("parallel 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("parallel 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: filepath.Join(tmpDir, "out_par"),
+		KeepOrig:  true,
+		Parallel:  2,
+		Hash:      true,
+	}
+
+	outPaths, err := DoCompress([]string{f1, f2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress paralelo falló: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("esperado 2 archivos, obtenido %d", len(outPaths))
+	}
+
+	for _, p := range outPaths {
+		shaPath := p + ".sha256"
+		data, err := os.ReadFile(shaPath)
+		if err != nil {
+			t.Fatalf("no se creó el archivo de checksum %s: %v", shaPath, err)
+		}
+		archiveBytes, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectedHash := fmt.Sprintf("%x", sha256.Sum256(archiveBytes))
+		expectedLine := fmt.Sprintf("%s  %s\n", expectedHash, filepath.Base(p))
+		if string(data) != expectedLine {
+			t.Errorf("contenido de .sha256 incorrecto para %s.\nEsperado: %q\nObtenido: %q", p, expectedLine, string(data))
+		}
+	}
+}
+
+func TestCompressPasswordWarningOnStream(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "stream_warn.txt")
+	if err := os.WriteFile(src, []byte("stream content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Password:  "supersecret",
+	}
+
+	outPaths, err := DoCompress([]string{src}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress con contraseña en stream no debería fallar: %v", err)
+	}
+	if len(outPaths) != 1 {
+		t.Fatalf("esperado 1 archivo, obtenido %d", len(outPaths))
+	}
+}
+
+func TestCompressPassword7zAndZip(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "secret_data.txt")
+	content := []byte("top secret confidential data")
+	if err := os.WriteFile(src, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7z
+	opts7z := CompressOptions{
+		Format:    SevenZ,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Password:  "passwd7z",
+	}
+	out7z, err := DoCompress([]string{src}, opts7z)
+	if err != nil {
+		t.Fatalf("DoCompress 7z con password falló: %v", err)
+	}
+	if len(out7z) != 1 {
+		t.Fatalf("esperado 1 archivo 7z")
+	}
+
+	// Zip
+	optsZip := CompressOptions{
+		Format:    Zip,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Password:  "passwdzip",
+	}
+	outZip, err := DoCompress([]string{src}, optsZip)
+	if err != nil {
+		t.Fatalf("DoCompress zip con password falló: %v", err)
+	}
+	if len(outZip) != 1 {
+		t.Fatalf("esperado 1 archivo zip")
 	}
 }
 

@@ -23,6 +23,7 @@ type DecompressOptions struct {
 	Parallel    int
 	ThreadLimit int
 	Progress    *ProgressTracker
+	Password    string
 }
 
 func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
@@ -350,6 +351,11 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		return err
 	}
 
+	if opts.Password != "" && info.Format != SevenZ && info.Format != Zip && info.Format != Rar {
+		WriteWarning("el descifrado con contraseña solo está soportado en formatos contenedor (7z, zip, rar); se ignora para %s", file)
+		opts.Password = ""
+	}
+
 	if opts.DryRun {
 		WriteLogf("%s[Simulacro] Descomprimiendo: %s%s\n", Blue, file, NC)
 		return nil
@@ -590,13 +596,16 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 	case strings.HasSuffix(ext, ".zip"):
 		sevenz := sevenzBin()
 		if hasTool(sevenz) {
-			args := []string{"x", "-tzip", "-bsp1", "-mmt=" + threadStr(opts.ThreadLimit), file}
+			args := []string{"x", "-tzip", "-bsp1", "-mmt=" + threadStr(opts.ThreadLimit)}
+			if opts.Password != "" {
+				args = append(args, "-p"+opts.Password)
+			}
 			if opts.Force {
 				args = append(args, "-aoa")
 			} else {
 				args = append(args, "-aos")
 			}
-			args = append(args, fmt.Sprintf("-o%s", dir))
+			args = append(args, file, fmt.Sprintf("-o%s", dir))
 			cmd := exec.Command(sevenz, args...)
 			if fi, err := os.Stat(file); err == nil {
 				return runWithProgress(cmd, opts.Progress, fi.Size(), fp)
@@ -605,6 +614,9 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			return cmd.Run()
 		}
 		args := []string{}
+		if opts.Password != "" {
+			args = append(args, "-P", opts.Password)
+		}
 		if opts.Force {
 			args = append(args, "-o")
 		} else {
@@ -618,12 +630,16 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".7z"):
-		args := []string{"x", "-bsp1", "-y", "-mmt=" + threadStr(opts.ThreadLimit), file, fmt.Sprintf("-o%s", dir)}
+		args := []string{"x", "-bsp1", "-y", "-mmt=" + threadStr(opts.ThreadLimit)}
+		if opts.Password != "" {
+			args = append(args, "-p"+opts.Password)
+		}
 		if opts.Force {
 			args = append(args, "-aoa")
 		} else {
 			args = append(args, "-aos")
 		}
+		args = append(args, file, fmt.Sprintf("-o%s", dir))
 		cmd := exec.Command(info.Tool, args...)
 		if fi, err := os.Stat(file); err == nil {
 			return runWithProgress(cmd, opts.Progress, fi.Size(), fp)
@@ -632,12 +648,16 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".rar"):
-		args := []string{"x", "-y", "-mt" + threadStr(opts.ThreadLimit), file, fmt.Sprintf("%s/", dir)}
+		args := []string{"x", "-y", "-mt" + threadStr(opts.ThreadLimit)}
+		if opts.Password != "" {
+			args = append(args, "-p"+opts.Password)
+		}
 		if opts.Force {
 			args = append(args, "-o+")
 		} else {
 			args = append(args, "-o-")
 		}
+		args = append(args, file, fmt.Sprintf("%s/", dir))
 		cmd := exec.Command(info.Tool, args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)

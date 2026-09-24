@@ -104,24 +104,36 @@ La arquitectura de `crush` aplica rigurosamente los principios SOLID para garant
 
 ```
 crush/
-├── main.go        # CLI flags, dispatch (-c, -d, -l, -t, -r, --bench, --install)
-├── format.go      # FormatInfo, ParseFormat, DetectFormat, ExtForFormat
-├── compress.go    # DoCompress, compressItems, tar-pipe
-├── decompress.go  # DoDecompress, splitWriter
-├── bench.go       # DoBench, BenchmarkFormat, GenerateBenchmarkDataset, FormatBenchTable
-├── test_cmd.go    # DoTest, TestFile
-├── util.go        # NCPU, GetMemLimit, FormatSize, pipeline, lockedWriter, execCommand, logging, colors
-├── pkgmgr.go      # DetectPkgManager, InstallMissingDeps, list helpers
+├── main.go          # CLI flags, dispatch (-c, -d, -l, -t, -r, -watch, -verify, --bench, --install)
+├── format.go        # FormatInfo, ParseFormat, DetectFormat, ExtForFormat
+├── compress.go      # DoCompress, compressItems, tar-pipe, -hash, -p, -sparse
+├── decompress.go    # DoDecompress, splitWriter, -p, -filter
+├── watcher.go       # Watcher, DoWatch, loop con stdlib
+├── watcher_linux.go # Backend inotify (IN_CLOSE_WRITE, IN_MOVED_TO)
+├── watcher_other.go # Backend fallback por sondeo
+├── bench.go         # DoBench, BenchmarkFormat, GenerateBenchmarkDataset, FormatBenchTable
+├── test_cmd.go      # DoTest, TestFile, -verify con checksum SHA-256
+├── util.go          # NCPU, GetMemLimit, FormatSize, pipeline, lockedWriter, execCommand, SHA-256
+├── util_linux.go    # F_SETPIPE_SZ (1 MiB) y splice(2) zero-copy
+├── util_other.go    # Fallbacks de pipe y splice
+├── pkgmgr.go        # DetectPkgManager, InstallMissingDeps, list helpers
 ├── Makefile
 ├── .github/workflows/ci.yml  # GitHub Actions: test matrix Go 1.21-1.23, race detector, build
-├── *_test.go      # Tests por paquete
-└── mock_test.go   # Tests con mocks de exec.Command (patrón TestHelperProcess)
+├── *_test.go        # Tests por paquete
+└── mock_test.go     # Tests con mocks de exec.Command (patrón TestHelperProcess)
 ```
 
 ## Estado actual
 
-- Go: migración completa. 364 tests nativos pasando con race detector (-race). ~10250 líneas. 0 bugs conocidos.
+- Go: migración completa. 406 tests nativos pasando con race detector (-race). ~12200 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Suite de Nuevas Funcionalidades (Seguridad, Extracción Avanzada y Watcher):
+    - **Modo Observador de Directorios (`-watch <dir>`):** Monitoreo continuo de directorios sin dependencias externas usando `syscall.Inotify` nativo en Linux (`IN_CLOSE_WRITE | IN_MOVED_TO`) y fallback por sondeo en otras plataformas, procesando automáticamente compresión (`-c`) o descompresión (`-d`) de archivos entrantes con apagado limpio ante señales `SIGINT`/`SIGTERM`.
+    - **Generación y Verificación de Checksums SHA-256 (`-hash` / `-verify`):** Creación automática de archivos `.sha256` durante la compresión e integración en `DoTest` para comprobar la integridad de archivos comprimidos y validar el checksum contra el fichero `.sha256` si está presente.
+    - **Cifrado y Protección por Contraseña (`-p` / `-password`):** Soporte integral de contraseñas para formatos de contenedor (`7z`, `zip`, `rar`) con entrada oculta por terminal si se omite el argumento, protegiendo tanto datos como cabeceras (`-mhe=on` en 7-Zip).
+    - **Soporte de Archivos Dispersos (`-sparse` / `-S`):** Activación de `--sparse` en invocaciones a GNU Tar para optimizar espacio al comprimir discos virtuales o archivos dispersos.
+    - **Filtro de Extracción Selectiva (`-filter <patrón>`):** Extracción selectiva de subarchivos o patrones glob (ej. `*.txt`, `docs/*`) soportada en contenedores `tar`, `7z`, `zip` y `rar`.
+    - **Optimización Zero-Copy en Kernel con Linux `splice(2)` (`splicePipe`):** Transferencia directa de descriptores en espacio de kernel para pipes sin saltos a memoria de usuario en Go, con fallback automático transparente a `io.CopyBuffer`.
   - Refactorización de Arquitectura DRY y Unificación de LPT:
     - **Algoritmo LPT Reutilizable (`SortByLPT` en `util.go`):** Unificación del algoritmo de planificación *Longest Processing Time first* consumido tanto por `compressParallel` como por `DoDecompress`. Elimina la duplicación de código algorítmico y asegura saturación óptima del CPU en compresión y descompresión.
     - **Eliminación de E/S Redundante en Descompresión:** Precálculo y reuso en una sola pasada $O(N)$ del mapa de tamaños (`archiveSizes`), eliminando 3 bucles redundantes que consultaban el disco en `DoDecompress`.

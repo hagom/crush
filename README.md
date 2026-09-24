@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/usuario/crush/actions/workflows/ci.yml/badge.svg)](https://github.com/usuario/crush/actions)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Tests](https://img.shields.io/badge/tests-364%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
+[![Tests](https://img.shields.io/badge/tests-406%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Formats](https://img.shields.io/badge/formats-13%20supported-blueviolet)](https://github.com/usuario/crush)
 
@@ -19,8 +19,12 @@
 - **13 formatos soportados:** `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`.
 - **Compresión máxima real y paralelismo automático (NCPU):** No requiere flags manuales de hilos (`-j`). Detecta automáticamente los núcleos disponibles (`NCPU()`) y maximiza los ratios de compresión (`zstd --ultra -22`, `7z -mx=9 -md=256m -mfb=273` adaptativo a RAM, `bzip3 -b 64`, `lz4 -9` LZ4HC) y descompresión multihilo (`lbzip2 -n N`, `pigz -p N`).
 - **Planificación LPT inteligente (Compresión y Descompresión):** Ordenamiento óptimo descendente por tamaño (*Longest Processing Time first*) tanto al comprimir múltiples archivos como al descomprimir lotes de archivos, garantizando una utilización del 100% de los núcleos del CPU durante todo el proceso y eliminando el cuello de botella por archivos rezagados.
-- **Streaming directo sin temporales a disco:** Extracción continua en tiempo real conectando pipes directamente con `tar -xf - -C dir` sin escribir archivos `.tar` intermedios en disco, ahorrando 50% de espacio y duplicando la velocidad.
-- **Buffers de tuberías ampliados a 1 MiB:** Ajuste de capacidad de pipes en el kernel Linux (`F_SETPIPE_SZ`) a 1 MiB para minimizar los cambios de contexto (*context switches*) entre procesos UNIX.
+- **Modo observador de directorios (`-watch`):** Monitoreo continuo de directorios sin dependencias externas usando `syscall.Inotify` nativo en Linux (`IN_CLOSE_WRITE | IN_MOVED_TO`) y sondeo en otras plataformas, procesando automáticamente compresión (`-c`) o descompresión (`-d`) de archivos entrantes.
+- **Generación y verificación de checksums SHA-256 (`-hash`, `-verify`):** Generación automática de archivos `.sha256` durante la compresión e integración en verificación para validar la integridad contra el hash.
+- **Cifrado y contraseñas (`-p`, `-password`):** Cifrado seguro para formatos de contenedor (`7z`, `zip`, `rar`) con soporte para prompt interactivo con terminal oculta y cifrado de cabeceras (`-mhe=on`).
+- **Soporte para Sparse Files (`-sparse` / `-S`):** Optimización de espacio al empaquetar archivos dispersos en archivos tar.
+- **Filtro selectivo de extracción (`-filter`):** Extracción dirigida por patrón glob (`*.txt`, subcarpetas, etc.) compatible con contenedores `tar`, `7z`, `zip` y `rar`.
+- **Streaming directo y Zero-Copy con Linux `splice(2)`:** Extracción directa sin archivos `.tar` temporales intermedios y aceleración en espacio de kernel con `splice(2)` y buffers de pipes ampliados a 1 MiB (`F_SETPIPE_SZ`).
 - **Detección y descompresión interactiva:** Al invocar `crush -d` sin argumentos, detecta automáticamente todos los archivos comprimidos del directorio actual, muestra sus tamaños y solicita confirmación para descomprimirlos en paralelo.
 - **Barra de progreso tabular en tiempo real:** Interfaz dinámica estilo *Docker-pull* en terminales interactivas, con barra general agregada, sub-barras individuales por archivo con columnas milimétricamente alineadas, velocidad en MB/s y estimación de tiempo restante (ETA) estabilizada.
 - **Suite de benchmarking integrada (`--bench`):** Permite evaluar el throughput (MB/s) y el ratio de compresión en tu máquina con datasets deterministas y verificación criptográfica SHA-256.
@@ -160,6 +164,15 @@ crush -c -f zst -s 10 archivo_pesado.iso      # → archivo_pesado_parts/archivo
 # Comprimir excluyendo patrones (-exclude)
 crush -c -f zip -exclude "*.log" -exclude "node_modules/*" proyecto/
 
+# Comprimir y generar checksum SHA-256 (.sha256)
+crush -c -f gz -hash documento.txt
+
+# Comprimir con cifrado por contraseña (-p) en contenedores (7z, zip, rar)
+crush -c -f 7z -p secret confidencial.pdf
+
+# Optimizar compresión de archivos dispersos en tar (-sparse / -S)
+crush -c -f tar.gz -sparse disco_virtual.raw
+
 # Comprimir leyendo la lista de archivos desde un fichero (-i)
 crush -c -f gz -i lista_archivos.txt
 ```
@@ -176,6 +189,13 @@ crush -d
 
 # Descomprimir en el directorio actual
 crush -d archivo.tar.gz
+
+# Descomprimir con contraseña (-p)
+crush -d -p secret protegido.7z
+
+# Extracción selectiva por patrón glob (-filter) en tar, 7z, zip, rar
+crush -d -filter "*.txt" respaldo.tar.gz
+crush -d -filter "docs/*" paquete.7z
 
 # Descomprimir múltiples archivos concurrentemente
 crush -d *.zip *.7z
@@ -198,12 +218,27 @@ crush -l *.tar.gz
 crush -t backup.tar.xz
 crush -t -quick archivo_enorme.7z             # Verificación rápida
 
+# Verificar integridad y validar checksum criptográfico SHA-256 si existe .sha256
+crush -verify backup.tar.xz
+
 # Leer contenido comprimido directamente a stdout (útil para tuberías)
 crush -r registros.tar.gz | grep "ERROR 500"
 crush -r dump.sql.zst | mysql -u root -p base_datos
 
 # Simulación (dry-run): ver los comandos que se ejecutarían sin realizar cambios
 crush -c -f xz -n directorio_grande/
+```
+
+### Modo Observador de Directorios (`-watch`)
+
+Monitorea continuamente un directorio sin dependencias externas (utilizando `syscall.Inotify` nativo en Linux) para procesar archivos entrantes de forma desatendida:
+
+```bash
+# Comprimir automáticamente todo archivo entrante a .tar.zst
+crush -watch /inbox -c -f zst -k -o /outbox
+
+# Descomprimir automáticamente cualquier archivo comprimido que se deposite en la carpeta
+crush -watch /descargas -d -o /extraidos
 ```
 
 ### Benchmarks de Compresión (`--bench`)
@@ -229,8 +264,11 @@ crush --bench mi_archivo_de_prueba.iso
 Uso:
   crush -c -f FORMATO [opciones] archivo...
   crush -d [opciones] archivo...
+  crush -watch DIRECTORIO -c -f FORMATO [opciones]
+  crush -watch DIRECTORIO -d [opciones]
   crush -l archivo...
   crush -t archivo...
+  crush -verify archivo...
   crush -r archivo...
   crush --install
   crush --install-deps
@@ -245,8 +283,10 @@ Uso:
 |---|---|
 | `-c` | Comprimir archivos. |
 | `-d` | Descomprimir archivos (detección automática de formato). |
+| `-watch DIR` | Monitorear directorio continuamente para procesar archivos entrantes (`-c` o `-d`). |
 | `-l` | Listar el contenido de los archivos comprimidos. |
 | `-t` | Verificar la integridad de los archivos comprimidos. |
+| `-verify` | Verificar integridad del contenedor y validar checksum SHA-256 si existe `.sha256`. |
 | `-r` | Descomprimir y emitir contenido directamente a `stdout`. |
 | `--bench` | Ejecutar benchmark comparativo de formatos. |
 | `--install` | Instalar el binario `crush` en `/usr/local/bin`. |
@@ -269,6 +309,10 @@ Uso:
 | `-quick` | — | Verificación rápida de integridad (no valida cada archivo interno). | `false` |
 | `-C` | — | Combinar múltiples archivos en un único archivo comprimido. | `false` (paralelo) |
 | `-s` | `N` | Dividir el archivo comprimido en partes de `N` MB (formatos de flujo: `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lz4`, `br` y `tar.*`; no soportado para `lrz`, `zip`, `7z`, `tar`, `rar`). | `0` (sin división) |
+| `-hash` | — | Generar archivo de checksum SHA-256 (`<archivo>.sha256`) durante la compresión. | `false` |
+| `-p`, `-password` | `PASS` | Contraseña para cifrado o descifrado (`7z`, `zip`, `rar`). Si se omite argumento, pide contraseña oculta en consola. | — |
+| `-sparse`, `-S` | — | Activar soporte para archivos dispersos (*sparse files*) en `tar`. | `false` |
+| `-filter` | `PATRÓN` | Filtro de extracción selectiva por patrón glob (`*.txt`, subcarpetas, etc.) en `tar`, `7z`, `zip`, `rar`. | — |
 | `-i` | `ARCHIVO` | Leer lista de archivos de entrada desde un fichero o stdin (`-`). | — |
 | `-exclude`| `PATRÓN` | Patrón de exclusión glob (puede repetirse). | — |
 | `-opts` | `"OPTS"` | Opciones adicionales pasadas directamente a la herramienta subyacente. | — |
@@ -282,17 +326,22 @@ El proyecto está diseñado bajo los principios de modularidad, cero dependencia
 
 ```text
 crush/
-├── main.go         # CLI flags, dispatch de comandos, autocompletado y ayuda
-├── format.go       # Detección de formatos, extensiones y ordenamiento por ratio
-├── compress.go     # Compresión concurrente paralela y streaming tar-pipe
-├── decompress.go   # Descompresión multi-formato, splitWriter y tracking de entrada
-├── bench.go        # Motor de benchmark determinista y formateo de tablas
-├── test_cmd.go     # Verificación de integridad (-t)
-├── util.go         # NCPU, límites de memoria RAM, pipeline streaming, ProgressTracker
-├── pkgmgr.go       # Gestor multiplataforma de dependencias del sistema
-├── Makefile        # Comandos de compilación, testeo e instalación
-├── *_test.go       # Tests unitarios y de integración table-driven
-└── mock_test.go    # Tests con inyección de dependencias (execCommand) y mocks
+├── main.go          # CLI flags, dispatch de comandos, autocompletado y ayuda
+├── format.go        # Detección de formatos, extensiones y ordenamiento por ratio
+├── compress.go      # Compresión concurrente paralela, streaming tar-pipe, -hash, -p, -sparse
+├── decompress.go    # Descompresión multi-formato, splitWriter, -p y -filter
+├── watcher.go       # Watcher, DoWatch, loop con stdlib
+├── watcher_linux.go # Backend inotify (IN_CLOSE_WRITE, IN_MOVED_TO)
+├── watcher_other.go # Backend fallback por sondeo
+├── bench.go         # Motor de benchmark determinista y formateo de tablas
+├── test_cmd.go      # Verificación de integridad (-t, -verify) con checksums SHA-256
+├── util.go          # NCPU, límites RAM, pipeline streaming, ProgressTracker, SHA-256
+├── util_linux.go    # F_SETPIPE_SZ (1 MiB) y splice(2) zero-copy
+├── util_other.go    # Fallbacks de pipe y splice
+├── pkgmgr.go        # Gestor multiplataforma de dependencias del sistema
+├── Makefile         # Comandos de compilación, testeo e instalación
+├── *_test.go        # Tests unitarios y de integración table-driven
+└── mock_test.go     # Tests con inyección de dependencias (execCommand) y mocks
 ```
 
 ### Ejecutar Tests y Verificación

@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/usuario/crush/actions/workflows/ci.yml/badge.svg)](https://github.com/usuario/crush/actions)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Tests](https://img.shields.io/badge/tests-406%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
+[![Tests](https://img.shields.io/badge/tests-407%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Formats](https://img.shields.io/badge/formats-13%20supported-blueviolet)](https://github.com/usuario/crush)
 

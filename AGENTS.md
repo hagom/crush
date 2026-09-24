@@ -125,7 +125,7 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 406 tests nativos pasando con race detector (-race). ~12200 líneas. 0 bugs conocidos.
+- Go: migración completa. 407 tests nativos pasando con race detector (-race). ~12250 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Suite de Nuevas Funcionalidades (Seguridad, Extracción Avanzada y Watcher):
     - **Modo Observador de Directorios (`-watch <dir>`):** Monitoreo continuo de directorios sin dependencias externas usando `syscall.Inotify` nativo en Linux (`IN_CLOSE_WRITE | IN_MOVED_TO`) y fallback por sondeo en otras plataformas, procesando automáticamente compresión (`-c`) o descompresión (`-d`) de archivos entrantes con apagado limpio ante señales `SIGINT`/`SIGTERM`.

@@ -15,6 +15,7 @@ import (
 
 type CompressOptions struct {
 	Format          Format
+	Formats         []Format
 	DryRun          bool
 	Verbose         bool
 	OutputDir       string
@@ -73,6 +74,33 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	if len(files) == 0 {
 		return nil, fmt.Errorf("No se encontraron archivos válidos")
+	}
+
+	if len(opts.Formats) > 1 {
+		var allOut []string
+		origKeep := opts.KeepOrig
+		for idx, fmtChoice := range opts.Formats {
+			isLast := (idx == len(opts.Formats)-1)
+			iterOpts := opts
+			iterOpts.Format = fmtChoice
+			iterOpts.Formats = nil
+			iterOpts.FromFile = ""
+			if !isLast {
+				iterOpts.KeepOrig = true
+			} else {
+				iterOpts.KeepOrig = origKeep
+			}
+			out, err := DoCompress(files, iterOpts)
+			if err != nil {
+				return allOut, fmt.Errorf("fallo comprimiendo formato %s: %w", fmtChoice, err)
+			}
+			allOut = append(allOut, out...)
+		}
+		return allOut, nil
+	}
+	if len(opts.Formats) == 1 {
+		opts.Format = opts.Formats[0]
+		opts.Formats = nil
 	}
 
 	singleItem := len(files) == 1
@@ -422,14 +450,8 @@ func compressToolName(f Format) string {
 }
 
 func CheckCompressTools(f Format) error {
-	tool := compressToolName(f)
-	if tool == "" {
-		return fmt.Errorf("formato no soportado para compresión: %s", f)
-	}
-	if !hasTool(tool) {
-		return fmt.Errorf("herramienta no instalada: %s (ejecuta crush --install-deps)", tool)
-	}
-	return nil
+	_, err := EnsureCompressTool(f)
+	return err
 }
 
 func compressItems(files []string, outPath string, opts CompressOptions) error {

@@ -125,8 +125,11 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 429 tests nativos pasando con race detector (-race). ~14600 líneas. 0 bugs conocidos.
+- Go: migración completa. 436 tests nativos pasando con race detector (-race). ~14900 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Compresión Multi-Formato y Auto-instalación con Fallback Inteligente:
+    - **Compresión Simultánea Multi-Formato (`-F` / `--formats` / `ParseFormatList`):** Ejecución en lote para comprimir archivos a múltiples formatos en una sola llamada (ej: `crush -c -F gz,xz,zst archivo.txt`), garantizando la preservación de los ficheros de origen durante todas las etapas intermedias (`KeepOrig` forzado internamente excepto en la última compresión) y reportando el avance y verificación individualizada por formato.
+    - **Auto-instalación Preventiva y Fallback Secuencial (`EnsureFormatTool` en `pkgmgr.go`):** Inspección de herramientas multihilo (`pigz`, `lbzip2`, `plzip`, `lz4 -T`, `7z`, `xz`, `zstd`); si la herramienta multihilo preferida no está instalada, `crush` intenta su instalación desatendida mediante el gestor del sistema (`apt`, `dnf`, etc.); si no está en repositorios o falla la instalación, recurre transparentemente a la versión secuencial (`gzip`, `bzip2`, `lzip`) con advertencia en consola; y si ninguna está disponible, emite un aviso de error detallado indicando la ausencia de ambas.
   - Optimización de Distribución Dinámica y Adaptativa de Hilos (Multi-core Máximo):
     - **Distribución Proporcional de Hilos al Tamaño (`AllocateThreadsProportional` en `util.go`):** Eliminación total del cuello de botella por archivos rezagados (*tail latency*) e inanición de CPU (*CPU starvation*). Reparte los núcleos del sistema proporcionalmente al peso en bytes de cada archivo usando el algoritmo de resto mayor (Hamilton-Hare), garantizando que archivos gigantes y pequeños concluyan prácticamente al mismo tiempo con utilización sostenida del 100% del procesador (+84.3% de mejora medida en juegos de PS2 de 3.5 GB y +35.3% en colas desiguales).
     - **Pool Dinámico de Fichas de Hilos (`DynamicThreadPool` en `util.go`):** Semáforo ponderado con token bucket para colas de archivos que superan la ventana concurrente. Los workers adquieren tokens dinámicos al iniciar y los devuelven al finalizar; a medida que la cola se agota, los últimos archivos absorben automáticamente el 100% de los núcleos libres.

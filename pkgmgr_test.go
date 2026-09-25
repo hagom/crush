@@ -194,3 +194,108 @@ func TestCompressReadAndListBz3(t *testing.T) {
 		t.Errorf("ListCompressed(bz3) = %v, want nil", err)
 	}
 }
+
+func TestEnsureFormatTool(t *testing.T) {
+	origLookPath := lookPath
+	origAutoInstall := autoInstallDeps
+	defer func() {
+		lookPath = origLookPath
+		autoInstallDeps = origAutoInstall
+	}()
+
+	t.Run("ToolAlreadyInstalled", func(t *testing.T) {
+		lookPath = func(name string) (string, error) {
+			if name == "pigz" {
+				return "/usr/bin/pigz", nil
+			}
+			return "", exec.ErrNotFound
+		}
+		tool, err := EnsureCompressTool(Gz)
+		if err != nil {
+			t.Fatalf("EnsureCompressTool(Gz) unexpected error: %v", err)
+		}
+		if tool != "pigz" {
+			t.Errorf("got tool %s, want pigz", tool)
+		}
+	})
+
+	t.Run("MultiToolMissing_AutoInstallSucceeds", func(t *testing.T) {
+		installed := false
+		lookPath = func(name string) (string, error) {
+			if name == "pigz" && installed {
+				return "/usr/bin/pigz", nil
+			}
+			return "", exec.ErrNotFound
+		}
+		autoInstallDeps = func(tools []string, mgr *PkgManager) []string {
+			for _, tool := range tools {
+				if tool == "pigz" {
+					installed = true
+				}
+			}
+			return nil
+		}
+
+		tool, err := EnsureCompressTool(Gz)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if tool != "pigz" {
+			t.Errorf("got tool %s, want pigz", tool)
+		}
+	})
+
+	t.Run("MultiToolMissing_FallbackToSequential", func(t *testing.T) {
+		lookPath = func(name string) (string, error) {
+			if name == "gzip" {
+				return "/usr/bin/gzip", nil
+			}
+			return "", exec.ErrNotFound
+		}
+		autoInstallDeps = func(tools []string, mgr *PkgManager) []string {
+			return tools
+		}
+
+		tool, err := EnsureCompressTool(Gz)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if tool != "gzip" {
+			t.Errorf("got tool %s, want gzip", tool)
+		}
+	})
+
+	t.Run("BothMultiAndSequentialMissing", func(t *testing.T) {
+		lookPath = func(name string) (string, error) {
+			return "", exec.ErrNotFound
+		}
+		autoInstallDeps = func(tools []string, mgr *PkgManager) []string {
+			return tools
+		}
+
+		tool, err := EnsureCompressTool(Gz)
+		if err == nil {
+			t.Fatalf("expected error when neither tool is available, got tool: %s", tool)
+		}
+		if !strings.Contains(err.Error(), "pigz") || !strings.Contains(err.Error(), "gzip") {
+			t.Errorf("expected error mentioning both pigz and gzip, got: %v", err)
+		}
+	})
+
+	t.Run("ToolWithoutFallbackMissing", func(t *testing.T) {
+		lookPath = func(name string) (string, error) {
+			return "", exec.ErrNotFound
+		}
+		autoInstallDeps = func(tools []string, mgr *PkgManager) []string {
+			return tools
+		}
+
+		tool, err := EnsureCompressTool(Zst)
+		if err == nil {
+			t.Fatalf("expected error when zstd is missing, got tool: %s", tool)
+		}
+		if !strings.Contains(err.Error(), "zstd") {
+			t.Errorf("expected error mentioning zstd, got: %v", err)
+		}
+	})
+}

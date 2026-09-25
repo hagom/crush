@@ -20,7 +20,9 @@
 - **Compresión máxima real y paralelismo automático (NCPU):** No requiere flags manuales de hilos (`-j`). Detecta automáticamente los núcleos disponibles (`NCPU()`) y maximiza los ratios de compresión (`zstd --ultra -22`, `7z -mx=9 -md=256m -mfb=273` adaptativo a RAM, `bzip3 -b 64`, `lz4 -9` LZ4HC) y descompresión multihilo (`lbzip2 -n N`, `pigz -p N`).
 - **Distribución Dinámica Proporcional de Hilos y Token Pool:** Reparto ponderado de núcleos según el tamaño de cada archivo en bytes (método del resto mayor Hamilton-Hare), eliminando la latencia de cola (*tail latency*) y garantizando una saturación del 100% de la CPU durante todo el lote (+84% de aceleración medida en juegos de PS2 reales y +35% en colas de archivos desiguales).
 - **Planificación LPT inteligente (Compresión y Descompresión):** Ordenamiento óptimo descendente por tamaño (*Longest Processing Time first*) tanto al comprimir múltiples archivos como al descomprimir lotes de archivos, eliminando el cuello de botella por archivos rezagados.
-- **Compresión interactiva del directorio actual:** Al ejecutar `crush -c` sin especificar archivos, detecta automáticamente todos los elementos comprimibles en la ruta actual, muestra sus tamaños y solicita confirmación interactiva para comprimirlos (usando `-f` o `gz` por omisión).
+- **Compresión simultánea multi-formato (`-F` / `--formats`):** Permite comprimir en múltiples formatos en una sola pasada (ej: `crush -c -F gz,xz,zst archivo.txt`), preservando los archivos originales durante todas las fases intermedias y reportando el avance y verificación de cada formato.
+- **Auto-instalación de herramientas multihilo y fallback secuencial inteligente:** Detección de herramientas concurrentes (`pigz`, `lbzip2`, `plzip`, `lz4 -T`, `7z`, `xz`, `zstd`); si la herramienta óptima multihilo no se encuentra en el sistema, `crush` intenta instalarla automáticamente mediante el gestor de paquetes (`apt`, `dnf`, etc.); si no está en los repositorios o no se puede instalar, recurre transparentemente a la herramienta secuencial (`gzip`, `bzip2`, `lzip`) con advertencia en consola; y si ninguna está disponible, emite un aviso de error detallado.
+- **Compresión interactiva del directorio actual:** Al ejecutar `crush -c` sin especificar archivos, detecta automáticamente todos los elementos comprimibles en la ruta actual, muestra sus tamaños y solicita confirmación interactiva para comprimirlos (usando `-f`, `-F` o `gz` por omisión).
 - **Adición y actualización in-place en archivos comprimidos (`-a` / `-u`):** Inserta nuevos archivos o carpetas directamente dentro de un archivo comprimido preexistente (`.zip`, `.7z`, `.rar`, `.tar`, `.tar.*`) sin generar un archivo nuevo en disco.
 - **Modo observador de directorios (`-watch`):** Monitoreo continuo de directorios sin dependencias externas usando `syscall.Inotify` nativo en Linux (`IN_CLOSE_WRITE | IN_MOVED_TO`) y sondeo en otras plataformas, procesando automáticamente compresión (`-c`) o descompresión (`-d`) de archivos entrantes.
 - **Generación y verificación de checksums SHA-256 (`-hash`, `-verify`):** Generación automática de archivos `.sha256` durante la compresión e integración en verificación para validar la integridad contra el hash.
@@ -325,7 +327,8 @@ Uso:
 
 | Opción | Argumento | Descripción | Por Defecto |
 |---|---|---|---|
-| `-f` | `FORMATO` | Formato objetivo (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`). | Requerido en `-c` |
+| `-f` | `FORMATO` | Formato objetivo (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`). | Requerido en `-c` (o `-F`) |
+| `-F`, `--formats` | `LISTA` | Comprimir en múltiples formatos separados por coma (ej: `gz,xz,zst`). | — |
 | `-o` | `DIR` | Directorio de salida. | `.` |
 | `-k` | — | Conservar archivos originales tras compresión. | `false` (los elimina) |
 | `-v` | — | Modo verbose (muestra los comandos del sistema invocados). | `false` |

@@ -36,7 +36,7 @@ var Version = "dev" // set at build time: go build -ldflags="-X main.Version=x.y
 // takesValue reports whether a flag token consumes the next argument as its value.
 func flagTakesValue(a string) bool {
 	switch {
-	case a == "-f", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion", a == "-filter", a == "--filter":
+	case a == "-f", a == "-F", a == "-formats", a == "--formats", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion", a == "-filter", a == "--filter":
 		return true
 	case a == "-bench-size" || a == "--bench-size":
 		return true
@@ -227,6 +227,8 @@ func main() {
 	benchSizeFlag := flag.Int("bench-size", 10, "Tamaño en MB del dataset para benchmark (por defecto: 10)")
 
 	formatStr := flag.String("f", "", "Formato de compresión (ver -h para lista ordenada por compresión)")
+	formatsMulti := flag.String("F", "", "Comprimir en múltiples formatos separados por coma (ej: gz,xz,zst)")
+	formatsMultiLong := flag.String("formats", "", "Comprimir en múltiples formatos separados por coma (alias de -F)")
 	outputDir := flag.String("o", ".", "Directorio de salida")
 	dryRun := flag.Bool("n", false, "Modo simulacro (no ejecutar)")
 	keepOrig := flag.Bool("k", false, "Conservar archivos originales")
@@ -410,6 +412,10 @@ func main() {
 	if *formatStr != "" && !*compressFlag && !stdinIsPipe {
 		WriteWarning("-f solo tiene efecto con -c (ignorado)")
 	}
+	// -F solo tiene sentido con -c (excepto en modo pipe stdin)
+	if (*formatsMulti != "" || *formatsMultiLong != "") && !*compressFlag && !stdinIsPipe {
+		WriteWarning("-F solo tiene efecto con -c (ignorado)")
+	}
 	// -s solo tiene sentido con -c
 	if *splitSize > 0 && !*compressFlag {
 		WriteWarning("-s solo tiene efecto con -c (ignorado)")
@@ -499,6 +505,11 @@ func main() {
 			return
 		}
 		fmtChoice := *formatStr
+		if *formatsMulti != "" {
+			fmtChoice = *formatsMulti
+		} else if *formatsMultiLong != "" {
+			fmtChoice = *formatsMultiLong
+		}
 		if fmtChoice == "" {
 			fmtChoice = "gz"
 			*formatStr = "gz"
@@ -678,15 +689,31 @@ func main() {
 
 	// Handle -c (compress), optionally followed by -t (test)
 	if *compressFlag {
-		if *formatStr == "" {
-			WriteError("debe especificar formato con -f")
-			WriteInfo("Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br")
-			printHelp()
-			os.Exit(1)
+		multiStr := *formatsMulti
+		if multiStr == "" {
+			multiStr = *formatsMultiLong
 		}
-		format, err := ParseFormat(*formatStr)
-		if err != nil {
-			WriteError("%v", err)
+
+		var formats []Format
+		if multiStr != "" {
+			var err error
+			formats, err = ParseFormatList(multiStr)
+			if err != nil {
+				WriteError("%v", err)
+				printHelp()
+				os.Exit(1)
+			}
+		} else if *formatStr != "" {
+			format, err := ParseFormat(*formatStr)
+			if err != nil {
+				WriteError("%v", err)
+				printHelp()
+				os.Exit(1)
+			}
+			formats = []Format{format}
+		} else {
+			WriteError("debe especificar formato con -f o múltiples formatos con -F")
+			WriteInfo("Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br")
 			printHelp()
 			os.Exit(1)
 		}
@@ -698,7 +725,8 @@ func main() {
 		// When -c -t, defer deletion until after the test to prevent data loss
 		skipCleanup := (*testFlag || *verifyFlag) && !*keepOrig
 		opts := CompressOptions{
-			Format:          format,
+			Format:          formats[0],
+			Formats:         formats,
 			DryRun:          *dryRun,
 			Verbose:         *verbose,
 			OutputDir:       *outputDir,
@@ -714,10 +742,31 @@ func main() {
 			Sparse:          *sparseFlag || *sparseShortFlag,
 		}
 		var outPaths []string
+		var err error
 		if stdinIsPipe {
-			if err := compressStream(os.Stdin, os.Stdout, opts); err != nil {
-				WriteError("%v", err)
-				os.Exit(1)
+			if len(formats) > 1 {
+				tmpF, err := os.CreateTemp("", "crush-stdin-*")
+				if err != nil {
+					WriteError("creando archivo temporal para stdin: %v", err)
+					os.Exit(1)
+				}
+				defer os.Remove(tmpF.Name())
+				defer tmpF.Close()
+				if _, err := io.Copy(tmpF, os.Stdin); err != nil {
+					WriteError("copiando stdin: %v", err)
+					os.Exit(1)
+				}
+				tmpF.Close()
+				outPaths, err = DoCompress([]string{tmpF.Name()}, opts)
+				if err != nil {
+					WriteError("%v", err)
+					os.Exit(1)
+				}
+			} else {
+				if err := compressStream(os.Stdin, os.Stdout, opts); err != nil {
+					WriteError("%v", err)
+					os.Exit(1)
+				}
 			}
 		} else {
 			outPaths, err = DoCompress(files, opts)
@@ -1061,6 +1110,8 @@ func printHelp() {
 	fmt.Print("  -f FORMATO           Formato de compresión: ")
 	fmt.Print(strings.Join(ordered, ", "))
 	fmt.Print("\n                       lrz ofrece la máxima compresión\n")
+	w(Yellow, "  -F FORMATOS")
+	fmt.Print("          Comprimir en múltiples formatos separados por coma (ej: -F gz,xz,zst)\n")
 
 	w(Yellow, "  -o DIRECTORIO")
 	fmt.Print("        Directorio de salida (por defecto: .)\n")
@@ -1108,6 +1159,7 @@ func printHelp() {
 	w(Yellow, "  crush -a comprimido.zip archivo.txt carpeta/          # agregar archivos a zip existente sin recrearlo\n")
 	w(Yellow, "  crush -a respaldo.tar.gz nuevo.log                    # agregar a tar.gz existente in-place\n")
 	w(Yellow, "  crush -c -f gz documento.txt\n")
+	w(Yellow, "  crush -c -F gz,xz,zst documento.txt                   # comprimir en múltiples formatos a la vez\n")
 	w(Yellow, "  crush -c -f gz -t documento.txt                       # comprimir y verificar integridad\n")
 	w(Yellow, "  crush -c -f gz -hash documento.txt                    # comprimir y generar checksum SHA-256\n")
 	w(Yellow, "  crush -c -f 7z -p secret archivo.txt                  # comprimir cifrado con contraseña\n")
@@ -1164,8 +1216,8 @@ _crush_completions() {
     local formats="gz xz bz2 bz3 zst lz lrz zip 7z rar lz4 br tar"
     local split_formats="gz xz bz2 bz3 zst lz lz4 br"
     local split_sizes="10 50 100 500 1000"
-    local short="-c -d -l -t -r -h -v -k -n -f -o -s -force -quick -opts -exclude -hash -verify -p -password"
-    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version --hash --verify --password"
+    local short="-c -d -l -t -r -h -v -k -n -f -F -o -s -force -quick -opts -exclude -hash -verify -p -password"
+    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --formats --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version --hash --verify --password"
 
     local has_split=0
     local w
@@ -1177,7 +1229,7 @@ _crush_completions() {
     done
 
     case "${prev}" in
-        -f|--format)
+        -f|--format|-F|--formats)
             if [[ $has_split -eq 1 ]]; then
                 COMPREPLY=( $(compgen -W "${split_formats}" -- "${cur}") )
             else
@@ -1262,6 +1314,7 @@ _crush() {
         '--version[Mostrar versión]' \
         '--completion[Generar autocompletado]:shell:(bash zsh fish)' \
         {-f,--format}'[Formato de compresión]:formato:->formats' \
+        {-F,--formats}'[Comprimir en múltiples formatos separados por coma]:formatos:' \
         {-o,--output}'[Directorio de salida]:directorio:_files -/' \
         '--force[Sobrescribir existentes]' \
         '--quick[Verificación rápida]' \
@@ -1325,6 +1378,7 @@ complete -c crush -n "not __fish_seen_subcommand_from -c -d -l -t -r" -s r -d "L
 # General flags
 complete -c crush -n "__crush_has_split" -s f -l format -d "Formato de compresión (compatible con split)" -xa "(__crush_split_formats)"
 complete -c crush -n "not __crush_has_split" -s f -l format -d "Formato de compresión" -xa "(__crush_formats)"
+complete -c crush -s F -l formats -d "Comprimir en múltiples formatos separados por coma" -xa "(__crush_formats)"
 complete -c crush -s o -d "Directorio de salida" -xa "(__fish_complete_directories)"
 complete -c crush -s force -l force -d "Sobrescribir existentes"
 complete -c crush -s quick -l quick -d "Verificación rápida"

@@ -90,6 +90,16 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		}
 	}
 	allFiles = uniqueFiles
+
+	for _, f := range allFiles {
+		info, err := DetectFormat(f)
+		if err == nil {
+			if _, err := EnsureDecompressTool(info.Format); err != nil {
+				return err
+			}
+		}
+	}
+
 	archiveSizes := SortByLPT(allFiles, TotalArchiveSize)
 
 	neededByDir := make(map[string]int64)

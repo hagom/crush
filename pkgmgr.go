@@ -52,6 +52,10 @@ var tools = []ToolInfo{
 	{Name: "rar", DebPkg: "rar", RpmPkg: "rar", ArchPkg: "rar", Gentoo: "app-arch/rar", ApkPkg: "rar", Zypper: "rar"},
 	{Name: "lz4", DebPkg: "lz4", RpmPkg: "lz4", ArchPkg: "lz4", Gentoo: "app-arch/lz4", ApkPkg: "lz4", Zypper: "lz4"},
 	{Name: "brotli", DebPkg: "brotli", RpmPkg: "brotli", ArchPkg: "brotli", Gentoo: "app-arch/brotli", ApkPkg: "brotli", Zypper: "brotli"},
+	{Name: "gzip", DebPkg: "gzip", RpmPkg: "gzip", ArchPkg: "gzip", Gentoo: "app-arch/gzip", ApkPkg: "gzip", Zypper: "gzip"},
+	{Name: "bzip2", DebPkg: "bzip2", RpmPkg: "bzip2", ArchPkg: "bzip2", Gentoo: "app-arch/bzip2", ApkPkg: "bzip2", Zypper: "bzip2"},
+	{Name: "lzip", DebPkg: "lzip", RpmPkg: "lzip", ArchPkg: "lzip", Gentoo: "app-arch/lzip", ApkPkg: "lzip", Zypper: "lzip"},
+	{Name: "unrar", DebPkg: "unrar-free", RpmPkg: "unrar", ArchPkg: "unrar", Gentoo: "app-arch/unrar", ApkPkg: "unrar", Zypper: "unrar"},
 	// Listing tools
 	{Name: "tar", DebPkg: "tar", RpmPkg: "tar", ArchPkg: "tar", Gentoo: "app-arch/tar", ApkPkg: "tar", Zypper: "tar"},
 	{Name: "numfmt", DebPkg: "coreutils", RpmPkg: "coreutils", ArchPkg: "coreutils", Gentoo: "sys-apps/coreutils", ApkPkg: "coreutils", Zypper: "coreutils"},
@@ -195,7 +199,7 @@ func InstallMissingDeps(tools_needed []string, mgr *PkgManager) []string {
 		}
 		var alreadyInstalled bool
 		for _, a := range aliases {
-			if _, err := exec.LookPath(a); err == nil {
+			if _, err := lookPath(a); err == nil {
 				alreadyInstalled = true
 				break
 			}
@@ -258,6 +262,138 @@ func InstallMissingDeps(tools_needed []string, mgr *PkgManager) []string {
 
 	WriteLogf("  %s✗ Error instalando dependencias: %v%s\n", Red, lastErr, NC)
 	return unique
+}
+
+var autoInstallDeps = InstallMissingDeps
+
+type ToolPair struct {
+	Multi string
+	Seq   string
+}
+
+func FormatTools(f Format) ToolPair {
+	switch f {
+	case Gz:
+		return ToolPair{Multi: "pigz", Seq: "gzip"}
+	case Bz2:
+		return ToolPair{Multi: "lbzip2", Seq: "bzip2"}
+	case Lz:
+		return ToolPair{Multi: "plzip", Seq: "lzip"}
+	case Zip:
+		return ToolPair{Multi: "7z", Seq: "zip"}
+	case SevenZ:
+		return ToolPair{Multi: "7z"}
+	case Rar:
+		return ToolPair{Multi: "rar"}
+	case Xz:
+		return ToolPair{Multi: "xz"}
+	case Zst:
+		return ToolPair{Multi: "zstd"}
+	case Bz3:
+		return ToolPair{Multi: "bzip3"}
+	case Lrz:
+		return ToolPair{Multi: "lrzip"}
+	case Lz4:
+		return ToolPair{Multi: "lz4"}
+	case Br:
+		return ToolPair{Multi: "brotli"}
+	case Tar:
+		return ToolPair{Multi: "tar"}
+	default:
+		return ToolPair{}
+	}
+}
+
+func checkToolAvailable(toolName string, isDecompress bool) bool {
+	switch toolName {
+	case "7z":
+		return hasTool(sevenzBin())
+	case "lbzip2":
+		return hasTool("lbzip2") || hasTool("pbzip2")
+	case "rar":
+		if isDecompress {
+			return hasTool(rarBin())
+		}
+		return hasTool("rar")
+	case "zip":
+		if isDecompress {
+			return hasTool("unzip") || hasTool(sevenzBin())
+		}
+		return hasTool("zip") || hasTool(sevenzBin())
+	default:
+		return hasTool(toolName)
+	}
+}
+
+func EnsureFormatTool(f Format, isDecompress bool) (string, error) {
+	pair := FormatTools(f)
+	if pair.Multi == "" {
+		op := "compresión"
+		if isDecompress {
+			op = "descompresión"
+		}
+		return "", fmt.Errorf("formato no soportado para %s: %s", op, f)
+	}
+
+	seqTool := pair.Seq
+	if isDecompress && f == Zip {
+		seqTool = "unzip"
+	}
+
+	// 1. Check if multithreaded / primary tool is already installed
+	if checkToolAvailable(pair.Multi, isDecompress) {
+		if !isDecompress {
+			return compressToolName(f), nil
+		}
+		return pair.Multi, nil
+	}
+
+	// 2. Multithread tool missing -> attempt auto-install
+	mgr := DetectPkgManager()
+	if mgr != nil {
+		toolPkg := pair.Multi
+		if toolPkg == "7z" {
+			toolPkg = "p7zip"
+		}
+		autoInstallDeps([]string{toolPkg}, mgr)
+	}
+
+	if checkToolAvailable(pair.Multi, isDecompress) {
+		if !isDecompress {
+			return compressToolName(f), nil
+		}
+		return pair.Multi, nil
+	}
+
+	// 3. Fallback to sequential tool if available
+	if seqTool != "" {
+		if checkToolAvailable(seqTool, isDecompress) {
+			WriteWarning("Herramienta multihilo '%s' no disponible; usando '%s' como alternativa secuencial", pair.Multi, seqTool)
+			return seqTool, nil
+		}
+		// Attempt to install sequential tool
+		if mgr != nil {
+			autoInstallDeps([]string{seqTool}, mgr)
+		}
+		if checkToolAvailable(seqTool, isDecompress) {
+			WriteWarning("Herramienta multihilo '%s' no disponible; usando '%s' como alternativa secuencial", pair.Multi, seqTool)
+			return seqTool, nil
+		}
+		WriteError("Ni la herramienta multihilo '%s' ni la secuencial '%s' están disponibles en el sistema", pair.Multi, seqTool)
+		return "", fmt.Errorf("ni la herramienta multihilo '%s' ni la secuencial '%s' están disponibles (ejecuta crush --install-deps)", pair.Multi, seqTool)
+	}
+
+	// 4. No sequential tool available
+	WriteError("La herramienta '%s' no está instalada ni disponible en el sistema", pair.Multi)
+	return "", fmt.Errorf("herramienta no instalada: %s (ejecuta crush --install-deps)", pair.Multi)
+}
+
+func EnsureCompressTool(f Format) (string, error) {
+	return EnsureFormatTool(f, false)
+}
+
+func EnsureDecompressTool(f Format) (string, error) {
+	return EnsureFormatTool(f, true)
 }
 
 func findToolInfo(tool string) *ToolInfo {
@@ -359,7 +495,7 @@ func ListCompressed(f *os.File) error {
 	case strings.HasSuffix(name, ".tar.lz4"):
 		cmd = exec.Command("tar", "-I", "lz4 -dc", "-tf", fpath)
 	case strings.HasSuffix(name, ".tar.br"):
-		cmd = exec.Command("tar", "-I", "brotli -dc", "-tf", fpath)
+		cmd = exec.Command("tar", "-I", "brotli", "-tf", fpath)
 	case strings.HasSuffix(name, ".tar"):
 		cmd = exec.Command("tar", "-tf", fpath)
 	case strings.HasSuffix(name, ".gz"):

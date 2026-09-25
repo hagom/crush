@@ -120,6 +120,34 @@ func ParseFormat(s string) (Format, error) {
 	return 0, fmt.Errorf("formato no soportado: %s", s)
 }
 
+func ParseFormatList(input string) ([]Format, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return nil, fmt.Errorf("lista de formatos vacía")
+	}
+	rawParts := strings.Split(trimmed, ",")
+	var result []Format
+	seen := make(map[Format]bool)
+	for _, part := range rawParts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		f, err := ParseFormat(part)
+		if err != nil {
+			return nil, fmt.Errorf("formato no reconocido en lista: %q", part)
+		}
+		if !seen[f] {
+			seen[f] = true
+			result = append(result, f)
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no se especificó ningún formato válido en la lista")
+	}
+	return result, nil
+}
+
 func FormatInfoFromFormat(f Format) FormatInfo {
 	switch f {
 	case Gz:

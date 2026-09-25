@@ -78,6 +78,11 @@ func TestReorderArgs(t *testing.T) {
 			want: []string{"crush", "-c", "-f", "gz", "-i", "list.txt"},
 		},
 		{
+			name: "multi format flag -F with value",
+			args: []string{"crush", "-c", "file.txt", "-F", "gz,xz,zst"},
+			want: []string{"crush", "-c", "-F", "gz,xz,zst", "file.txt"},
+		},
+		{
 			name: "input list flag -i after positional",
 			args: []string{"crush", "extra.txt", "-i", "list.txt"},
 			want: []string{"crush", "-i", "list.txt", "extra.txt"},

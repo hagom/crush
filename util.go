@@ -1027,8 +1027,10 @@ func getNullFile() *os.File {
 	return nullFile
 }
 
+var lookPath = exec.LookPath
+
 func hasTool(name string) bool {
-	_, err := exec.LookPath(name)
+	_, err := lookPath(name)
 	return err == nil
 }
 

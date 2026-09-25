@@ -62,6 +62,61 @@ func TestCompressModeDesc(t *testing.T) {
 	}
 }
 
+func TestCompressMultiFormat(t *testing.T) {
+	if !hasTool("tar") {
+		t.Skip("tar no disponible")
+	}
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "data.txt")
+	if err := os.WriteFile(srcFile, []byte("contenido para multiples formatos"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Formats:   []Format{Gz, Tar},
+		OutputDir: tmpDir,
+		KeepOrig:  false,
+	}
+
+	outPaths, err := DoCompress([]string{srcFile}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress multi-format error: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("DoCompress multi-format devolvió %d archivos, esperados 2: %v", len(outPaths), outPaths)
+	}
+	for _, p := range outPaths {
+		if fi, err := os.Stat(p); err != nil || fi.Size() == 0 {
+			t.Errorf("archivo generado no existe o está vacío: %s", p)
+		}
+	}
+	// With KeepOrig: false, the original should have been kept for Gz, and deleted only after Tar
+	if _, err := os.Stat(srcFile); !os.IsNotExist(err) {
+		t.Errorf("archivo original debería haber sido eliminado tras el último formato, pero aún existe")
+	}
+
+	// Test with KeepOrig: true
+	srcFile2 := filepath.Join(tmpDir, "data2.txt")
+	if err := os.WriteFile(srcFile2, []byte("otro archivo para prueba keepOrig"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	optsKeep := CompressOptions{
+		Formats:   []Format{Gz, Tar},
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	outPaths2, err := DoCompress([]string{srcFile2}, optsKeep)
+	if err != nil {
+		t.Fatalf("DoCompress multi-format keep: %v", err)
+	}
+	if len(outPaths2) != 2 {
+		t.Fatalf("DoCompress multi-format keep devolvió %d archivos, esperados 2", len(outPaths2))
+	}
+	if _, err := os.Stat(srcFile2); err != nil {
+		t.Errorf("archivo original debería existir con KeepOrig: true, pero no se encontró: %v", err)
+	}
+}
+
 func TestCompressUniqueNameWithOutputDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldWd, err := os.Getwd()

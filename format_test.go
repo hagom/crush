@@ -39,6 +39,40 @@ func TestParseFormat(t *testing.T) {
 	}
 }
 
+func TestParseFormatList(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []Format
+		err   bool
+	}{
+		{"gz,xz,zst", []Format{Gz, Xz, Zst}, false},
+		{" gz ,  7z , bz3 ", []Format{Gz, SevenZ, Bz3}, false},
+		{"gz,xz,gz", []Format{Gz, Xz}, false},
+		{"tar", []Format{Tar}, false},
+		{"", nil, true},
+		{"   ", nil, true},
+		{",,", nil, true},
+		{"gz,invalid", nil, true},
+	}
+	for _, tt := range tests {
+		got, err := ParseFormatList(tt.input)
+		if (err != nil) != tt.err {
+			t.Errorf("ParseFormatList(%q) error = %v, wantErr = %v", tt.input, err, tt.err)
+			continue
+		}
+		if !tt.err {
+			if len(got) != len(tt.want) {
+				t.Fatalf("ParseFormatList(%q) len = %d, want %d", tt.input, len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("ParseFormatList(%q)[%d] = %v, want %v", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		}
+	}
+}
+
 func TestExtForFormat(t *testing.T) {
 	tests := []struct {
 		format Format

@@ -218,3 +218,30 @@ func DetectFormat(filename string) (FormatInfo, error) {
 	return fi, nil
 }
 
+// FormatMaxThreads returns the maximum practical number of threads the tool for format f can utilize.
+// Formats whose CLI tools are strictly single-threaded return 1, preventing wasted thread allocation.
+func FormatMaxThreads(f Format) int {
+	switch f {
+	case Tar, Lz4, Br:
+		return 1
+	case Bz2:
+		if bzip2Bin() == "bzip2" {
+			return 1
+		}
+		return NCPU()
+	case Gz:
+		if !hasTool("pigz") {
+			return 1
+		}
+		return NCPU()
+	case Lz:
+		if !hasTool("plzip") {
+			return 1
+		}
+		return NCPU()
+	default:
+		return NCPU()
+	}
+}
+
+

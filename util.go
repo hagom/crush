@@ -1672,3 +1672,243 @@ func readPasswordTerminal(prompt string) (string, error) {
 
 var readPasswordFunc = readPasswordTerminal
 
+// AllocateThreadsProportional distributes totalCores among files based on their sizes.
+// Files with larger sizes receive proportionally more threads, ensuring all files finish
+// at approximately the same time and eliminating tail latency (idle CPU cores).
+// Each file receives at least minThreads (default 1) and at most maxThreadsPerJob.
+// If sizes are 0 or unknown, it distributes threads evenly.
+func AllocateThreadsProportional(sizes []int64, totalCores int, minThreads int, maxThreadsPerJob int) []int {
+	n := len(sizes)
+	if n == 0 {
+		return nil
+	}
+	if minThreads < 1 {
+		minThreads = 1
+	}
+	if maxThreadsPerJob < minThreads {
+		maxThreadsPerJob = minThreads
+	}
+	if totalCores < n*minThreads {
+		totalCores = n * minThreads
+	}
+
+	result := make([]int, n)
+
+	if n == 1 {
+		t := totalCores
+		if t > maxThreadsPerJob {
+			t = maxThreadsPerJob
+		}
+		if t < minThreads {
+			t = minThreads
+		}
+		result[0] = t
+		return result
+	}
+
+	if maxThreadsPerJob == 1 {
+		for i := range result {
+			result[i] = 1
+		}
+		return result
+	}
+
+	var totalSize int64
+	allZero := true
+	for _, sz := range sizes {
+		if sz > 0 {
+			totalSize += sz
+			allZero = false
+		}
+	}
+
+	if allZero || totalSize == 0 {
+		base := totalCores / n
+		rem := totalCores % n
+		for i := 0; i < n; i++ {
+			t := base
+			if i < rem {
+				t++
+			}
+			if t > maxThreadsPerJob {
+				t = maxThreadsPerJob
+			}
+			if t < minThreads {
+				t = minThreads
+			}
+			result[i] = t
+		}
+		return result
+	}
+
+	// Calculate proportional threads using Largest Remainder Method (Hamilton-Hare)
+	type itemRemainder struct {
+		index     int
+		remainder float64
+	}
+
+	allocated := 0
+	remainders := make([]itemRemainder, n)
+
+	for i, sz := range sizes {
+		raw := float64(totalCores) * float64(max(0, sz)) / float64(totalSize)
+		count := int(raw)
+		if count < minThreads {
+			count = minThreads
+		}
+		if count > maxThreadsPerJob {
+			count = maxThreadsPerJob
+		}
+		result[i] = count
+		allocated += count
+		remainders[i] = itemRemainder{index: i, remainder: raw - float64(int(raw))}
+	}
+
+	if allocated < totalCores {
+		diff := totalCores - allocated
+		sort.Slice(remainders, func(i, j int) bool {
+			if remainders[i].remainder == remainders[j].remainder {
+				return sizes[remainders[i].index] > sizes[remainders[j].index]
+			}
+			return remainders[i].remainder > remainders[j].remainder
+		})
+		for i := 0; i < diff && i < n; i++ {
+			idx := remainders[i%n].index
+			if result[idx] < maxThreadsPerJob {
+				result[idx]++
+				allocated++
+			}
+		}
+	} else if allocated > totalCores {
+		diff := allocated - totalCores
+		sort.Slice(remainders, func(i, j int) bool {
+			if remainders[i].remainder == remainders[j].remainder {
+				return sizes[remainders[i].index] < sizes[remainders[j].index]
+			}
+			return remainders[i].remainder < remainders[j].remainder
+		})
+		for i := 0; i < diff && i < n; i++ {
+			idx := remainders[i%n].index
+			if result[idx] > minThreads {
+				result[idx]--
+				allocated--
+			}
+		}
+	}
+
+	return result
+}
+
+// PipeFlagsForThreads returns appropriate decompression CLI flags injecting the given thread limit.
+func PipeFlagsForThreads(info FormatInfo, threads int) []string {
+	if threads <= 0 {
+		threads = NCPU()
+	}
+	thStr := fmt.Sprintf("%d", threads)
+	switch info.Tool {
+	case "pigz":
+		return []string{"-dc", "-p", thStr}
+	case "xz":
+		return []string{"-dc", "-T" + thStr}
+	case "zstd":
+		return []string{"-dc", "-T" + thStr}
+	case "bzip3":
+		return []string{"-dc", "-j", thStr}
+	case "plzip":
+		return []string{"-dc", "--threads=" + thStr}
+	case "lbzip2":
+		return []string{"-dc", "-n", thStr}
+	case "lrzip":
+		return []string{"-d", "-p", thStr, "-o", "-"}
+	default:
+		return strings.Fields(info.PipeFlags)
+	}
+}
+
+// DynamicThreadPool coordinates CPU thread tokens among concurrent workers.
+type DynamicThreadPool struct {
+	mu              sync.Mutex
+	totalTokens     int
+	availableTokens int
+	minThreads      int
+	maxThreads      int
+	remainingFiles  int
+	remainingBytes  int64
+}
+
+// NewDynamicThreadPool creates a new thread pool with the specified limits.
+func NewDynamicThreadPool(totalCores, minThreads, maxThreads, totalFiles int, totalBytes int64) *DynamicThreadPool {
+	if totalCores < 1 {
+		totalCores = NCPU()
+	}
+	if minThreads < 1 {
+		minThreads = 1
+	}
+	if maxThreads < minThreads {
+		maxThreads = totalCores
+	}
+	return &DynamicThreadPool{
+		totalTokens:     totalCores,
+		availableTokens: totalCores,
+		minThreads:      minThreads,
+		maxThreads:      maxThreads,
+		remainingFiles:  totalFiles,
+		remainingBytes:  totalBytes,
+	}
+}
+
+// Acquire requests thread tokens for a file of fileSize bytes.
+func (p *DynamicThreadPool) Acquire(fileSize int64) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.remainingFiles <= 1 || p.remainingBytes <= 0 || fileSize >= p.remainingBytes {
+		tokens := p.availableTokens
+		if tokens > p.maxThreads {
+			tokens = p.maxThreads
+		}
+		if tokens < p.minThreads {
+			tokens = p.minThreads
+		}
+		p.availableTokens -= tokens
+		if p.availableTokens < 0 {
+			p.availableTokens = 0
+		}
+		p.remainingFiles--
+		p.remainingBytes -= fileSize
+		return tokens
+	}
+
+	ratio := float64(fileSize) / float64(p.remainingBytes)
+	target := int(float64(p.availableTokens) * ratio)
+	if target < p.minThreads {
+		target = p.minThreads
+	}
+	if target > p.maxThreads {
+		target = p.maxThreads
+	}
+	if target > p.availableTokens && p.availableTokens >= p.minThreads {
+		target = p.availableTokens
+	}
+
+	p.availableTokens -= target
+	if p.availableTokens < 0 {
+		p.availableTokens = 0
+	}
+	p.remainingFiles--
+	p.remainingBytes -= fileSize
+	return target
+}
+
+// Release returns the allocated tokens back to the pool.
+func (p *DynamicThreadPool) Release(tokens int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.availableTokens += tokens
+	if p.availableTokens > p.totalTokens {
+		p.availableTokens = p.totalTokens
+	}
+}
+
+
+

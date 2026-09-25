@@ -633,17 +633,42 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
 	}
-	sem := make(chan struct{}, opts.Parallel)
+
+	maxFmtThreads := FormatMaxThreads(opts.Format)
+	totalCores := NCPU()
+
+	maxWorkers := opts.Parallel
+	if maxFmtThreads > 1 && maxWorkers > 8 {
+		maxWorkers = 8
+	}
+	if len(files) < maxWorkers {
+		maxWorkers = len(files)
+	}
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
+
+	sizesSlice := make([]int64, len(files))
+	var totalBatchSize int64
+	for i, f := range files {
+		sz := fileSizes[f]
+		if sz > 0 {
+			sizesSlice[i] = sz
+			totalBatchSize += sz
+		}
+	}
+
+	pool := NewDynamicThreadPool(totalCores, 1, maxFmtThreads, len(files), totalBatchSize)
+	var preAlloc []int
+	if len(files) <= maxWorkers {
+		preAlloc = AllocateThreadsProportional(sizesSlice, totalCores, 1, maxFmtThreads)
+	}
+
+	sem := make(chan struct{}, maxWorkers)
 	errCh := make(chan error, len(files))
 	outFiles := make([]string, 0, len(files))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-
-	numWorkers := len(files)
-	if numWorkers > opts.Parallel {
-		numWorkers = opts.Parallel
-	}
-	opts.ThreadLimit = max(1, NCPU()/numWorkers)
 
 	fps := make([]*FileProgress, len(files))
 	for i, f := range files {
@@ -663,12 +688,22 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	for i, f := range files {
 		wg.Add(1)
 		fp := fps[i]
-		go func(file string, fp *FileProgress) {
+		go func(file string, fp *FileProgress, idx int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			fp.SetStatus("active")
 			fp.SetStart(time.Now())
+
+			fileOpts := opts
+			var th int
+			if len(preAlloc) == len(files) {
+				th = preAlloc[idx]
+			} else {
+				th = pool.Acquire(fileSizes[file])
+				defer pool.Release(th)
+			}
+			fileOpts.ThreadLimit = th
 
 			baseName := opts.Format.ArchiveBaseName(file)
 			targetDir := opts.OutputDir
@@ -680,7 +715,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 				}
 			}
 			outPath := GetUniqueName(filepath.Join(targetDir, baseName), ext)
-			outPath = splitOutPath(outPath, opts)
+			outPath = splitOutPath(outPath, fileOpts)
 
 			fp.SetOutPath(outPath)
 
@@ -689,11 +724,11 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			mu.Unlock()
 
 			if opts.Verbose {
-				WriteLogf("  %s → %s\n", file, outPath)
+				WriteLogf("  %s → %s (hilos: %d)\n", file, outPath, th)
 			}
 
 			_, preExistErr := os.Stat(outPath)
-			err := compressSingleFile(file, outPath, opts, fp)
+			err := compressSingleFile(file, outPath, fileOpts, fp)
 			if err != nil {
 				fp.SetStatus("error")
 				if preExistErr != nil {
@@ -710,7 +745,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 				}
 				fp.SetStatus("done")
 			}
-		}(f, fp)
+		}(f, fp, i)
 	}
 
 	wg.Wait()
@@ -729,7 +764,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, ext, NC)
 	WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(files), NC)
 	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
-	WriteLogf("%sHilos:%s             %s%d × %d concurrentes%s\n", Blue, NC, Bold, opts.ThreadLimit, numWorkers, NC)
+	WriteLogf("%sHilos:%s             %s%d total (distribución adaptativa LPT)%s\n", Blue, NC, Bold, totalCores, NC)
 	if opts.SplitSize > 0 {
 		totalParts := 0
 		for _, out := range outFiles {
@@ -915,7 +950,11 @@ func build7zArgs(files []string, outPath string, opts CompressOptions) []string 
 	if getMemLimit() < 8192 {
 		md = "-md=128m"
 	}
-	args := []string{"a", "-mx=9", md, "-mfb=273", "-ms=on", "-mmt=on", "-bsp1"}
+	mmt := "-mmt=on"
+	if opts.ThreadLimit > 0 {
+		mmt = "-mmt=" + threadStr(opts.ThreadLimit)
+	}
+	args := []string{"a", "-mx=9", md, "-mfb=273", "-ms=on", mmt, "-bsp1"}
 	if opts.Password != "" {
 		args = append(args, "-p"+opts.Password, "-mhe=on")
 	}

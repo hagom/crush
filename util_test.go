@@ -1362,4 +1362,153 @@ func TestSplicePipeFallback(t *testing.T) {
 	}
 }
 
+func TestAllocateThreadsProportional(t *testing.T) {
+	t.Run("empty input", func(t *testing.T) {
+		got := AllocateThreadsProportional(nil, 32, 1, 32)
+		if len(got) != 0 {
+			t.Errorf("expected empty slice, got %v", got)
+		}
+	})
+
+	t.Run("single file gets all cores up to max", func(t *testing.T) {
+		got := AllocateThreadsProportional([]int64{1000}, 32, 1, 32)
+		if len(got) != 1 || got[0] != 32 {
+			t.Errorf("expected [32], got %v", got)
+		}
+
+		// Capped by maxThreadsPerJob
+		gotCapped := AllocateThreadsProportional([]int64{1000}, 32, 1, 8)
+		if len(gotCapped) != 1 || gotCapped[0] != 8 {
+			t.Errorf("expected [8], got %v", gotCapped)
+		}
+	})
+
+	t.Run("equal sizes distributed evenly", func(t *testing.T) {
+		sizes := []int64{100, 100, 100, 100}
+		got := AllocateThreadsProportional(sizes, 32, 1, 32)
+		if len(got) != 4 {
+			t.Fatalf("expected 4 entries, got %d", len(got))
+		}
+		for i, v := range got {
+			if v != 8 {
+				t.Errorf("entry %d: expected 8 threads, got %d", i, v)
+			}
+		}
+	})
+
+	t.Run("unequal sizes PS2 distribution", func(t *testing.T) {
+		// 500M, 350M, 200M, 100M, 50M on 32 cores
+		sizes := []int64{500, 350, 200, 100, 50}
+		got := AllocateThreadsProportional(sizes, 32, 1, 32)
+		if len(got) != 5 {
+			t.Fatalf("expected 5 entries, got %d", len(got))
+		}
+
+		sum := 0
+		for _, v := range got {
+			sum += v
+			if v < 1 {
+				t.Errorf("thread allocation must be at least 1, got %d", v)
+			}
+		}
+		if sum != 32 {
+			t.Errorf("total allocated threads sum = %d, want 32", sum)
+		}
+
+		// Order strictly preserved: larger files get more threads
+		if got[0] <= got[1] || got[1] <= got[2] || got[2] <= got[3] || got[3] < got[4] {
+			t.Errorf("threads should decrease with file sizes, got: %v", got)
+		}
+	})
+
+	t.Run("single-threaded format capped at 1", func(t *testing.T) {
+		sizes := []int64{500, 350, 200, 100, 50}
+		got := AllocateThreadsProportional(sizes, 32, 1, 1)
+		if len(got) != 5 {
+			t.Fatalf("expected 5 entries, got %d", len(got))
+		}
+		for i, v := range got {
+			if v != 1 {
+				t.Errorf("entry %d: expected 1 thread, got %d", i, v)
+			}
+		}
+	})
+
+	t.Run("zero sizes fallback to even distribution", func(t *testing.T) {
+		sizes := []int64{0, 0, 0, 0}
+		got := AllocateThreadsProportional(sizes, 16, 1, 16)
+		if len(got) != 4 {
+			t.Fatalf("expected 4 entries, got %d", len(got))
+		}
+		sum := 0
+		for _, v := range got {
+			sum += v
+			if v < 1 {
+				t.Errorf("expected >= 1, got %d", v)
+			}
+		}
+		if sum != 16 {
+			t.Errorf("expected sum 16, got %d", sum)
+		}
+	})
+}
+
+func TestPipeFlagsForThreads(t *testing.T) {
+	tests := []struct {
+		info     FormatInfo
+		threads  int
+		contains string
+	}{
+		{FormatInfo{Tool: "pigz"}, 8, "-p"},
+		{FormatInfo{Tool: "xz"}, 12, "-T12"},
+		{FormatInfo{Tool: "zstd"}, 16, "-T16"},
+		{FormatInfo{Tool: "bzip3"}, 6, "-j"},
+		{FormatInfo{Tool: "plzip"}, 4, "--threads=4"},
+		{FormatInfo{Tool: "lbzip2"}, 4, "-n"},
+		{FormatInfo{Tool: "lrzip"}, 8, "-p"},
+	}
+
+	for _, tt := range tests {
+		flags := PipeFlagsForThreads(tt.info, tt.threads)
+		joined := strings.Join(flags, " ")
+		if !strings.Contains(joined, tt.contains) {
+			t.Errorf("PipeFlagsForThreads(%s, %d) = %v, want substring %q", tt.info.Tool, tt.threads, flags, tt.contains)
+		}
+	}
+}
+
+func TestDynamicThreadPool(t *testing.T) {
+	// 32 cores, min 1, max 32, 3 files of 500MB, 300MB, 200MB (total 1000MB)
+	pool := NewDynamicThreadPool(32, 1, 32, 3, 1000)
+
+	// File 1 (500MB): ratio 0.5 of 32 = 16
+	t1 := pool.Acquire(500)
+	if t1 < 10 || t1 > 20 {
+		t.Errorf("expected ~16 tokens for file 1, got %d", t1)
+	}
+
+	// File 2 (300MB)
+	t2 := pool.Acquire(300)
+	if t2 < 1 {
+		t.Errorf("expected >= 1 tokens for file 2, got %d", t2)
+	}
+
+	// File 3 (last file, 200MB) should get all remaining tokens
+	t3 := pool.Acquire(200)
+	if t3 < 1 {
+		t.Errorf("expected >= 1 tokens for last file, got %d", t3)
+	}
+
+	// Release tokens
+	pool.Release(t1)
+	pool.Release(t2)
+	pool.Release(t3)
+
+	if pool.availableTokens != 32 {
+		t.Errorf("expected 32 available tokens after release, got %d", pool.availableTokens)
+	}
+}
+
+
+
 

@@ -122,7 +122,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	calcOutPath := func() string {
 		if singleItem {
 			base := filepath.Base(files[0])
-			baseName := strings.TrimSuffix(base, filepath.Ext(base))
+			baseName := base
+			if fi, err := os.Stat(files[0]); err == nil && !fi.IsDir() {
+				baseName = strings.TrimSuffix(base, filepath.Ext(base))
+			}
 			targetDir := opts.OutputDir
 			if opts.SplitSize > 0 {
 				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
@@ -139,11 +142,8 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	if opts.DryRun {
 		WriteLogf("%s[Simulacro] Comprimiendo %d archivo(s)%s\n", Blue, len(files), NC)
-		if !singleItem && len(files) > 1 && !opts.Combine && allRegularFiles(files) {
+		if !singleItem && len(files) > 1 && !opts.Combine {
 			mode := "paralelo"
-			if opts.Combine {
-				mode = "combinado"
-			}
 			WriteLogf("%s[Simulacro] Modo: %s (%d archivos × %d núcleos)%s\n", Blue, mode, len(files), NCPU(), NC)
 			if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
 				opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
@@ -222,7 +222,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
-	canParallel := opts.Parallel > 1 && !singleItem && len(filteredFiles) > 1 && !opts.Combine && allRegularFiles(filteredFiles)
+	canParallel := !singleItem && len(filteredFiles) > 1 && !opts.Combine
 	filesTotal := 1
 	if canParallel {
 		filesTotal = len(filteredFiles)
@@ -234,8 +234,13 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		totalSize = 0
 		for _, f := range filteredFiles {
 			info, err := os.Stat(f)
-			if err == nil && !info.IsDir() {
-				totalSize += info.Size()
+			if err == nil {
+				if info.IsDir() {
+					sz, _ := GetDirSize(f)
+					totalSize += sz
+				} else {
+					totalSize += info.Size()
+				}
 			}
 		}
 		opts.TotalSize = totalSize
@@ -392,15 +397,6 @@ func expandGlobs(items []string) []string {
 	return result
 }
 
-func allRegularFiles(files []string) bool {
-	for _, f := range files {
-		info, err := os.Stat(f)
-		if err != nil || info.IsDir() {
-			return false
-		}
-	}
-	return true
-}
 
 func splitOutPath(outPath string, opts CompressOptions) string {
 	return outPath
@@ -537,6 +533,26 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 	if opts.Progress != nil {
 		opts.Progress.SetCurrentFile(file)
 	}
+
+	fi, statErr := os.Stat(file)
+	if statErr == nil && fi.IsDir() {
+		if isTarBased(opts.Format) {
+			return compressTarPipe([]string{file}, outPath, opts, fp)
+		}
+		switch opts.Format {
+		case Zip:
+			return compressZip([]string{file}, outPath, opts, fp)
+		case SevenZ:
+			return compress7z([]string{file}, outPath, opts, fp)
+		case Tar:
+			return compressPlainTar([]string{file}, outPath, opts, fp)
+		case Rar:
+			return compressRar([]string{file}, outPath, opts, fp)
+		default:
+			return fmt.Errorf("formato no soportado para compresión de directorio: %s", opts.Format)
+		}
+	}
+
 	if isTarBased(opts.Format) {
 		ext := opts.Format.String()
 		if ext == "lrz" {
@@ -650,6 +666,10 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 	fileSizes := SortByLPT(files, func(f string) int64 {
 		if fi, err := os.Stat(f); err == nil {
+			if fi.IsDir() {
+				sz, _ := GetDirSize(f)
+				return sz
+			}
 			return fi.Size()
 		}
 		return -1
@@ -740,7 +760,11 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 					return
 				}
 			}
-			outPath := GetUniqueName(filepath.Join(targetDir, baseName), ext)
+			fileExt := ext
+			if fi, err := os.Stat(file); err == nil && fi.IsDir() && isTarBased(opts.Format) {
+				fileExt = ExtForFormat(opts.Format)
+			}
+			outPath := GetUniqueName(filepath.Join(targetDir, baseName), fileExt)
 			outPath = splitOutPath(outPath, fileOpts)
 
 			fp.SetOutPath(outPath)

@@ -153,11 +153,12 @@ crush -c -f 7z                               # O especificando formato
 # Compresión de archivo individual
 crush -c -f gz documento.txt                 # → documento.tar.gz
 
-# Compresión paralela multi-archivo (cada archivo genera su propio comprimido)
+# Compresión paralela multi-archivo y multi-carpeta (cada elemento genera su propio comprimido)
 crush -c -f 7z *.iso
+crush -c -f 7z carpeta1/ carpeta2/           # → carpeta1.7z y carpeta2.7z en paralelo
 
-# Combinar múltiples archivos en un único archivo comprimido
-crush -c -C -f 7z archivo1.bin archivo2.bin # → crush_archive.7z
+# Combinar múltiples archivos o carpetas en un único archivo comprimido (-C)
+crush -c -C -f 7z archivo1.bin archivo2.bin # → crush_YYYYMMDD_HHMMSS.7z
 
 # Comprimir un directorio conservando el original (-k) y en modo detallado (-v)
 crush -c -f zst -k -v fotos/                 # → fotos.tar.zst

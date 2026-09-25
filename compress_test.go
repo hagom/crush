@@ -473,6 +473,7 @@ func TestCompressMixedDirAndFile(t *testing.T) {
 		OutputDir: outDir,
 		Parallel:  4,
 		KeepOrig:  true,
+		Combine:   true,
 	}
 
 	outPaths, err := DoCompress([]string{subDir, regFile}, opts)
@@ -1576,3 +1577,171 @@ func TestDoAppendWithSha256(t *testing.T) {
 		t.Errorf("el hash en .sha256 (%s) no coincide con el hash real del archivo (%s)", parsedHash, actualHash)
 	}
 }
+
+func TestDoCompressMultipleDirectoriesIndependent(t *testing.T) {
+	tmpDir := t.TempDir()
+	d1 := filepath.Join(tmpDir, "Juego1")
+	d2 := filepath.Join(tmpDir, "Juego2")
+	if err := os.MkdirAll(d1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(d2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d1, "game.bin"), []byte("data1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d2, "game.bin"), []byte("data2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:    SevenZ,
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Parallel:  2,
+		Combine:   false,
+	}
+
+	outPaths, err := DoCompress([]string{d1, d2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress failed: %v", err)
+	}
+
+	if len(outPaths) != 2 {
+		t.Fatalf("esperado 2 archivos independientes para 2 carpetas, pero se obtuvieron %d: %v", len(outPaths), outPaths)
+	}
+	for _, p := range outPaths {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, "crush_") {
+			t.Errorf("archivo de salida %q tiene prefijo crush_ (fue combinado indebidamente)", p)
+		}
+	}
+}
+
+func TestDoCompressMultipleDirectoriesTarGz(t *testing.T) {
+	tmpDir := t.TempDir()
+	d1 := filepath.Join(tmpDir, "CarpetaA")
+	d2 := filepath.Join(tmpDir, "CarpetaB")
+	if err := os.MkdirAll(d1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(d2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d1, "file1.txt"), []byte("dataA"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d2, "file2.txt"), []byte("dataB"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Parallel:  2,
+		Combine:   false,
+	}
+
+	outPaths, err := DoCompress([]string{d1, d2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress failed: %v", err)
+	}
+
+	if len(outPaths) != 2 {
+		t.Fatalf("esperado 2 archivos independientes tar.gz, pero se obtuvieron %d: %v", len(outPaths), outPaths)
+	}
+	for _, p := range outPaths {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, "crush_") {
+			t.Errorf("archivo de salida %q tiene prefijo crush_ (fue combinado indebidamente)", p)
+		}
+		if !strings.HasSuffix(p, ".tar.gz") {
+			t.Errorf("archivo de salida de directorio %q debería terminar en .tar.gz", p)
+		}
+	}
+}
+
+func TestDoCompressMultipleDirectoriesCombined(t *testing.T) {
+	tmpDir := t.TempDir()
+	d1 := filepath.Join(tmpDir, "Dir1")
+	d2 := filepath.Join(tmpDir, "Dir2")
+	if err := os.MkdirAll(d1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(d2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d1, "f.txt"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d2, "f.txt"), []byte("2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:    SevenZ,
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Parallel:  2,
+		Combine:   true, // Explicitly combined!
+	}
+
+	outPaths, err := DoCompress([]string{d1, d2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress combined failed: %v", err)
+	}
+
+	if len(outPaths) != 1 {
+		t.Fatalf("con Combine=true esperado 1 archivo, pero se obtuvieron %d: %v", len(outPaths), outPaths)
+	}
+	base := filepath.Base(outPaths[0])
+	if !strings.HasPrefix(base, "crush_") {
+		t.Errorf("esperado prefijo crush_ al combinar, obtenido %s", base)
+	}
+}
+
+func TestDoCompressMixedFilesAndDirectoriesIndependent(t *testing.T) {
+	tmpDir := t.TempDir()
+	d1 := filepath.Join(tmpDir, "MiCarpeta")
+	f1 := filepath.Join(tmpDir, "archivo.txt")
+	if err := os.MkdirAll(d1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d1, "sub.txt"), []byte("sub"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f1, []byte("contenido"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:    SevenZ,
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Parallel:  2,
+		Combine:   false,
+	}
+
+	outPaths, err := DoCompress([]string{d1, f1}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress mixed failed: %v", err)
+	}
+
+	if len(outPaths) != 2 {
+		t.Fatalf("esperado 2 archivos independientes para mezcla archivo/carpeta, obtenido %d: %v", len(outPaths), outPaths)
+	}
+	for _, p := range outPaths {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, "crush_") {
+			t.Errorf("archivo de salida %q tiene prefijo crush_ (fue combinado indebidamente)", p)
+		}
+	}
+}
+
+

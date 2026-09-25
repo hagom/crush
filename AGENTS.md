@@ -58,7 +58,7 @@ make install        # install -m 755 crush /usr/local/bin/
 
 - **Siempre paralelizar** los compresores. Usar versiones multihilo (`pigz`, `lbzip2`/`pbzip2`, `plzip`, `bzip3 -j N`, `xz -T0`, `zstd -T0`, `lrzip -p N`, `7z -mmt=on`, `rar -mtN`) para aprovechar todos los núcleos del CPU.
 - **NUNCA agregar flags de paralelismo** (`-j`, `--parallel`, `--jobs`). El programa debe detectar automáticamente `NCPU()` y paralelizar archivos según la cantidad de núcleos disponibles.
-- **Siempre comprimir múltiples archivos en paralelo** cuando sean archivos individuales (no directorios). Cada archivo produce su propia salida comprimida.
+- **Siempre comprimir múltiples archivos y carpetas en paralelo de forma individual**, a menos que se especifique explícitamente `-C` (`--combine`). Cada archivo o carpeta produce su propia salida comprimida independiente.
 - **Sistemas target**: Debian (apt) y RedHat (dnf/yum). El instalador de dependencias debe priorizar estos gestores.
 - Si la versión paralela de un compresor no está disponible, caer en la versión serial (`gzip`, `bzip2`, etc.) como último recurso, nunca fallar.
 
@@ -125,8 +125,11 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 436 tests nativos pasando con race detector (-race). ~14900 líneas. 0 bugs conocidos.
+- Go: migración completa. 442 tests nativos pasando con race detector (-race). ~15200 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Compresión Individual y Paralela de Carpetas por Omisión:
+    - **Independencia de Carpetas en Lote:** Corrección del agrupamiento forzado inadvertido. Al comprimir múltiples carpetas o combinaciones de archivos y carpetas sin pasar la opción explícita `-C` (`--combine`), cada carpeta se procesa y comprime de manera individual e independiente en su propio archivo comprimido (`carpeta.7z`, `carpeta.tar.gz`, etc.) en paralelo aprovechando la asignación adaptativa de hilos del sistema.
+    - **Cálculo de Tamaño Recursivo de Carpetas (`totalFileSize` y `SortByLPT`):** Integración de `GetDirSize` para calcular con exactitud los bytes reales contenidos en los árboles de directorios al programar colas LPT y reportar el progreso con precisión.
   - Compresión Multi-Formato y Auto-instalación con Fallback Inteligente:
     - **Compresión Simultánea Multi-Formato (`-F` / `--formats` / `ParseFormatList`):** Ejecución en lote para comprimir archivos a múltiples formatos en una sola llamada (ej: `crush -c -F gz,xz,zst archivo.txt`), garantizando la preservación de los ficheros de origen durante todas las etapas intermedias (`KeepOrig` forzado internamente excepto en la última compresión) y reportando el avance y verificación individualizada por formato.
     - **Auto-instalación Preventiva y Fallback Secuencial (`EnsureFormatTool` en `pkgmgr.go`):** Inspección de herramientas multihilo (`pigz`, `lbzip2`, `plzip`, `lz4 -T`, `7z`, `xz`, `zstd`); si la herramienta multihilo preferida no está instalada, `crush` intenta su instalación desatendida mediante el gestor del sistema (`apt`, `dnf`, etc.); si no está en repositorios o falla la instalación, recurre transparentemente a la versión secuencial (`gzip`, `bzip2`, `lzip`) con advertencia en consola; y si ninguna está disponible, emite un aviso de error detallado indicando la ausencia de ambas.

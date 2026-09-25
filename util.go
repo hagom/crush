@@ -1039,7 +1039,12 @@ func totalFileSize(files []string) int64 {
 	for _, f := range files {
 		fi, err := os.Stat(f)
 		if err == nil {
-			total += fi.Size()
+			if fi.IsDir() {
+				sz, _ := GetDirSize(f)
+				total += sz
+			} else {
+				total += fi.Size()
+			}
 		}
 	}
 	return total

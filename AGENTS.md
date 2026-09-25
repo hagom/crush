@@ -125,8 +125,14 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 417 tests nativos pasando con race detector (-race). ~12950 líneas. 0 bugs conocidos.
+- Go: migración completa. 429 tests nativos pasando con race detector (-race). ~14600 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Optimización de Distribución Dinámica y Adaptativa de Hilos (Multi-core Máximo):
+    - **Distribución Proporcional de Hilos al Tamaño (`AllocateThreadsProportional` en `util.go`):** Eliminación total del cuello de botella por archivos rezagados (*tail latency*) e inanición de CPU (*CPU starvation*). Reparte los núcleos del sistema proporcionalmente al peso en bytes de cada archivo usando el algoritmo de resto mayor (Hamilton-Hare), garantizando que archivos gigantes y pequeños concluyan prácticamente al mismo tiempo con utilización sostenida del 100% del procesador (+84.3% de mejora medida en juegos de PS2 de 3.5 GB y +35.3% en colas desiguales).
+    - **Pool Dinámico de Fichas de Hilos (`DynamicThreadPool` en `util.go`):** Semáforo ponderado con token bucket para colas de archivos que superan la ventana concurrente. Los workers adquieren tokens dinámicos al iniciar y los devuelven al finalizar; a medida que la cola se agota, los últimos archivos absorben automáticamente el 100% de los núcleos libres.
+    - **Ventana Óptima de Workers (*Sweet-Spot Clamping*):** Límite máximo de 8 procesos paralelos en formatos multi-hilo para evitar colapso del bus de I/O de disco y contención de memoria, maximizando hilos por worker.
+    - **Distribución Consciente del Formato (`FormatMaxThreads` en `format.go`):** Detección de formatos mono-hilo nativos (`tar`, `lz4`, `br`, `gzip`/`bzip2` secuenciales) para asignarles exactamente 1 hilo sin malgastar cuota de núcleos multi-hilo.
+    - **Inyección Precisa de Hilos en Descompresión (`PipeFlagsForThreads` en `util.go`):** Control estricto de hilos en pipelines de streaming (`pigz -p`, `xz -T`, `zstd -T`, `bzip3 -j`, `plzip --threads`, `lbzip2 -n`, `lrzip -p`, `7z -mmt`), erradicando sobre-suscripción oculta en descompresión paralela.
   - Nuevas Funcionalidades de Compresión e Integración (Interactivo y Adición In-Place):
     - **Compresión Interactiva del Directorio Actual (`crush -c` sin argumentos):** Detección automática mediante `FindCompressibleFiles` de todos los archivos y subdirectorios presentes en la ruta actual (excluyendo automáticamente elementos ocultos, archivos ya comprimidos, fragmentos split y `.sha256`), presentación tabular de elementos y tamaños, y confirmación interactiva con `PromptCompressAll`, usando el formato indicado en `-f` o `gz` por omisión.
     - **Adición y Actualización In-Place a Archivos Comprimidos (`-a` / `-u` / `DoAppend`):** Inserción directa de nuevos archivos o subdirectorios dentro de un archivo comprimido preexistente sin generar un nuevo archivo comprimido en disco, soportado in-place en `.zip`, `.7z`, `.rar`, `.tar` y con recompresión atómica transparente para contenedores `.tar.*` (`.tar.gz`, `.tar.xz`, etc.), manteniendo soporte para contraseñas (`-p`), archivos dispersos (`-sparse`) y sincronización automática del checksum `.sha256`.

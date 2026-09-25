@@ -599,3 +599,109 @@ func TestHelpEveryCommandLineHasExplanation(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpEveryOptionHasDescriptionAndExample(t *testing.T) {
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe failed: %v", err)
+	}
+	os.Stdout = w
+
+	printHelp()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	helpOutput := buf.String()
+
+	// Strip ANSI escape codes
+	var clean []rune
+	inEscape := false
+	for _, r := range helpOutput {
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if r == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		clean = append(clean, r)
+	}
+	cleanText := string(clean)
+
+	lines := strings.Split(cleanText, "\n")
+	var currentSection string
+	var modeOptions []string
+	var generalOptions []string
+	var exampleCommands []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasSuffix(trimmed, ":") {
+			currentSection = strings.TrimSuffix(trimmed, ":")
+			continue
+		}
+		if trimmed == "" {
+			continue
+		}
+
+		if currentSection == "Opciones de modo" {
+			if strings.HasPrefix(trimmed, "-") {
+				modeOptions = append(modeOptions, trimmed)
+			}
+		} else if currentSection == "Opciones generales" {
+			if strings.HasPrefix(trimmed, "-") {
+				generalOptions = append(generalOptions, trimmed)
+			}
+		} else if currentSection == "Ejemplos" {
+			if strings.HasPrefix(trimmed, "crush ") || strings.HasPrefix(trimmed, "cat ") {
+				exampleCommands = append(exampleCommands, trimmed)
+			}
+		}
+	}
+
+	if len(modeOptions) == 0 {
+		t.Fatal("No se encontraron opciones de modo en la ayuda")
+	}
+	if len(generalOptions) == 0 {
+		t.Fatal("No se encontraron opciones generales en la ayuda")
+	}
+	if len(exampleCommands) == 0 {
+		t.Fatal("No se encontraron comandos de ejemplo en la ayuda")
+	}
+
+	// Required flags that MUST have an example in the Ejemplos section
+	requiredFlags := []string{
+		"-c", "-d", "-a", "-watch", "-l", "-t", "-verify", "-r", "--bench", "--bench-size",
+		"-h", "-f", "-F", "-o", "-n", "-k", "-v", "-force", "-quick", "-s",
+		"-hash", "-p", "-opts", "-i", "-C", "-exclude", "-sparse", "-filter",
+		"--install", "--install-deps", "--uninstall", "--completion", "--version",
+	}
+
+	for _, flag := range requiredFlags {
+		found := false
+		for _, ex := range exampleCommands {
+			cmdPart := strings.TrimSpace(strings.SplitN(ex, "#", 2)[0])
+			words := strings.Fields(cmdPart)
+			for _, w := range words {
+				if w == flag || strings.HasPrefix(w, flag+"=") || (strings.HasPrefix(w, flag) && len(flag) > 2) {
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			t.Errorf("El flag %q no tiene ningún ejemplo de uso en la sección Ejemplos", flag)
+		}
+	}
+}
+

@@ -125,8 +125,11 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 407 tests nativos pasando con race detector (-race). ~12250 líneas. 0 bugs conocidos.
+- Go: migración completa. 417 tests nativos pasando con race detector (-race). ~12950 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Nuevas Funcionalidades de Compresión e Integración (Interactivo y Adición In-Place):
+    - **Compresión Interactiva del Directorio Actual (`crush -c` sin argumentos):** Detección automática mediante `FindCompressibleFiles` de todos los archivos y subdirectorios presentes en la ruta actual (excluyendo automáticamente elementos ocultos, archivos ya comprimidos, fragmentos split y `.sha256`), presentación tabular de elementos y tamaños, y confirmación interactiva con `PromptCompressAll`, usando el formato indicado en `-f` o `gz` por omisión.
+    - **Adición y Actualización In-Place a Archivos Comprimidos (`-a` / `-u` / `DoAppend`):** Inserción directa de nuevos archivos o subdirectorios dentro de un archivo comprimido preexistente sin generar un nuevo archivo comprimido en disco, soportado in-place en `.zip`, `.7z`, `.rar`, `.tar` y con recompresión atómica transparente para contenedores `.tar.*` (`.tar.gz`, `.tar.xz`, etc.), manteniendo soporte para contraseñas (`-p`), archivos dispersos (`-sparse`) y sincronización automática del checksum `.sha256`.
   - Suite de Nuevas Funcionalidades (Seguridad, Extracción Avanzada y Watcher):
     - **Modo Observador de Directorios (`-watch <dir>`):** Monitoreo continuo de directorios sin dependencias externas usando `syscall.Inotify` nativo en Linux (`IN_CLOSE_WRITE | IN_MOVED_TO`) y fallback por sondeo en otras plataformas, procesando automáticamente compresión (`-c`) o descompresión (`-d`) de archivos entrantes con apagado limpio ante señales `SIGINT`/`SIGTERM`.
     - **Generación y Verificación de Checksums SHA-256 (`-hash` / `-verify`):** Creación automática de archivos `.sha256` durante la compresión e integración en `DoTest` para comprobar la integridad de archivos comprimidos y validar el checksum contra el fichero `.sha256` si está presente.

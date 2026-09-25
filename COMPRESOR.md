@@ -4,7 +4,7 @@
 
 Versión Go de crush, herramienta multi-formato de compresión y descompresión vía pipes UNIX de alto rendimiento con auto-paralelismo.
 Desarrollo activo en rama `main`.
-~12.250 líneas, 407 tests nativos pasando con race detector (`-race`). 0 bugs conocidos.
+~12.950 líneas, 417 tests nativos pasando con race detector (`-race`). 0 bugs conocidos.
 
 ---
 
@@ -40,6 +40,8 @@ crush/
 - [x] Soporte para 13 formatos: `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`.
 - [x] Compresión máxima real y auto-paralelismo (`NCPU()`) sin flags manuales.
 - [x] Planificación LPT (*Longest Processing Time first*) para compresión y descompresión concurrente.
+- [x] Compresión interactiva del directorio actual (`crush -c` sin argumentos con confirmación interactiva).
+- [x] Adición y actualización in-place de archivos/carpetas en comprimidos existentes (`-a` / `-u`) para zip, 7z, rar, tar y tar.*.
 - [x] Streaming directo sin `.tar` temporales a disco y zero-copy en Linux vía `splice(2)`.
 - [x] Ampliación de capacidad de tuberías Linux a 1 MiB (`F_SETPIPE_SZ`).
 - [x] Descompresión interactiva y recursiva con agrupación de partes.
@@ -51,6 +53,6 @@ crush/
 - [x] División y descompresión continua en partes (`-s`).
 - [x] Barra de progreso tabular en tiempo real con ETA monótono.
 - [x] Suite de benchmarking integrada (`--bench`).
-- [x] Tests unitarios y de integración exhaustivos (407 tests nativos pasando con race detector).
+- [x] Tests unitarios y de integración exhaustivos (417 tests nativos pasando con race detector).
 - [x] Pipeline de CI/CD en GitHub Actions con matriz Go 1.21-1.23.
 - [x] Instalador de binario (`--install`) y dependencias multiplataforma (`--install-deps`).

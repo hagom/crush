@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/usuario/crush/actions/workflows/ci.yml/badge.svg)](https://github.com/usuario/crush/actions)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Tests](https://img.shields.io/badge/tests-407%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
+[![Tests](https://img.shields.io/badge/tests-417%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Formats](https://img.shields.io/badge/formats-13%20supported-blueviolet)](https://github.com/usuario/crush)
 
@@ -19,6 +19,8 @@
 - **13 formatos soportados:** `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`.
 - **Compresión máxima real y paralelismo automático (NCPU):** No requiere flags manuales de hilos (`-j`). Detecta automáticamente los núcleos disponibles (`NCPU()`) y maximiza los ratios de compresión (`zstd --ultra -22`, `7z -mx=9 -md=256m -mfb=273` adaptativo a RAM, `bzip3 -b 64`, `lz4 -9` LZ4HC) y descompresión multihilo (`lbzip2 -n N`, `pigz -p N`).
 - **Planificación LPT inteligente (Compresión y Descompresión):** Ordenamiento óptimo descendente por tamaño (*Longest Processing Time first*) tanto al comprimir múltiples archivos como al descomprimir lotes de archivos, garantizando una utilización del 100% de los núcleos del CPU durante todo el proceso y eliminando el cuello de botella por archivos rezagados.
+- **Compresión interactiva del directorio actual:** Al ejecutar `crush -c` sin especificar archivos, detecta automáticamente todos los elementos comprimibles en la ruta actual, muestra sus tamaños y solicita confirmación interactiva para comprimirlos (usando `-f` o `gz` por omisión).
+- **Adición y actualización in-place en archivos comprimidos (`-a` / `-u`):** Inserta nuevos archivos o carpetas directamente dentro de un archivo comprimido preexistente (`.zip`, `.7z`, `.rar`, `.tar`, `.tar.*`) sin generar un archivo nuevo en disco.
 - **Modo observador de directorios (`-watch`):** Monitoreo continuo de directorios sin dependencias externas usando `syscall.Inotify` nativo en Linux (`IN_CLOSE_WRITE | IN_MOVED_TO`) y sondeo en otras plataformas, procesando automáticamente compresión (`-c`) o descompresión (`-d`) de archivos entrantes.
 - **Generación y verificación de checksums SHA-256 (`-hash`, `-verify`):** Generación automática de archivos `.sha256` durante la compresión e integración en verificación para validar la integridad contra el hash.
 - **Cifrado y contraseñas (`-p`, `-password`):** Cifrado seguro para formatos de contenedor (`7z`, `zip`, `rar`) con soporte para prompt interactivo con terminal oculta y cifrado de cabeceras (`-mhe=on`).
@@ -141,6 +143,10 @@ sudo crush --uninstall
 ### Compresión
 
 ```bash
+# Compresión interactiva: detecta elementos comprimibles en la ruta actual y solicita confirmación
+crush -c                                     # Usa gz por defecto
+crush -c -f 7z                               # O especificando formato
+
 # Compresión de archivo individual
 crush -c -f gz documento.txt                 # → documento.tar.gz
 
@@ -178,6 +184,21 @@ crush -c -f gz -i lista_archivos.txt
 ```
 
 > **Nota sobre originales:** Por defecto, al completar una compresión sin errores, `crush` elimina los archivos de origen. Para conservarlos, usa siempre la opción `-k`.
+
+### Agregar o Actualizar Archivos In-Place (`-a`, `-u`)
+
+Permite agregar o actualizar archivos o carpetas directamente dentro de un contenedor comprimido existente (`.zip`, `.7z`, `.rar`, `.tar`, `.tar.*`) sin generar un archivo nuevo en disco ni requerir descompresión manual previa:
+
+```bash
+# Agregar un archivo a un ZIP existente
+crush -a archivo.zip nuevo_documento.txt
+
+# Agregar un directorio completo dentro de un archivo .7z
+crush -a respaldo.7z carpeta_fotos/
+
+# Actualizar múltiples archivos en un contenedor tar.gz (con soporte para -p y -hash)
+crush -u paquete.tar.gz archivo1.txt archivo2.png
+```
 
 ### Descompresión
 
@@ -262,8 +283,10 @@ crush --bench mi_archivo_de_prueba.iso
 
 ```text
 Uso:
-  crush -c -f FORMATO [opciones] archivo...
-  crush -d [opciones] archivo...
+  crush -c [opciones] [archivo...]
+  crush -a ARCHIVO_COMPRIMIDO [opciones] elemento...
+  crush -u ARCHIVO_COMPRIMIDO [opciones] elemento...
+  crush -d [opciones] [archivo...]
   crush -watch DIRECTORIO -c -f FORMATO [opciones]
   crush -watch DIRECTORIO -d [opciones]
   crush -l archivo...
@@ -281,8 +304,9 @@ Uso:
 
 | Opción | Descripción |
 |---|---|
-| `-c` | Comprimir archivos. |
-| `-d` | Descomprimir archivos (detección automática de formato). |
+| `-c` | Comprimir archivos. Sin argumentos, ejecuta compresión interactiva del directorio actual. |
+| `-a`, `-u` | Agregar o actualizar archivos o carpetas dentro de un contenedor comprimido existente (`.zip`, `.7z`, `.rar`, `.tar`, `.tar.*`). |
+| `-d` | Descomprimir archivos (detección automática de formato). Sin argumentos, ejecuta descompresión interactiva. |
 | `-watch DIR` | Monitorear directorio continuamente para procesar archivos entrantes (`-c` o `-d`). |
 | `-l` | Listar el contenido de los archivos comprimidos. |
 | `-t` | Verificar la integridad de los archivos comprimidos. |

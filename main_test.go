@@ -541,5 +541,61 @@ func TestExtractPasswordFlag(t *testing.T) {
 	}
 }
 
+func TestHelpEveryCommandLineHasExplanation(t *testing.T) {
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe failed: %v", err)
+	}
+	os.Stdout = w
 
+	printHelp()
 
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	helpOutput := buf.String()
+
+	lines := strings.Split(helpOutput, "\n")
+	var currentSection string
+	for lineIdx, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		var clean []rune
+		inEscape := false
+		for _, r := range trimmed {
+			if r == '\x1b' {
+				inEscape = true
+				continue
+			}
+			if inEscape {
+				if r == 'm' {
+					inEscape = false
+				}
+				continue
+			}
+			clean = append(clean, r)
+		}
+		cleanStr := strings.TrimSpace(string(clean))
+		if strings.HasSuffix(cleanStr, ":") {
+			currentSection = strings.TrimSuffix(cleanStr, ":")
+			continue
+		}
+		if cleanStr == "" {
+			continue
+		}
+		if currentSection == "Uso" || currentSection == "Ejemplos" {
+			if strings.HasPrefix(cleanStr, "crush ") || strings.HasPrefix(cleanStr, "cat ") {
+				if !strings.Contains(cleanStr, "#") {
+					t.Errorf("Línea %d en sección %q sin explicación: %q", lineIdx+1, currentSection, cleanStr)
+				} else {
+					parts := strings.SplitN(cleanStr, "#", 2)
+					if strings.TrimSpace(parts[1]) == "" {
+						t.Errorf("Línea %d en sección %q tiene '#' pero comentario está vacío: %q", lineIdx+1, currentSection, cleanStr)
+					}
+				}
+			}
+		}
+	}
+}

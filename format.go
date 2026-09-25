@@ -144,7 +144,13 @@ func FormatInfoFromFormat(f Format) FormatInfo {
 	case Lrz:
 		return FormatInfo{Format: Lrz, Tool: "lrzip", PipeFlags: "-d -p " + ncpuStr() + " -o -", DirectFlags: "-d -p " + ncpuStr(), IsTar: false, TestFlag: "-t"}
 	case Lz4:
-		return FormatInfo{Format: Lz4, Tool: "lz4", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
+		pipeFlags := "-dc"
+		directFlags := "-dk"
+		if lz4SupportsThreads() {
+			pipeFlags += " -T" + ncpuStr()
+			directFlags += " -T" + ncpuStr()
+		}
+		return FormatInfo{Format: Lz4, Tool: "lz4", PipeFlags: pipeFlags, DirectFlags: directFlags, IsTar: false, TestFlag: "-t"}
 	case Br:
 		return FormatInfo{Format: Br, Tool: "brotli", PipeFlags: "-dc", DirectFlags: "-dk", IsTar: false, TestFlag: "-t"}
 	case Zip:
@@ -222,7 +228,12 @@ func DetectFormat(filename string) (FormatInfo, error) {
 // Formats whose CLI tools are strictly single-threaded return 1, preventing wasted thread allocation.
 func FormatMaxThreads(f Format) int {
 	switch f {
-	case Tar, Lz4, Br:
+	case Tar, Br:
+		return 1
+	case Lz4:
+		if lz4SupportsThreads() {
+			return NCPU()
+		}
 		return 1
 	case Bz2:
 		if bzip2Bin() == "bzip2" {

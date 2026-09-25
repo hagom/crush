@@ -491,7 +491,11 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command(tool, args...)
 	case "lz4":
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
+		args := []string{"-c"}
+		if lz4SupportsThreads() && opts.ThreadLimit > 0 {
+			args = append(args, "-T"+threadStr(opts.ThreadLimit))
+		}
+		args = append(args, fmt.Sprintf("-%d", fastOrSlow(opts, 9)))
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("lz4", args...)
 	case "br":

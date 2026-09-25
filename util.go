@@ -351,6 +351,24 @@ func rarBin() string {
 	return rarCache
 }
 
+var (
+	lz4ThreadOnce  sync.Once
+	lz4ThreadCache bool
+)
+
+func lz4SupportsThreads() bool {
+	lz4ThreadOnce.Do(func() {
+		if !hasTool("lz4") {
+			return
+		}
+		cmd := execCommand("lz4", "-T1", "--version")
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		lz4ThreadCache = (cmd.Run() == nil)
+	})
+	return lz4ThreadCache
+}
+
 // --- Memory ---
 
 var getMemLimit = GetMemLimit
@@ -1820,6 +1838,11 @@ func PipeFlagsForThreads(info FormatInfo, threads int) []string {
 		return []string{"-dc", "-n", thStr}
 	case "lrzip":
 		return []string{"-d", "-p", thStr, "-o", "-"}
+	case "lz4":
+		if lz4SupportsThreads() {
+			return []string{"-dc", "-T" + thStr}
+		}
+		return []string{"-dc"}
 	default:
 		return strings.Fields(info.PipeFlags)
 	}

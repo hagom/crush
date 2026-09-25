@@ -396,9 +396,6 @@ func TestFormatMaxThreads(t *testing.T) {
 	if got := FormatMaxThreads(Tar); got != 1 {
 		t.Errorf("FormatMaxThreads(Tar) = %d, want 1", got)
 	}
-	if got := FormatMaxThreads(Lz4); got != 1 {
-		t.Errorf("FormatMaxThreads(Lz4) = %d, want 1", got)
-	}
 	if got := FormatMaxThreads(Br); got != 1 {
 		t.Errorf("FormatMaxThreads(Br) = %d, want 1", got)
 	}
@@ -407,6 +404,15 @@ func TestFormatMaxThreads(t *testing.T) {
 	}
 	if got := FormatMaxThreads(SevenZ); got < 1 {
 		t.Errorf("FormatMaxThreads(SevenZ) = %d, want >= 1", got)
+	}
+	if lz4SupportsThreads() {
+		if got := FormatMaxThreads(Lz4); got < 1 {
+			t.Errorf("FormatMaxThreads(Lz4) multithread = %d, want >= 1", got)
+		}
+	} else {
+		if got := FormatMaxThreads(Lz4); got != 1 {
+			t.Errorf("FormatMaxThreads(Lz4) singlethread = %d, want 1", got)
+		}
 	}
 }
 

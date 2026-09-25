@@ -289,7 +289,7 @@ func listTarMembers(file string) ([]string, bool) {
 	case strings.HasSuffix(lower, ".tar.bz3"):
 		args = []string{"-I", "bzip3 -dc", "-tf"}
 	case strings.HasSuffix(lower, ".tar.br"):
-		args = []string{"-I", "brotli -dc", "-tf"}
+		args = []string{"-I", "brotli", "-tf"}
 	case strings.HasSuffix(lower, ".tar.lrz"):
 		args = []string{"-I", "lrzip -d -p 1 -o -", "-tf"}
 	case strings.HasSuffix(lower, ".tar.lz4"):
@@ -540,7 +540,12 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		case strings.HasSuffix(ext, ".tar.lrz"):
 			decompCmd = exec.Command("lrzip", "-d", "-p", threadStr(opts.ThreadLimit), "-o", "-", "--", file)
 		case strings.HasSuffix(ext, ".tar.lz4"):
-			decompCmd = exec.Command("lz4", "-dc", "--", file)
+			lz4Args := []string{"-dc"}
+			if lz4SupportsThreads() && opts.ThreadLimit > 0 {
+				lz4Args = append(lz4Args, "-T"+threadStr(opts.ThreadLimit))
+			}
+			lz4Args = append(lz4Args, "--", file)
+			decompCmd = exec.Command("lz4", lz4Args...)
 		case strings.HasSuffix(ext, ".tar.br"):
 			decompCmd = exec.Command("brotli", "-dc", "--", file)
 		case strings.HasSuffix(ext, ".tar"):

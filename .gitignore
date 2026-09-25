@@ -1,3 +1,4 @@
 crush
 *.log
 .codegraph/
+.worktrees/

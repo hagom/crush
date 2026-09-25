@@ -1167,3 +1167,357 @@ func TestCompressPassword7zAndZip(t *testing.T) {
 		t.Fatalf("esperado 1 archivo zip")
 	}
 }
+
+func TestFindCompressibleFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Archivos normales
+	if err := os.WriteFile(filepath.Join(tmpDir, "documento.txt"), []byte("hola"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "datos.csv"), []byte("a,b,c"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Carpeta normal
+	subDir := filepath.Join(tmpDir, "fotos")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "foto1.jpg"), []byte("img"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Archivos y directorios ocultos (deben ser ignorados)
+	if err := os.WriteFile(filepath.Join(tmpDir, ".oculto.txt"), []byte("secreto"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Archivos ya comprimidos (deben ser ignorados)
+	if err := os.WriteFile(filepath.Join(tmpDir, "respaldo.tar.gz"), []byte("tar-gz-mock"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "archivo.zip"), []byte("zip-mock"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "archivo.7z"), []byte("7z-mock"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Archivos de checksum y partes split (deben ser ignorados)
+	if err := os.WriteFile(filepath.Join(tmpDir, "respaldo.tar.gz.sha256"), []byte("hash"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "dividido.tar.gz.part01"), []byte("p1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "dividido_parts"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := FindCompressibleFiles(tmpDir)
+	if err != nil {
+		t.Fatalf("FindCompressibleFiles failed: %v", err)
+	}
+
+	want := []string{"datos.csv", "documento.txt", "fotos"}
+	if len(files) != len(want) {
+		t.Fatalf("got %d files %v, want %d %v", len(files), files, len(want), want)
+	}
+	for i, f := range files {
+		if filepath.Base(f) != want[i] {
+			t.Errorf("at index %d: got %s, want %s", i, f, want[i])
+		}
+	}
+}
+
+func TestPromptCompressAll(t *testing.T) {
+	files := []string{"file1.txt", "file2.txt"}
+
+	// Caso 's'
+	r := strings.NewReader("s\n")
+	var w bytes.Buffer
+	ok, err := PromptCompressAll(r, &w, files, "gz")
+	if err != nil {
+		t.Fatalf("PromptCompressAll error: %v", err)
+	}
+	if !ok {
+		t.Errorf("PromptCompressAll con 's' debería confirmar")
+	}
+
+	// Caso 'no'
+	rNo := strings.NewReader("n\n")
+	var wNo bytes.Buffer
+	okNo, err := PromptCompressAll(rNo, &wNo, files, "7z")
+	if err != nil {
+		t.Fatalf("PromptCompressAll error: %v", err)
+	}
+	if okNo {
+		t.Errorf("PromptCompressAll con 'n' no debería confirmar")
+	}
+
+	// Caso lista vacía
+	okEmpty, _ := PromptCompressAll(strings.NewReader(""), &bytes.Buffer{}, nil, "gz")
+	if okEmpty {
+		t.Errorf("con lista vacía debería retornar false")
+	}
+}
+
+func TestDoAppendZip(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "f1.txt")
+	f2 := filepath.Join(tmpDir, "f2.txt")
+	subDir := filepath.Join(tmpDir, "carpeta")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f3 := filepath.Join(subDir, "f3.txt")
+
+	if err := os.WriteFile(f1, []byte("content 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("content 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f3, []byte("content 3"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Crear archivo inicial .zip con f1.txt
+	opts := CompressOptions{
+		Format:    Zip,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	out, err := DoCompress([]string{f1}, opts)
+	if err != nil || len(out) == 0 {
+		t.Fatalf("DoCompress zip inicial falló: %v", err)
+	}
+	zipPath := out[0]
+
+	// 2. Agregar f2.txt y carpeta/ a zipPath existente
+	if err := DoAppend(zipPath, []string{f2, subDir}, CompressOptions{}); err != nil {
+		t.Fatalf("DoAppend zip falló: %v", err)
+	}
+
+	// 3. Verificar que los archivos están dentro de zipPath
+	members, ok := listSevenZipMembers(zipPath, "")
+	if !ok {
+		t.Fatalf("no se pudo listar miembros de zip actualizado")
+	}
+	joined := strings.Join(members, " ")
+	if !strings.Contains(joined, "f1.txt") || !strings.Contains(joined, "f2.txt") {
+		t.Errorf("zip no contiene f1 y f2: %v", members)
+	}
+}
+
+func TestDoAppendTarGz(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "archivo1.txt")
+	f2 := filepath.Join(tmpDir, "archivo2.txt")
+	if err := os.WriteFile(f1, []byte("texto 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("texto 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	out, err := DoCompress([]string{f1}, opts)
+	if err != nil || len(out) == 0 {
+		t.Fatalf("DoCompress tar.gz inicial falló: %v", err)
+	}
+	tarGzPath := out[0]
+
+	if err := DoAppend(tarGzPath, []string{f2}, CompressOptions{}); err != nil {
+		t.Fatalf("DoAppend tar.gz falló: %v", err)
+	}
+
+	members, ok := listTarMembers(tarGzPath)
+	if !ok {
+		t.Fatalf("no se pudo listar tar.gz actualizado")
+	}
+	joined := strings.Join(members, " ")
+	if !strings.Contains(joined, "archivo1.txt") || !strings.Contains(joined, "archivo2.txt") {
+		t.Errorf("tar.gz no contiene ambos archivos: %v", members)
+	}
+}
+
+func TestDoAppendStreamError(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "simple.txt")
+	if err := os.WriteFile(f1, []byte("simple file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Comprimir como stream directo (no tar)
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	outPaths, err := DoCompress([]string{f1}, opts)
+	if err != nil || len(outPaths) == 0 {
+		t.Fatalf("creando archivo de prueba: %v", err)
+	}
+	// Renombrar o usar archivo de flujo
+	gzPath := filepath.Join(tmpDir, "raw.gz")
+	cmd := exec.Command("gzip", "-c", f1)
+	rawOut, err := os.Create(gzPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = rawOut
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	rawOut.Close()
+
+	f2 := filepath.Join(tmpDir, "extra.txt")
+	if err := os.WriteFile(f2, []byte("extra"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = DoAppend(gzPath, []string{f2}, CompressOptions{})
+	if err == nil {
+		t.Errorf("DoAppend a flujo simple (.gz) debería fallar con error explicativo")
+	}
+}
+
+func TestDoAppend7z(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	f2 := filepath.Join(tmpDir, "file2.txt")
+	if err := os.WriteFile(f1, []byte("contenido 7z 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("contenido 7z 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    SevenZ,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	out, err := DoCompress([]string{f1}, opts)
+	if err != nil || len(out) == 0 {
+		t.Fatalf("DoCompress 7z inicial falló: %v", err)
+	}
+	archive7z := out[0]
+
+	if err := DoAppend(archive7z, []string{f2}, CompressOptions{}); err != nil {
+		t.Fatalf("DoAppend 7z falló: %v", err)
+	}
+
+	members, ok := listSevenZipMembers(archive7z, "")
+	if !ok {
+		t.Fatalf("no se pudo listar miembros de 7z actualizado")
+	}
+	joined := strings.Join(members, " ")
+	if !strings.Contains(joined, "file1.txt") || !strings.Contains(joined, "file2.txt") {
+		t.Errorf("7z actualizado no contiene ambos archivos: %v", members)
+	}
+}
+
+func TestDoAppendTar(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "doc1.txt")
+	f2 := filepath.Join(tmpDir, "doc2.txt")
+	if err := os.WriteFile(f1, []byte("plain tar 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("plain tar 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Tar,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	out, err := DoCompress([]string{f1}, opts)
+	if err != nil || len(out) == 0 {
+		t.Fatalf("DoCompress tar inicial falló: %v", err)
+	}
+	tarPath := out[0]
+
+	if err := DoAppend(tarPath, []string{f2}, CompressOptions{}); err != nil {
+		t.Fatalf("DoAppend plain tar falló: %v", err)
+	}
+
+	members, ok := listTarMembers(tarPath)
+	if !ok {
+		t.Fatalf("no se pudo listar plain tar actualizado")
+	}
+	joined := strings.Join(members, " ")
+	if !strings.Contains(joined, "doc1.txt") || !strings.Contains(joined, "doc2.txt") {
+		t.Errorf("plain tar actualizado no contiene ambos archivos: %v", members)
+	}
+}
+
+func TestDoAppendWithSha256(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "hash1.txt")
+	f2 := filepath.Join(tmpDir, "hash2.txt")
+	if err := os.WriteFile(f1, []byte("hash content 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("hash content 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Zip,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Hash:      true,
+	}
+	out, err := DoCompress([]string{f1}, opts)
+	if err != nil || len(out) == 0 {
+		t.Fatalf("creación inicial con hash falló: %v", err)
+	}
+	zipPath := out[0]
+	shaFile := zipPath + ".sha256"
+	if _, err := os.Stat(shaFile); err != nil {
+		t.Fatalf("no se generó el archivo .sha256 inicial: %v", err)
+	}
+
+	origHash, err := os.ReadFile(shaFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := DoAppend(zipPath, []string{f2}, CompressOptions{Hash: true}); err != nil {
+		t.Fatalf("DoAppend con hash falló: %v", err)
+	}
+
+	newHash, err := os.ReadFile(shaFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(origHash) == string(newHash) {
+		t.Errorf("el hash no cambió tras modificar el archivo comprimido")
+	}
+
+	parsedHash, err := ParseSHA256File(shaFile, zipPath)
+	if err != nil {
+		t.Fatalf("ParseSHA256File falló: %v", err)
+	}
+	actualHash, err := ComputeSHA256(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsedHash != actualHash {
+		t.Errorf("el hash en .sha256 (%s) no coincide con el hash real del archivo (%s)", parsedHash, actualHash)
+	}
+}

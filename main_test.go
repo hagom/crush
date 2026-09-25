@@ -63,6 +63,16 @@ func TestReorderArgs(t *testing.T) {
 			want: []string{"crush", "-completion", "bash", "file.txt"},
 		},
 		{
+			name: "add flag with positional archive and files",
+			args: []string{"crush", "archive.zip", "new.txt", "-a", "-v"},
+			want: []string{"crush", "-a", "-v", "archive.zip", "new.txt"},
+		},
+		{
+			name: "update flag combined short",
+			args: []string{"crush", "archive.tar", "file.txt", "-uv"},
+			want: []string{"crush", "-u", "-v", "archive.tar", "file.txt"},
+		},
+		{
 			name: "input list flag -i with value",
 			args: []string{"crush", "-c", "-f", "gz", "-i", "list.txt"},
 			want: []string{"crush", "-c", "-f", "gz", "-i", "list.txt"},

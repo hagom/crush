@@ -27,6 +27,8 @@ var knownShortFlags = map[byte]bool{
 	'n': true,
 	'C': true,
 	'S': true,
+	'a': true,
+	'u': true,
 }
 
 var Version = "dev" // set at build time: go build -ldflags="-X main.Version=x.y.z"
@@ -209,6 +211,10 @@ func main() {
 	// Flags
 	compressFlag := flag.Bool("c", false, "Comprimir archivos")
 	decompressFlag := flag.Bool("d", false, "Descomprimir archivos")
+	addFlag := flag.Bool("a", false, "Agregar archivos o carpetas a un archivo comprimido existente")
+	addLongFlag := flag.Bool("add", false, "Agregar archivos o carpetas a un archivo comprimido existente (alias de -a)")
+	updateFlag := flag.Bool("u", false, "Agregar o actualizar archivos en un archivo comprimido existente (alias de -a)")
+	updateLongFlag := flag.Bool("update", false, "Agregar o actualizar archivos en un archivo comprimido existente (alias de -a)")
 	listFlag := flag.Bool("l", false, "Listar contenido de archivo comprimido")
 	testFlag := flag.Bool("t", false, "Verificar integridad de archivos comprimidos")
 	readFlag := flag.Bool("r", false, "Leer contenido de archivo comprimido a stdout")
@@ -291,14 +297,16 @@ func main() {
 	// Check mode conflicts among -c, -d, -l, -t, -r, -verify
 	// Allowed: -c + -t (compress then test), -d + -t (test before decompress)
 	// Everything else with >= 2 modes is a conflict
+	isAddMode := *addFlag || *addLongFlag || *updateFlag || *updateLongFlag
 	hasC := *compressFlag
 	hasD := *decompressFlag
+	hasA := isAddMode
 	hasL := *listFlag
 	hasT := *testFlag || *verifyFlag
 	hasR := *readFlag
 
 	writeModes := 0
-	for _, m := range []bool{hasC, hasD} {
+	for _, m := range []bool{hasC, hasD, hasA} {
 		if m {
 			writeModes++
 		}
@@ -313,18 +321,18 @@ func main() {
 	conflict := false
 	var conflictFlags []string
 
-	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 || (hasT && (hasL || hasR)) {
+	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 || (hasT && (hasL || hasR || hasA)) {
 		conflict = true
 	}
 
 	if conflict {
 		for _, f := range []struct {
-			v    *bool
+			v    bool
 			name string
 		}{
-			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {verifyFlag, "-verify"}, {readFlag, "-r"},
+			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"},
 		} {
-			if *f.v {
+			if f.v {
 				conflictFlags = append(conflictFlags, f.name)
 			}
 		}
@@ -348,9 +356,9 @@ func main() {
 		os.Exit(1)
 	}
 	if installModeCount > 0 {
-		for _, m := range []bool{*compressFlag, *decompressFlag, *listFlag, *testFlag, *verifyFlag, *readFlag, *benchFlag, *watchDir != ""} {
+		for _, m := range []bool{hasC, hasD, hasA, hasL, *testFlag, *verifyFlag, hasR, *benchFlag, *watchDir != ""} {
 			if m {
-				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -l, -t, -verify, -r, --bench o -watch")
+				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -a, -l, -t, -verify, -r, --bench o -watch")
 				os.Exit(1)
 			}
 		}
@@ -363,12 +371,12 @@ func main() {
 			os.Exit(1)
 		}
 		for _, m := range []struct {
-			v    *bool
+			v    bool
 			name string
 		}{
-			{compressFlag, "-c"}, {decompressFlag, "-d"}, {listFlag, "-l"}, {testFlag, "-t"}, {verifyFlag, "-verify"}, {readFlag, "-r"},
+			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"},
 		} {
-			if *m.v {
+			if m.v {
 				WriteError("--bench no se puede combinar con %s", m.name)
 				os.Exit(1)
 			}
@@ -377,6 +385,10 @@ func main() {
 
 	// Validations for -watch
 	if *watchDir != "" {
+		if hasA {
+			WriteError("-watch no se puede combinar con -a o -u")
+			os.Exit(1)
+		}
 		if !*compressFlag && !*decompressFlag {
 			WriteError("-watch requiere -c (comprimir) o -d (descomprimir)")
 			os.Exit(1)
@@ -452,7 +464,7 @@ func main() {
 			}
 		}
 	}
-	opMode := *compressFlag || *decompressFlag || *listFlag || *readFlag || *testFlag || *verifyFlag
+	opMode := *compressFlag || *decompressFlag || hasA || *listFlag || *readFlag || *testFlag || *verifyFlag
 	if *watchDir != "" {
 		// Modo watcher: los archivos se procesan según se detectan en el directorio
 	} else if len(files) == 0 && stdinIsPipe && *formatStr != "" && (*compressFlag || *decompressFlag) {
@@ -476,6 +488,30 @@ func main() {
 		}
 		fmt.Println()
 		files = found
+	} else if len(files) == 0 && *compressFlag {
+		found, err := FindCompressibleFiles(".")
+		if err != nil {
+			WriteError("buscando archivos para comprimir: %v", err)
+			os.Exit(1)
+		}
+		if len(found) == 0 {
+			WriteInfo("No se encontraron archivos o directorios para comprimir en el directorio actual.")
+			return
+		}
+		fmtChoice := *formatStr
+		if fmtChoice == "" {
+			fmtChoice = "gz"
+			*formatStr = "gz"
+		}
+		confirmed, err := PromptCompressAll(os.Stdin, os.Stdout, found, fmtChoice)
+		if err != nil || !confirmed {
+			if !confirmed {
+				WriteInfo("Operación cancelada.")
+			}
+			return
+		}
+		fmt.Println()
+		files = found
 	} else if len(files) == 0 && opMode {
 		WriteError("debe especificar archivos como argumentos o con -i")
 		os.Exit(1)
@@ -491,6 +527,31 @@ func main() {
 			WriteError("en benchmark: %v", err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// Handle -a / -u (append/update to existing archive)
+	if hasA {
+		if len(files) < 2 {
+			WriteError("debe especificar el archivo comprimido destino y al menos un archivo o carpeta para agregar\nUso: crush -a ARCHIVO_COMPRIMIDO elemento...")
+			os.Exit(1)
+		}
+		targetArchive := files[0]
+		itemsToAdd := files[1:]
+		effectiveThreads := NCPU()
+		opts := CompressOptions{
+			Password:        cliPassword,
+			Sparse:          *sparseFlag || *sparseShortFlag,
+			Verbose:         *verbose,
+			Hash:            *hashFlag,
+			ThreadLimit:     effectiveThreads,
+			CompressionOpts: *compressionOpts,
+		}
+		if err := DoAppend(targetArchive, itemsToAdd, opts); err != nil {
+			WriteError("%v", err)
+			os.Exit(1)
+		}
+		WriteSuccess("Archivo comprimido actualizado con éxito: %s", targetArchive)
 		return
 	}
 
@@ -954,7 +1015,10 @@ func printHelp() {
 	w(BoldBlue, "CRUSH  Herramienta multi-formato de compresión y descompresión\n\n")
 	w(BoldBlue, "Uso:\n")
 	w(Yellow, "  crush -c -f FORMATO [opciones] archivo...\n")
+	w(Yellow, "  crush -c [opciones]                                   # compresión interactiva del directorio actual\n")
 	w(Yellow, "  crush -d [opciones] archivo...\n")
+	w(Yellow, "  crush -d [opciones]                                   # descompresión interactiva de detectados\n")
+	w(Yellow, "  crush -a ARCHIVO_COMPRIMIDO [opciones] elemento...     # agregar elementos a archivo existente\n")
 	w(Yellow, "  crush -watch DIRECTORIO -c -f FORMATO [opciones]\n")
 	w(Yellow, "  crush -watch DIRECTORIO -d [opciones]\n")
 	w(Yellow, "  crush -l archivo...\n")
@@ -966,9 +1030,11 @@ func printHelp() {
 	w(Yellow, "  crush --bench [archivo]\n\n")
 	w(BoldBlue, "Opciones de modo:\n")
 	w(Yellow, "  -c")
-	fmt.Print("                   Comprimir archivos\n")
+	fmt.Print("                   Comprimir archivos (o directorio actual si no se pasan argumentos)\n")
 	w(Yellow, "  -d")
-	fmt.Print("                   Descomprimir archivos\n")
+	fmt.Print("                   Descomprimir archivos (o interactivo si no se pasan argumentos)\n")
+	w(Yellow, "  -a, -u")
+	fmt.Print("                 Agregar archivos o carpetas a un archivo comprimido existente\n")
 	w(Yellow, "  -watch DIR")
 	fmt.Print("           Monitorear directorio para procesar archivos nuevos\n")
 	w(Yellow, "  -l")
@@ -1038,6 +1104,9 @@ func printHelp() {
 	fmt.Print("\n")
 	fmt.Print("                       Instalar autocompletado para una shell específica\n\n")
 	w(BoldBlue, "Ejemplos:\n")
+	w(Yellow, "  crush -c                                              # compresión interactiva del directorio actual\n")
+	w(Yellow, "  crush -a comprimido.zip archivo.txt carpeta/          # agregar archivos a zip existente sin recrearlo\n")
+	w(Yellow, "  crush -a respaldo.tar.gz nuevo.log                    # agregar a tar.gz existente in-place\n")
 	w(Yellow, "  crush -c -f gz documento.txt\n")
 	w(Yellow, "  crush -c -f gz -t documento.txt                       # comprimir y verificar integridad\n")
 	w(Yellow, "  crush -c -f gz -hash documento.txt                    # comprimir y generar checksum SHA-256\n")

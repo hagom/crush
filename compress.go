@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1023,4 +1025,261 @@ func removeFiles(files []string, verbose bool) int {
 		}
 	}
 	return removed
+}
+
+func FindCompressibleFiles(dir string) ([]string, error) {
+	if dir == "" {
+		dir = "."
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if strings.Contains(name, ".part") {
+			continue
+		}
+		if strings.HasSuffix(name, ".sha256") {
+			continue
+		}
+		if IsSplitPartsDir(name) {
+			continue
+		}
+		if !entry.IsDir() {
+			if _, err := DetectFormat(name); err == nil {
+				continue
+			}
+		}
+		relPath := name
+		if dir != "." {
+			relPath = filepath.Join(dir, name)
+		}
+		files = append(files, relPath)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func PromptCompressAll(r io.Reader, w io.Writer, files []string, format string) (bool, error) {
+	if len(files) == 0 {
+		return false, nil
+	}
+
+	fmt.Fprintf(w, "%sElementos detectados para comprimir en el directorio actual (%d):%s\n", Bold, len(files), NC)
+	for _, f := range files {
+		sizeStr := ""
+		if fi, err := os.Stat(f); err == nil {
+			if fi.IsDir() {
+				if sz, err := GetDirSize(f); err == nil && sz > 0 {
+					sizeStr = fmt.Sprintf(" (%s)", FormatSize(sz))
+				}
+			} else {
+				sizeStr = fmt.Sprintf(" (%s)", FormatSize(fi.Size()))
+			}
+		}
+		fmt.Fprintf(w, "  • %s%s%s%s\n", Blue, f, NC, sizeStr)
+	}
+	fmt.Fprintf(w, "\n%s¿Desea comprimir todos los elementos (%d) [formato: %s]? [s/N]: %s", Yellow, len(files), format, NC)
+
+	scanner := bufio.NewScanner(r)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	resp := strings.TrimSpace(scanner.Text())
+	lower := strings.ToLower(resp)
+	if lower == "s" || lower == "si" || lower == "sí" || lower == "y" || lower == "yes" {
+		return true, nil
+	}
+	return false, nil
+}
+
+func DoAppend(archive string, items []string, opts CompressOptions) error {
+	fi, err := os.Stat(archive)
+	if err != nil {
+		return fmt.Errorf("el archivo comprimido objetivo no existe: %s", archive)
+	}
+	if fi.IsDir() {
+		return fmt.Errorf("%s es un directorio, no un archivo comprimido", archive)
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("debe especificar al menos un archivo o carpeta para agregar")
+	}
+	for _, item := range items {
+		if _, err := os.Stat(item); err != nil {
+			return fmt.Errorf("el archivo o carpeta a agregar no existe: %s", item)
+		}
+	}
+
+	info, err := DetectFormat(archive)
+	if err != nil {
+		return fmt.Errorf("no se pudo determinar el formato de %s: %w", archive, err)
+	}
+
+	switch {
+	case info.Format == Zip:
+		sevenz := sevenzBin()
+		if hasTool(sevenz) {
+			args := []string{"u", "-bsp1", "-mmt=" + threadStr(opts.ThreadLimit)}
+			if opts.Password != "" {
+				args = append(args, "-p"+opts.Password)
+			}
+			args = append(args, archive)
+			args = append(args, items...)
+			cmd := exec.Command(sevenz, args...)
+			cmd.Stdout = stdoutFor(opts.Progress)
+			cmd.Stderr = stderrFor(opts.Progress)
+			if err := augmentErr(cmd, cmd.Run()); err != nil {
+				return fmt.Errorf("error agregando a zip: %w", err)
+			}
+		} else if hasTool("zip") {
+			args := []string{"-u", "-r"}
+			if opts.Password != "" {
+				args = append(args, "-P", opts.Password)
+			}
+			args = append(args, archive)
+			args = append(args, items...)
+			cmd := exec.Command("zip", args...)
+			cmd.Stdout = stdoutFor(opts.Progress)
+			cmd.Stderr = stderrFor(opts.Progress)
+			if err := augmentErr(cmd, cmd.Run()); err != nil {
+				return fmt.Errorf("error agregando a zip: %w", err)
+			}
+		} else {
+			return fmt.Errorf("no se encontró herramienta para actualizar zip (se requiere 7z o zip)")
+		}
+
+	case info.Format == SevenZ:
+		sevenz := sevenzBin()
+		if !hasTool(sevenz) {
+			return fmt.Errorf("no se encontró %s para actualizar archivo 7z", sevenz)
+		}
+		args := []string{"u", "-bsp1", "-mmt=" + threadStr(opts.ThreadLimit)}
+		if opts.Password != "" {
+			args = append(args, "-p"+opts.Password)
+			args = append(args, "-mhe=on")
+		}
+		args = append(args, archive)
+		args = append(args, items...)
+		cmd := exec.Command(sevenz, args...)
+		cmd.Stdout = stdoutFor(opts.Progress)
+		cmd.Stderr = stderrFor(opts.Progress)
+		if err := augmentErr(cmd, cmd.Run()); err != nil {
+			return fmt.Errorf("error agregando a 7z: %w", err)
+		}
+
+	case info.Format == Rar:
+		tool := rarBin()
+		if !hasTool(tool) {
+			return fmt.Errorf("no se encontró %s para actualizar archivo rar", tool)
+		}
+		args := []string{"u", "-y", "-mt" + threadStr(opts.ThreadLimit)}
+		if opts.Password != "" {
+			args = append(args, "-p"+opts.Password)
+		}
+		args = append(args, archive)
+		args = append(args, items...)
+		cmd := exec.Command(tool, args...)
+		cmd.Stdout = stdoutFor(opts.Progress)
+		cmd.Stderr = stderrFor(opts.Progress)
+		if err := augmentErr(cmd, cmd.Run()); err != nil {
+			return fmt.Errorf("error agregando a rar: %w", err)
+		}
+
+	case info.Format == Tar && !info.IsStream():
+		args := []string{"-rf", archive}
+		if opts.Sparse {
+			args = append(args, "--sparse")
+		}
+		args = append(args, items...)
+		cmd := exec.Command("tar", args...)
+		cmd.Stdout = stdoutFor(opts.Progress)
+		cmd.Stderr = stderrFor(opts.Progress)
+		if err := augmentErr(cmd, cmd.Run()); err != nil {
+			return fmt.Errorf("error agregando a tar: %w", err)
+		}
+
+	case info.IsTar && info.IsStream():
+		tmpTar, err := os.CreateTemp(filepath.Dir(archive), "crush_append_*.tar")
+		if err != nil {
+			return fmt.Errorf("creando archivo temporal: %w", err)
+		}
+		tmpTarPath := tmpTar.Name()
+		defer os.Remove(tmpTarPath)
+
+		decompCmd, closer := pipeCmdFor(info, archive)
+		if closer != nil {
+			defer closer.Close()
+		}
+		decompCmd.Stdout = tmpTar
+		decompCmd.Stderr = stderrFor(opts.Progress)
+		if err := decompCmd.Run(); err != nil {
+			tmpTar.Close()
+			return fmt.Errorf("error descomprimiendo tar existente: %w", err)
+		}
+		tmpTar.Close()
+
+		tarArgs := []string{"-rf", tmpTarPath}
+		if opts.Sparse {
+			tarArgs = append(tarArgs, "--sparse")
+		}
+		tarArgs = append(tarArgs, items...)
+		tarCmd := exec.Command("tar", tarArgs...)
+		tarCmd.Stdout = stdoutFor(opts.Progress)
+		tarCmd.Stderr = stderrFor(opts.Progress)
+		if err := augmentErr(tarCmd, tarCmd.Run()); err != nil {
+			return fmt.Errorf("error agregando elementos a tar temporal: %w", err)
+		}
+
+		tarFile, err := os.Open(tmpTarPath)
+		if err != nil {
+			return fmt.Errorf("abriendo tar temporal para recompresión: %w", err)
+		}
+		defer tarFile.Close()
+
+		tmpOut := archive + ".crush_tmp"
+		outF, err := os.Create(tmpOut)
+		if err != nil {
+			return fmt.Errorf("creando archivo temporal re-comprimido: %w", err)
+		}
+		defer os.Remove(tmpOut)
+
+		compOpts := opts
+		compOpts.Format = info.Format
+		compCmd := buildCompressCmd(compOpts)
+		compCmd.Stdin = tarFile
+		compCmd.Stdout = outF
+		compCmd.Stderr = stderrFor(opts.Progress)
+		if err := augmentErr(compCmd, compCmd.Run()); err != nil {
+			outF.Close()
+			return fmt.Errorf("error re-comprimiendo archivo: %w", err)
+		}
+		outF.Close()
+		tarFile.Close()
+
+		if err := os.Rename(tmpOut, archive); err != nil {
+			return fmt.Errorf("error reemplazando archivo original: %w", err)
+		}
+
+	default:
+		return fmt.Errorf("el formato %s no soporta agregar múltiples archivos (es un flujo individual, use contenedores como .tar.%s o .zip)", info.Format.String(), info.Format.String())
+	}
+
+	shaPath := archive + ".sha256"
+	if _, statErr := os.Stat(shaPath); statErr == nil || opts.Hash {
+		newHash, err := WriteSHA256File(archive)
+		if err == nil {
+			WriteLogf("✓ Checksum SHA-256 actualizado para %s: %s\n", archive, newHash)
+		}
+	}
+
+	return nil
 }

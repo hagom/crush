@@ -186,6 +186,20 @@ func TotalArchiveSize(archivePath string) int64 {
 	return PartsTotalSize(findSplitParts(archivePath))
 }
 
+func GetDirSize(dir string) (int64, error) {
+	var total int64
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
 func IsSplitPartsDir(dir string) bool {
 	return strings.HasSuffix(dir, "_parts") || strings.HasSuffix(dir, "_split")
 }

@@ -485,7 +485,15 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		return exec.Command("xz", args...)
 	case "bz2":
 		bin := bzip2Bin()
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
+		args := []string{"-c"}
+		if opts.ThreadLimit > 0 {
+			if bin == "lbzip2" {
+				args = append(args, "-n", threadStr(opts.ThreadLimit))
+			} else if bin == "pbzip2" {
+				args = append(args, "-p"+threadStr(opts.ThreadLimit))
+			}
+		}
+		args = append(args, fmt.Sprintf("-%d", fastOrSlow(opts, 9)))
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command(bin, args...)
 	case "bz3":

@@ -169,25 +169,29 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, err
 	}
 
+	sizeCache := make(map[string]int64, len(files))
+	getSize := func(path string) int64 {
+		if sz, ok := sizeCache[path]; ok {
+			return sz
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			sizeCache[path] = 0
+			return 0
+		}
+		if fi.IsDir() {
+			sz, _ := GetDirSize(path)
+			sizeCache[path] = sz
+			return sz
+		}
+		sz := fi.Size()
+		sizeCache[path] = sz
+		return sz
+	}
+
 	totalSize := int64(0)
 	for _, f := range files {
-		info, err := os.Stat(f)
-		if err != nil {
-			continue
-		}
-		if info.IsDir() {
-			filepath.Walk(f, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return nil
-				}
-				if !info.IsDir() {
-					totalSize += info.Size()
-				}
-				return nil
-			})
-		} else {
-			totalSize += info.Size()
-		}
+		totalSize += getSize(f)
 	}
 
 	estimated := EstimateCompressedSize(totalSize, opts.Format, files)
@@ -233,15 +237,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if canParallel {
 		totalSize = 0
 		for _, f := range filteredFiles {
-			info, err := os.Stat(f)
-			if err == nil {
-				if info.IsDir() {
-					sz, _ := GetDirSize(f)
-					totalSize += sz
-				} else {
-					totalSize += info.Size()
-				}
-			}
+			totalSize += getSize(f)
 		}
 		opts.TotalSize = totalSize
 
@@ -257,7 +253,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		pt.Start()
 		defer pt.Stop()
 
-		outPaths, err = compressParallel(filteredFiles, opts)
+		outPaths, err = compressParallel(filteredFiles, opts, sizeCache)
 		return outPaths, err
 	}
 
@@ -529,7 +525,14 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 	}
 }
 
-func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProgress) error {
+func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProgress, precalcSize ...int64) error {
+	var fileSize int64
+	if len(precalcSize) > 0 && precalcSize[0] > 0 {
+		fileSize = precalcSize[0]
+	} else if fp != nil && fp.Size > 0 {
+		fileSize = fp.Size
+	}
+
 	if opts.Progress != nil {
 		opts.Progress.SetCurrentFile(file)
 	}
@@ -543,7 +546,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 		case Zip:
 			return compressZip([]string{file}, outPath, opts, fp)
 		case SevenZ:
-			return compress7z([]string{file}, outPath, opts, fp)
+			return compress7z([]string{file}, outPath, opts, fp, fileSize)
 		case Tar:
 			return compressPlainTar([]string{file}, outPath, opts, fp)
 		case Rar:
@@ -653,7 +656,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 	case Zip:
 		return compressZip([]string{file}, outPath, opts, fp)
 	case SevenZ:
-		return compress7z([]string{file}, outPath, opts, fp)
+		return compress7z([]string{file}, outPath, opts, fp, fileSize)
 	case Tar:
 		return compressPlainTar([]string{file}, outPath, opts, fp)
 	case Rar:
@@ -663,8 +666,17 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 	}
 }
 
-func compressParallel(files []string, opts CompressOptions) ([]string, error) {
+func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[string]int64) ([]string, error) {
+	var sizeCache map[string]int64
+	if len(precalcSizes) > 0 && precalcSizes[0] != nil {
+		sizeCache = precalcSizes[0]
+	}
 	fileSizes := SortByLPT(files, func(f string) int64 {
+		if sizeCache != nil {
+			if sz, ok := sizeCache[f]; ok {
+				return sz
+			}
+		}
 		if fi, err := os.Stat(f); err == nil {
 			if fi.IsDir() {
 				sz, _ := GetDirSize(f)
@@ -778,7 +790,7 @@ func compressParallel(files []string, opts CompressOptions) ([]string, error) {
 			}
 
 			_, preExistErr := os.Stat(outPath)
-			err := compressSingleFile(file, outPath, fileOpts, fp)
+			err := compressSingleFile(file, outPath, fileOpts, fp, fileSizes[file])
 			if err != nil {
 				fp.SetStatus("error")
 				if preExistErr != nil {
@@ -882,10 +894,6 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 	if opts.SplitSize > 0 {
 		writer = newSplitWriter(outFile, opts.SplitSize, outPath)
 	}
-
-	if opts.Progress != nil {
-		writer = &countingWriter{w: writer, pt: opts.Progress, fp: fp}
-	}
 	if closer, ok := writer.(io.Closer); ok {
 		defer closer.Close()
 	}
@@ -927,6 +935,51 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 		if opts.Progress != nil {
 			opts.Progress.FileDone(outPath)
 		}
+		return nil
+	}
+
+	if opts.Progress != nil && pvCmd == nil {
+		pr, pw := io.Pipe()
+		tarCmd.Stdout = pw
+		inReader := &countingReader{r: pr, pt: opts.Progress, fp: fp}
+		compressCmd.Stdin = inReader
+		compressCmd.Stdout = writer
+		compressCmd.Stderr = stderrFor(opts.Progress)
+		tarCmd.Stderr = stderrFor(opts.Progress)
+
+		if opts.Verbose {
+			WriteLogf("  $ tar %s | %s > %s\n", strings.Join(tarArgs, " "), strings.Join(compressCmd.Args, " "), outPath)
+		}
+
+		if err := tarCmd.Start(); err != nil {
+			_ = pw.Close()
+			return fmt.Errorf("Error iniciando tar: %w", err)
+		}
+		if err := compressCmd.Start(); err != nil {
+			_ = tarCmd.Process.Kill()
+			_ = pw.Close()
+			return fmt.Errorf("Error iniciando compresor: %w", err)
+		}
+
+		var tarErr error
+		tarDone := make(chan struct{})
+		go func() {
+			tarErr = augmentErr(tarCmd, tarCmd.Wait())
+			_ = pw.CloseWithError(tarErr)
+			close(tarDone)
+		}()
+
+		compErr := augmentErr(compressCmd, compressCmd.Wait())
+		<-tarDone
+
+		if compErr != nil {
+			return fmt.Errorf("Error en compresión: %w", compErr)
+		}
+		if tarErr != nil {
+			return fmt.Errorf("Error en tar: %w", tarErr)
+		}
+
+		opts.Progress.FileDone(outPath)
 		return nil
 	}
 
@@ -995,11 +1048,47 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 	return err
 }
 
-func build7zArgs(files []string, outPath string, opts CompressOptions) []string {
-	md := "-md=256m"
+func adaptive7zDict(fileSize int64, threads int) string {
+	dictMB := 256
 	if getMemLimit() < 8192 {
-		md = "-md=128m"
+		dictMB = 128
 	}
+
+	if fileSize > 0 {
+		switch {
+		case fileSize <= 16*1024*1024:
+			dictMB = 16
+		case fileSize <= 32*1024*1024:
+			dictMB = 32
+		case fileSize <= 64*1024*1024:
+			dictMB = 64
+		case fileSize <= 128*1024*1024:
+			if dictMB > 128 {
+				dictMB = 128
+			}
+		}
+	}
+
+	return fmt.Sprintf("-md=%dm", dictMB)
+}
+
+func build7zArgs(files []string, outPath string, opts CompressOptions, precalcSize ...int64) []string {
+	var totalSize int64
+	if len(precalcSize) > 0 && precalcSize[0] > 0 {
+		totalSize = precalcSize[0]
+	} else {
+		for _, f := range files {
+			if fi, err := os.Stat(f); err == nil {
+				if fi.IsDir() {
+					sz, _ := GetDirSize(f)
+					totalSize += sz
+				} else {
+					totalSize += fi.Size()
+				}
+			}
+		}
+	}
+	md := adaptive7zDict(totalSize, opts.ThreadLimit)
 	mmt := "-mmt=on"
 	if opts.ThreadLimit > 0 {
 		mmt = "-mmt=" + threadStr(opts.ThreadLimit)
@@ -1016,9 +1105,17 @@ func build7zArgs(files []string, outPath string, opts CompressOptions) []string 
 	return args
 }
 
-func compress7z(files []string, outPath string, opts CompressOptions, fp *FileProgress) error {
+func compress7z(files []string, outPath string, opts CompressOptions, fp *FileProgress, precalcSize ...int64) error {
 	sevenz := sevenzBin()
-	args := build7zArgs(files, outPath, opts)
+	var fileSize int64
+	if len(precalcSize) > 0 && precalcSize[0] > 0 {
+		fileSize = precalcSize[0]
+	} else if fp != nil && fp.Size > 0 {
+		fileSize = fp.Size
+	} else {
+		fileSize = totalFileSize(files)
+	}
+	args := build7zArgs(files, outPath, opts, fileSize)
 
 	cmd := exec.Command(sevenz, args...)
 
@@ -1026,7 +1123,6 @@ func compress7z(files []string, outPath string, opts CompressOptions, fp *FilePr
 		WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
 	}
 
-	fileSize := totalFileSize(files)
 	err := runWithProgress(cmd, opts.Progress, fileSize, fp)
 	if err == nil && opts.Progress != nil {
 		opts.Progress.FileDone(outPath)

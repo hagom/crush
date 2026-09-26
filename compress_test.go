@@ -1744,4 +1744,79 @@ func TestDoCompressMixedFilesAndDirectoriesIndependent(t *testing.T) {
 	}
 }
 
+func TestAdaptive7zDict(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileSize int64
+		threads  int
+		want     string
+	}{
+		{
+			name:     "small file <= 16MB",
+			fileSize: 10 * 1024 * 1024,
+			threads:  1,
+			want:     "-md=16m",
+		},
+		{
+			name:     "medium file <= 32MB",
+			fileSize: 25 * 1024 * 1024,
+			threads:  2,
+			want:     "-md=32m",
+		},
+		{
+			name:     "medium file <= 64MB",
+			fileSize: 50 * 1024 * 1024,
+			threads:  4,
+			want:     "-md=64m",
+		},
+		{
+			name:     "medium file <= 128MB",
+			fileSize: 100 * 1024 * 1024,
+			threads:  4,
+			want:     "-md=128m",
+		},
+		{
+			name:     "zero or unknown size defaults to 256m or clamped",
+			fileSize: 0,
+			threads:  1,
+			want:     "-md=256m",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := adaptive7zDict(tt.fileSize, tt.threads)
+			if got != tt.want {
+				t.Errorf("adaptive7zDict(%d, %d) = %s, want %s", tt.fileSize, tt.threads, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetDirSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "sub")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	data1 := []byte("hello world")
+	data2 := []byte("longer test data string 1234567890")
+	if err := os.WriteFile(filepath.Join(tmpDir, "file1.txt"), data1, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "file2.txt"), data2, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	expected := int64(len(data1) + len(data2))
+	got, err := GetDirSize(tmpDir)
+	if err != nil {
+		t.Fatalf("GetDirSize returned error: %v", err)
+	}
+	if got != expected {
+		t.Errorf("GetDirSize = %d, want %d", got, expected)
+	}
+}
+
 

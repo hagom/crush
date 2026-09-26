@@ -4,11 +4,11 @@
 
 **Herramienta multi-formato de compresión y descompresión vía pipes UNIX de alto rendimiento con auto-paralelismo.**
 
-[![CI](https://github.com/usuario/crush/actions/workflows/ci.yml/badge.svg)](https://github.com/usuario/crush/actions)
+[![CI](https://github.com/hagom/crush/actions/workflows/ci.yml/badge.svg)](https://github.com/hagom/crush/actions)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Tests](https://img.shields.io/badge/tests-429%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/usuario/crush)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Formats](https://img.shields.io/badge/formats-13%20supported-blueviolet)](https://github.com/usuario/crush)
+[![Tests](https://img.shields.io/badge/tests-451%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/hagom/crush)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Formats](https://img.shields.io/badge/formats-13%20supported-blueviolet)](https://github.com/hagom/crush)
 
 </div>
 
@@ -17,32 +17,52 @@
 ## Características
 
 - **13 formatos soportados:** `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`.
+
 - **Compresión máxima real y paralelismo automático (NCPU):** No requiere flags manuales de hilos (`-j`). Detecta automáticamente los núcleos disponibles (`NCPU()`) y maximiza los ratios de compresión (`zstd --ultra -22`, `7z -mx=9 -md=256m -mfb=273` adaptativo a RAM, `bzip3 -b 64`, `lz4 -9` LZ4HC) y descompresión multihilo (`lbzip2 -n N`, `pigz -p N`).
+
 - **Distribución Dinámica Proporcional de Hilos y Token Pool:** Reparto ponderado de núcleos según el tamaño de cada archivo en bytes (método del resto mayor Hamilton-Hare), eliminando la latencia de cola (*tail latency*) y garantizando una saturación del 100% de la CPU durante todo el lote (+84% de aceleración medida en juegos de PS2 reales y +35% en colas de archivos desiguales).
+
 - **Planificación LPT inteligente (Compresión y Descompresión):** Ordenamiento óptimo descendente por tamaño (*Longest Processing Time first*) tanto al comprimir múltiples archivos como al descomprimir lotes de archivos, eliminando el cuello de botella por archivos rezagados.
+
 - **Compresión simultánea multi-formato (`-F` / `--formats`):** Permite comprimir en múltiples formatos en una sola pasada (ej: `crush -c -F gz,xz,zst archivo.txt`), preservando los archivos originales durante todas las fases intermedias y reportando el avance y verificación de cada formato.
+
 - **Auto-instalación de herramientas multihilo y fallback secuencial inteligente:** Detección de herramientas concurrentes (`pigz`, `lbzip2`, `plzip`, `lz4 -T`, `7z`, `xz`, `zstd`); si la herramienta óptima multihilo no se encuentra en el sistema, `crush` intenta instalarla automáticamente mediante el gestor de paquetes (`apt`, `dnf`, etc.); si no está en los repositorios o no se puede instalar, recurre transparentemente a la herramienta secuencial (`gzip`, `bzip2`, `lzip`) con advertencia en consola; y si ninguna está disponible, emite un aviso de error detallado.
+
 - **Compresión interactiva del directorio actual:** Al ejecutar `crush -c` sin especificar archivos, detecta automáticamente todos los elementos comprimibles en la ruta actual, muestra sus tamaños y solicita confirmación interactiva para comprimirlos (usando `-f`, `-F` o `gz` por omisión).
+
 - **Adición y actualización in-place en archivos comprimidos (`-a` / `-u`):** Inserta nuevos archivos o carpetas directamente dentro de un archivo comprimido preexistente (`.zip`, `.7z`, `.rar`, `.tar`, `.tar.*`) sin generar un archivo nuevo en disco.
+
 - **Modo observador de directorios (`-watch`):** Monitoreo continuo de directorios sin dependencias externas usando `syscall.Inotify` nativo en Linux (`IN_CLOSE_WRITE | IN_MOVED_TO`) y sondeo en otras plataformas, procesando automáticamente compresión (`-c`) o descompresión (`-d`) de archivos entrantes.
+
 - **Generación y verificación de checksums SHA-256 (`-hash`, `-verify`):** Generación automática de archivos `.sha256` durante la compresión e integración en verificación para validar la integridad contra el hash.
+
 - **Cifrado y contraseñas (`-p`, `-password`):** Cifrado seguro para formatos de contenedor (`7z`, `zip`, `rar`) con soporte para prompt interactivo con terminal oculta y cifrado de cabeceras (`-mhe=on`).
+
 - **Soporte para Sparse Files (`-sparse` / `-S`):** Optimización de espacio al empaquetar archivos dispersos en archivos tar.
+
 - **Filtro selectivo de extracción (`-filter`):** Extracción dirigida por patrón glob (`*.txt`, subcarpetas, etc.) compatible con contenedores `tar`, `7z`, `zip` y `rar`.
+
 - **Streaming directo y Zero-Copy con Linux `splice(2)`:** Extracción directa sin archivos `.tar` temporales intermedios y aceleración en espacio de kernel con `splice(2)` y buffers de pipes ampliados a 1 MiB (`F_SETPIPE_SZ`).
+
 - **Eliminación de latencia de inicio y progreso en tiempo real:** Medición directa en el flujo de entrada de pipelines tar, diccionario LZMA2 dinámico adaptativo al tamaño de datos y a la RAM del sistema (evitando sobrecargas de memoria en equipos modestos), y caché de tamaños en una sola pasada para evitar re-escaneos redundantes en disco.
+
 - **Detección y descompresión interactiva:** Al invocar `crush -d` sin argumentos, detecta automáticamente todos los archivos comprimidos del directorio actual, muestra sus tamaños y solicita confirmación para descomprimirlos en paralelo.
+
 - **Barra de progreso tabular en tiempo real:** Interfaz dinámica estilo *Docker-pull* en terminales interactivas, con barra general agregada, sub-barras individuales por archivo con columnas milimétricamente alineadas, velocidad en MB/s y estimación de tiempo restante (ETA) estabilizada.
+
 - **Suite de benchmarking integrada (`--bench`):** Permite evaluar el throughput (MB/s) y el ratio de compresión en tu máquina con datasets deterministas y verificación criptográfica SHA-256.
+
 - **Autocompletado de comandos:** Instalación nativa de completion para Bash, Zsh y Fish.
+
 - **Cero dependencias externas en Go:** 100% biblioteca estándar de Go (`stdlib`).
+
 - **Instalador de dependencias multiplataforma:** Detección y gestión automática de paquetes en Debian/Ubuntu (`apt`), RedHat/Fedora/CentOS (`dnf`/`yum`), Arch Linux (`pacman`), openSUSE (`zypper`), Alpine (`apk`) y macOS (`brew`).
 
 ---
 
 ## Demostración Visual
 
-Al procesar múltiples archivos en paralelo, `crush` presenta un panel tabular interactivo:
+Al procesar múltiples archivos en paralelo, `crush` presenta un panel tabular interactivo con barras de avance individual y general:
 
 ```text
 Comprimiendo 5 archivo(s) en paralelo...
@@ -63,7 +83,9 @@ Comprimiendo 5 archivo(s) en paralelo...
 ## Requisitos
 
 - **Compilación:** Go 1.21 o superior.
+
 - **Sistema operativo:** Linux o macOS.
+
 - **Herramientas del sistema:** Para aprovechar todos los formatos, `crush` utiliza las utilidades del sistema operativo. Si alguna herramienta multihilo no está instalada, `crush` utiliza automáticamente la versión serial como alternativa de respaldo (*fallback*).
 
 ---
@@ -74,7 +96,7 @@ Comprimiendo 5 archivo(s) en paralelo...
 
 ```bash
 # Clonar el repositorio
-git clone https://github.com/usuario/crush.git
+git clone https://github.com/hagom/crush.git
 cd crush
 
 # Compilar
@@ -97,6 +119,8 @@ sudo crush --install-deps
 
 ### 3. Activar autocompletado en tu Shell
 
+Genera e instala scripts de completado contextual para tu terminal:
+
 ```bash
 # Auto-detectar la shell actual e instalar
 sudo crush --completion
@@ -109,6 +133,8 @@ sudo crush --completion fish
 
 ### Desinstalación
 
+Para eliminar completamente el binario y configuraciones instaladas:
+
 ```bash
 sudo crush --uninstall
 ```
@@ -116,6 +142,8 @@ sudo crush --uninstall
 ---
 
 ## Formatos Soportados
+
+`crush` aprovecha al máximo las herramientas nativas del sistema operativo, priorizando versiones multihilo para paralelismo masivo.
 
 ### Formatos Tar-Pipe (Agrupan en stream `.tar.*`)
 
@@ -134,6 +162,8 @@ sudo crush --uninstall
 
 ### Formatos Nativos (Contenedor propio)
 
+Formato de contenedor monolítico con soporte para compresión de archivos individuales o directorios:
+
 | Formato | Compresor | Multihilo | Algoritmo |
 |---------|-----------|-----------|-----------|
 | `.7z` | `7zz` / `7z` | Auto (`-mmt=on`) | LZMA2 |
@@ -145,6 +175,8 @@ sudo crush --uninstall
 ## Uso y Ejemplos
 
 ### Compresión
+
+Comprime uno o varios archivos y carpetas de forma individual e independiente en paralelo por omisión, o combinados en un solo archivo con la opción `-C`:
 
 ```bash
 # Compresión interactiva: detecta elementos comprimibles en la ruta actual y solicita confirmación
@@ -235,6 +267,8 @@ crush -d -force paquete.tar.zst
 
 ### Inspección, Verificación y Pipes
 
+Permite inspeccionar el contenido de un archivo comprimido, validar su integridad contra corrupción o hashes criptográficos SHA-256, y emitir el flujo descomprimido directamente a la salida estándar para conectarlo con otras herramientas UNIX mediante tuberías:
+
 ```bash
 # Listar contenido de un archivo comprimido
 crush -l paquete.7z
@@ -285,6 +319,8 @@ crush --bench mi_archivo_de_prueba.iso
 ---
 
 ## Referencia de Comandos y Opciones
+
+Sintaxis general de invocación:
 
 ```text
 Uso:

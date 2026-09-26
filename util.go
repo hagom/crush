@@ -188,12 +188,15 @@ func TotalArchiveSize(archivePath string) int64 {
 
 func GetDirSize(dir string) (int64, error) {
 	var total int64
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if !info.IsDir() {
-			total += info.Size()
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err == nil {
+				total += info.Size()
+			}
 		}
 		return nil
 	})
@@ -1315,6 +1318,8 @@ func globalBarLine(pct float64, current int64, done int64, filesTotal int, total
 	if current > 0 && elapsed.Seconds() > 0 {
 		speed := float64(current) / elapsed.Seconds()
 		line += fmt.Sprintf("  %s/s", FormatSize(int64(speed)))
+	} else if current == 0 && done < int64(filesTotal) {
+		line += fmt.Sprintf("  %siniciando...%s", Yellow, NC)
 	}
 
 	if total > 0 && current > 0 && current < total {
@@ -1365,6 +1370,8 @@ func fileLine(fp *FileProgress) string {
 					etaStr = fmt.Sprintf("%9s", eta)
 				}
 			}
+		} else if current == 0 {
+			etaStr = "iniciando"
 		}
 		line := fmt.Sprintf("%s [%s] %3d%%  %s   %s", name, bar, int(pct), sizeStr, etaStr)
 		return fmt.Sprintf("%s%s%s", Yellow, line, NC)

@@ -125,8 +125,13 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 442 tests nativos pasando con race detector (-race). ~15200 líneas. 0 bugs conocidos.
+- Go: migración completa. 444 tests nativos pasando con race detector (-race). ~15350 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Eliminación de Latencia de Inicio y Progreso en Tiempo Real:
+    - **Medición de Flujo en Entrada (`compressTarPipe` con `io.Pipe` y `countingReader`):** Captura en tiempo real del flujo de datos sin comprimir generado por `tar` antes de ingresar al compresor. La barra de progreso y velocidad se actualizan desde el segundo cero con exactitud matemática al 100%, eliminando la pausa producida por los búferes internos de los compresores (`zstd`, `xz`, `pigz`, etc.).
+    - **Diccionario Adaptativo LZMA2 en 7-Zip (`adaptive7zDict`):** Selección dinámica del tamaño de diccionario `-md` acoplado al volumen real de los archivos a comprimir ($\le 16\text{M}, 32\text{M}, 64\text{M}, 128\text{M}, 256\text{M}$) y adaptado a la memoria RAM disponible del sistema, erradicando reservas inútiles de memoria virtual en archivos pequeños/medianos y previniendo colapsos OOM en equipos modestos sin perder ratio de compresión.
+    - **Caché en Memoria de Tamaños de Lote y `filepath.WalkDir`:** Reducción drástica de operaciones de I/O en disco al consolidar los tamaños en una sola pasada $O(N)$ compartida con `SortByLPT`, `totalSize` y los workers de compresión, migrando a `filepath.WalkDir` para una lectura ligera de inodos.
+    - **Retroalimentación Visual Inmediata:** Visualización activa del estado `iniciando...` en el monitor global y en cada worker mientras se preparan los procesos externos, evitando pantallas estáticas en `0.0%`.
   - Compresión Individual y Paralela de Carpetas por Omisión:
     - **Independencia de Carpetas en Lote:** Corrección del agrupamiento forzado inadvertido. Al comprimir múltiples carpetas o combinaciones de archivos y carpetas sin pasar la opción explícita `-C` (`--combine`), cada carpeta se procesa y comprime de manera individual e independiente en su propio archivo comprimido (`carpeta.7z`, `carpeta.tar.gz`, etc.) en paralelo aprovechando la asignación adaptativa de hilos del sistema.
     - **Cálculo de Tamaño Recursivo de Carpetas (`totalFileSize` y `SortByLPT`):** Integración de `GetDirSize` para calcular con exactitud los bytes reales contenidos en los árboles de directorios al programar colas LPT y reportar el progreso con precisión.

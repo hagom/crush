@@ -38,7 +38,7 @@
 
 - **Cifrado y contraseñas (`-p`, `-password`):** Cifrado seguro para formatos de contenedor (`7z`, `zip`, `rar`) con soporte para prompt interactivo con terminal oculta y cifrado de cabeceras (`-mhe=on`).
 
-- **Soporte para Sparse Files (`-sparse` / `-S`):** Optimización de espacio al empaquetar archivos dispersos en archivos tar.
+- **Soporte implícito para Sparse Files en Tar:** Optimización automática de espacio al empaquetar archivos dispersos (imágenes de máquinas virtuales, bases de datos) en archivos tar, preservando huecos tanto al comprimir como al descomprimir (desactivable con `-no-sparse`).
 
 - **Filtro selectivo de extracción (`-filter`):** Extracción dirigida por patrón glob (`*.txt`, subcarpetas, etc.) compatible con contenedores `tar`, `7z`, `zip` y `rar`.
 
@@ -215,8 +215,8 @@ crush -c -f gz -hash documento.txt
 # Comprimir con cifrado por contraseña (-p) en contenedores (7z, zip, rar)
 crush -c -f 7z -p secret confidencial.pdf
 
-# Optimizar compresión de archivos dispersos en tar (-sparse / -S)
-crush -c -f tar.gz -sparse disco_virtual.raw
+# Compresión de archivos dispersos en tar (automático por omisión)
+crush -c -f tar.gz disco_virtual.raw
 
 # Comprimir leyendo la lista de archivos desde un fichero (-i)
 crush -c -f gz -i lista_archivos.txt
@@ -379,7 +379,8 @@ Uso:
 | `-s` | `N` | Dividir el archivo comprimido en partes de `N` MB (formatos de flujo: `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lz4`, `br` y `tar.*`; no soportado para `lrz`, `zip`, `7z`, `tar`, `rar`). | `0` (sin división) |
 | `-hash` | — | Generar archivo de checksum SHA-256 (`<archivo>.sha256`) durante la compresión. | `false` |
 | `-p`, `-password` | `PASS` | Contraseña para cifrado o descifrado (`7z`, `zip`, `rar`). Si se omite argumento, pide contraseña oculta en consola. | — |
-| `-sparse`, `-S` | — | Activar soporte para archivos dispersos (*sparse files*) en `tar`. | `false` |
+| `-sparse`, `-S` | — | Soporte para archivos dispersos (*sparse files*) en `tar` (activo por omisión). | `true` |
+| `-no-sparse` | — | Desactivar soporte para archivos dispersos (*sparse files*) en `tar`. | `false` |
 | `-filter` | `PATRÓN` | Filtro de extracción selectiva por patrón glob (`*.txt`, subcarpetas, etc.) en `tar`, `7z`, `zip`, `rar`. | — |
 | `-i` | `ARCHIVO` | Leer lista de archivos de entrada desde un fichero o stdin (`-`). | — |
 | `-exclude`| `PATRÓN` | Patrón de exclusión glob (puede repetirse). | — |

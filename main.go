@@ -249,11 +249,20 @@ func main() {
 	var exclude multiFlag
 	flag.Var(&exclude, "exclude", "Patrón de exclusión (repetible)")
 
-	sparseFlag := flag.Bool("sparse", false, "Activar soporte para archivos dispersos (sparse) en tar")
-	sparseShortFlag := flag.Bool("S", false, "Activar soporte para archivos dispersos (sparse) en tar (alias de -sparse)")
+	sparseFlag := flag.Bool("sparse", false, "Soporte para archivos dispersos (sparse) en tar (activo por omisión)")
+	sparseShortFlag := flag.Bool("S", false, "Soporte para archivos dispersos (sparse) en tar (activo por omisión, alias de -sparse)")
+	noSparseFlag := flag.Bool("no-sparse", false, "Desactivar soporte para archivos dispersos (sparse) en tar")
 	filterFlag := flag.String("filter", "", "Filtro de extracción selectiva por patrón")
 
 	flag.Parse()
+
+	sparseEnabled := !*noSparseFlag
+	if *sparseFlag || *sparseShortFlag {
+		sparseEnabled = true
+	}
+	if *noSparseFlag {
+		sparseEnabled = false
+	}
 
 	if promptPassword && cliPassword == "" {
 		p, err := readPasswordFunc("Ingrese contraseña: ")
@@ -572,7 +581,8 @@ func main() {
 		effectiveThreads := NCPU()
 		opts := CompressOptions{
 			Password:        cliPassword,
-			Sparse:          *sparseFlag || *sparseShortFlag,
+			Sparse:          sparseEnabled,
+			NoSparse:        !sparseEnabled,
 			Verbose:         *verbose,
 			Hash:            *hashFlag,
 			ThreadLimit:     effectiveThreads,
@@ -759,7 +769,8 @@ func main() {
 			FromFile:        *fromFile,
 			Hash:            *hashFlag,
 			Password:        cliPassword,
-			Sparse:          *sparseFlag || *sparseShortFlag,
+			Sparse:          sparseEnabled,
+			NoSparse:        !sparseEnabled,
 		}
 		var outPaths []string
 		var err error
@@ -1165,7 +1176,9 @@ func printHelp() {
 	w(Yellow, "  -exclude patrón")
 	fmt.Print("      Patrón de exclusión (se puede repetir)\n")
 	w(Yellow, "  -sparse, -S")
-	fmt.Print("          Activar soporte para archivos dispersos (sparse) en tar\n")
+	fmt.Print("          Soporte para archivos dispersos (sparse) en tar (activo por omisión)\n")
+	w(Yellow, "  -no-sparse")
+	fmt.Print("           Desactivar soporte para archivos dispersos (sparse) en tar\n")
 	w(Yellow, "  -filter patrón")
 	fmt.Print("       Filtro de extracción selectiva por patrón (*.txt, carpetas)\n")
 	w(Yellow, "  --install")
@@ -1207,7 +1220,7 @@ func printHelp() {
 	w(Yellow, "  crush -c -f tar.gz -o /backup/ dir/                    # comprimir enviando el resultado a un directorio\n")
 	w(Yellow, "  crush -c -C -f 7z file1.txt file2.txt file3.txt        # combinar múltiples archivos en un único archivo 7z\n")
 	w(Yellow, "  crush -c -f zst -s 10 archivo_grande.iso               # dividir flujo comprimido en partes de 10 MB\n")
-	w(Yellow, "  crush -c -f tar.gz -sparse disco.raw                   # optimizar compresión con archivos dispersos en tar\n")
+	w(Yellow, "  crush -c -f tar.gz -sparse disco.raw                   # compresión de archivos dispersos en tar (activo por omisión)\n")
 	w(Yellow, "  crush -c -f xz -opts \"-9e\" grande.tar                 # pasar opciones avanzadas al compresor nativo\n")
 	w(Yellow, "  crush -c -f 7z -i lista_archivos.txt                   # comprimir archivos leídos desde un fichero de lista\n")
 	w(Yellow, "  crush -d archivo.tar.gz                                # descomprimir archivo detectando formato automático\n")

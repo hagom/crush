@@ -35,6 +35,11 @@ type CompressOptions struct {
 	Hash            bool
 	Password        string
 	Sparse          bool
+	NoSparse        bool
+}
+
+func (opts CompressOptions) UseSparse() bool {
+	return !opts.NoSparse
 }
 
 func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
@@ -935,7 +940,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 	}
 
 	tarArgs := []string{"-cf", "-"}
-	if opts.Sparse {
+	if opts.UseSparse() {
 		tarArgs = append(tarArgs, "--sparse")
 	}
 	for _, excl := range opts.Exclude {
@@ -1168,7 +1173,7 @@ func compress7z(files []string, outPath string, opts CompressOptions, fp *FilePr
 
 func compressPlainTar(files []string, outPath string, opts CompressOptions, fp *FileProgress) error {
 	args := []string{"-cf", outPath}
-	if opts.Sparse {
+	if opts.UseSparse() {
 		args = append(args, "--sparse")
 	}
 	for _, excl := range opts.Exclude {
@@ -1417,11 +1422,11 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 
 	case info.Format == Tar && !info.IsStream():
 		args := []string{"-rf", archive}
-		if opts.Sparse {
+		if opts.UseSparse() {
 			args = append(args, "--sparse")
 		}
 		args = append(args, items...)
-		cmd := exec.Command("tar", args...)
+		cmd := execCommand("tar", args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		if err := augmentErr(cmd, cmd.Run()); err != nil {
@@ -1449,11 +1454,11 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		tmpTar.Close()
 
 		tarArgs := []string{"-rf", tmpTarPath}
-		if opts.Sparse {
+		if opts.UseSparse() {
 			tarArgs = append(tarArgs, "--sparse")
 		}
 		tarArgs = append(tarArgs, items...)
-		tarCmd := exec.Command("tar", tarArgs...)
+		tarCmd := execCommand("tar", tarArgs...)
 		tarCmd.Stdout = stdoutFor(opts.Progress)
 		tarCmd.Stderr = stderrFor(opts.Progress)
 		if err := augmentErr(tarCmd, tarCmd.Run()); err != nil {

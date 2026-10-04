@@ -1085,7 +1085,7 @@ func TestCompressSparseTarFlag(t *testing.T) {
 	_ = f.Truncate(10 * 1024 * 1024)
 	f.Close()
 
-	// 1. Plain tar with Sparse: true
+	// 1. Plain tar by default (without setting Sparse) should include --sparse
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		if name == "tar" {
 			capturedPlainArgs = append([]string(nil), args...)
@@ -1093,15 +1093,14 @@ func TestCompressSparseTarFlag(t *testing.T) {
 		return origExec(name, args...)
 	}
 
-	optsPlain := CompressOptions{
+	optsPlainDefault := CompressOptions{
 		Format:    Tar,
-		Sparse:    true,
 		OutputDir: tmpDir,
 		KeepOrig:  true,
 	}
-	_, err = DoCompress([]string{f1}, optsPlain)
+	_, err = DoCompress([]string{f1}, optsPlainDefault)
 	if err != nil {
-		t.Fatalf("DoCompress Plain Tar failed: %v", err)
+		t.Fatalf("DoCompress Plain Tar default failed: %v", err)
 	}
 
 	hasSparse := false
@@ -1112,10 +1111,10 @@ func TestCompressSparseTarFlag(t *testing.T) {
 		}
 	}
 	if !hasSparse {
-		t.Errorf("compressPlainTar did not include --sparse in tar args: %v", capturedPlainArgs)
+		t.Errorf("compressPlainTar did not include --sparse by default in tar args: %v", capturedPlainArgs)
 	}
 
-	// 2. Tar pipe with Sparse: true
+	// 2. Tar pipe by default should include --sparse
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		if name == "tar" {
 			capturedPipeArgs = append([]string(nil), args...)
@@ -1123,16 +1122,15 @@ func TestCompressSparseTarFlag(t *testing.T) {
 		return origExec(name, args...)
 	}
 
-	optsPipe := CompressOptions{
+	optsPipeDefault := CompressOptions{
 		Format:    Gz,
-		Sparse:    true,
 		OutputDir: tmpDir,
 		KeepOrig:  true,
 		Combine:   true,
 	}
-	_, err = DoCompress([]string{f1}, optsPipe)
+	_, err = DoCompress([]string{f1}, optsPipeDefault)
 	if err != nil {
-		t.Fatalf("DoCompress Tar Pipe failed: %v", err)
+		t.Fatalf("DoCompress Tar Pipe default failed: %v", err)
 	}
 
 	hasSparsePipe := false
@@ -1143,24 +1141,24 @@ func TestCompressSparseTarFlag(t *testing.T) {
 		}
 	}
 	if !hasSparsePipe {
-		t.Errorf("compressTarPipe did not include --sparse in tar args: %v", capturedPipeArgs)
+		t.Errorf("compressTarPipe did not include --sparse by default in tar args: %v", capturedPipeArgs)
 	}
 
-	// 3. Plain tar with Sparse: false (verify --sparse is NOT present)
+	// 3. Plain tar with NoSparse: true (verify --sparse is NOT present)
 	capturedPlainArgs = nil
 	optsNoSparse := CompressOptions{
 		Format:    Tar,
-		Sparse:    false,
+		NoSparse:  true,
 		OutputDir: tmpDir,
 		KeepOrig:  true,
 	}
 	_, err = DoCompress([]string{f1}, optsNoSparse)
 	if err != nil {
-		t.Fatalf("DoCompress Plain Tar without sparse failed: %v", err)
+		t.Fatalf("DoCompress Plain Tar with NoSparse failed: %v", err)
 	}
 	for _, a := range capturedPlainArgs {
 		if a == "--sparse" {
-			t.Errorf("compressPlainTar should not include --sparse when Sparse is false: %v", capturedPlainArgs)
+			t.Errorf("compressPlainTar should not include --sparse when NoSparse is true: %v", capturedPlainArgs)
 		}
 	}
 }

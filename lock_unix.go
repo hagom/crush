@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 func openLockFile(path string) (*os.File, error) {
@@ -48,7 +50,9 @@ func readLockPID(f *os.File) int {
 	return pid
 }
 
-func AcquireLock() (func(), error) {
+// TryAcquireLock attempts to acquire the lock immediately without waiting.
+// If another instance holds the lock, it returns *LockError.
+func TryAcquireLock() (func(), error) {
 	f, err := openLockFile(lockFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("abriendo archivo de bloqueo %s: %w", lockFilePath, err)
@@ -72,4 +76,43 @@ func AcquireLock() (func(), error) {
 			f.Close()
 		})
 	}, nil
+}
+
+// AcquireLockContext attempts to acquire the lock, queuing and polling if another instance
+// is running, until acquired or until ctx is done.
+func AcquireLockContext(ctx context.Context) (func(), error) {
+	release, err := TryAcquireLock()
+	if err == nil {
+		return release, nil
+	}
+	var lockErr *LockError
+	if !errors.As(err, &lockErr) {
+		return nil, err
+	}
+
+	printLockWaiting(getLockOutput(), lockErr.PID)
+
+	ticker := time.NewTicker(lockPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			release, err := TryAcquireLock()
+			if err == nil {
+				printLockAcquired(getLockOutput())
+				return release, nil
+			}
+			if !errors.As(err, &lockErr) {
+				return nil, err
+			}
+		}
+	}
+}
+
+// AcquireLock attempts to acquire the lock, waiting in queue until any running instance finishes.
+func AcquireLock() (func(), error) {
+	return AcquireLockContext(context.Background())
 }

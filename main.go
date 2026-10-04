@@ -1181,7 +1181,7 @@ func printHelp() {
 	w(BoldBlue, "Instancia única:\n")
 	fmt.Print("  Solo una instancia de crush puede comprimir, descomprimir, agregar, verificar,\n")
 	fmt.Print("  medir (--bench) u observar (-watch) a la vez, para no saturar el equipo.\n")
-	fmt.Print("  Si inicia otra, se rechaza indicando el PID de la que está en ejecución.\n")
+	fmt.Print("  Si inicia otra, se encola esperando a que termine la activa (estilo apt).\n")
 	fmt.Print("  El bloqueo (/tmp/crush.lock) se libera solo al terminar o morir el proceso.\n")
 	fmt.Print("  Quedan exentos -l, -r y los modos por pipe (stdin → stdout), así que\n")
 	fmt.Print("  'crush -r a.gz | crush -c -f xz' sigue funcionando.\n\n")

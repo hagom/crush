@@ -52,7 +52,7 @@
 
 - **Suite de benchmarking integrada (`--bench`):** Permite evaluar el throughput (MB/s) y el ratio de compresión en tu máquina con datasets deterministas y verificación criptográfica SHA-256.
 
-- **Instancia única con archivo de bloqueo (`/tmp/crush.lock`):** Al estilo de `apt`, impide que corran varias instancias de compresión, descompresión, `-a`, `-t`, `--bench` o `-watch` a la vez y saturen el equipo; la segunda se rechaza indicando el PID de la que está activa. Usa `flock(2)`, por lo que el bloqueo se libera solo si el proceso termina o muere (nunca queda un lock huérfano). `-l`, `-r` y los modos por pipe (stdin → stdout) están exentos.
+- **Instancia única con archivo de bloqueo (`/tmp/crush.lock`):** Al estilo de `apt`, impide que corran varias instancias de compresión, descompresión, `-a`, `-t`, `--bench` o `-watch` a la vez y saturen el equipo; las instancias subsiguientes se encolan automáticamente esperando a que termine la que está activa (indicando su PID). Usa `flock(2)`, por lo que el bloqueo se libera solo si el proceso termina o muere (nunca queda un lock huérfano). `-l`, `-r` y los modos por pipe (stdin → stdout) están exentos.
 
 - **Autocompletado de comandos:** Instalación nativa de completion para Bash, Zsh y Fish.
 

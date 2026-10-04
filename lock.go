@@ -1,8 +1,55 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"io"
+	"os"
+	"sync"
+	"time"
+)
 
-var lockFilePath = "/tmp/crush.lock"
+var (
+	lockFilePath     = "/tmp/crush.lock"
+	lockPollInterval = 250 * time.Millisecond
+	lockOutputMu     sync.Mutex
+	lockOutput       io.Writer = os.Stderr
+)
+
+func setLockOutput(w io.Writer) func() {
+	lockOutputMu.Lock()
+	old := lockOutput
+	lockOutput = w
+	lockOutputMu.Unlock()
+	return func() {
+		lockOutputMu.Lock()
+		lockOutput = old
+		lockOutputMu.Unlock()
+	}
+}
+
+func getLockOutput() io.Writer {
+	lockOutputMu.Lock()
+	defer lockOutputMu.Unlock()
+	return lockOutput
+}
+
+func printLockWaiting(w io.Writer, pid int) {
+	if w == nil {
+		return
+	}
+	if pid > 0 {
+		fmt.Fprintf(w, "%s⏳ Otra instancia de crush (PID %d) está en ejecución. Esperando a que termine para continuar...%s\n", Yellow, pid, NC)
+	} else {
+		fmt.Fprintf(w, "%s⏳ Otra instancia de crush está en ejecución. Esperando a que termine para continuar...%s\n", Yellow, NC)
+	}
+}
+
+func printLockAcquired(w io.Writer) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintf(w, "%s✓ Bloqueo adquirido. Continuando...%s\n", Green, NC)
+}
 
 type LockError struct {
 	Path string

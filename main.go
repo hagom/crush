@@ -528,6 +528,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	lockSc := lockScope{
+		Compress:    hasC,
+		Decompress:  hasD,
+		Add:         hasA,
+		Test:        hasT,
+		Bench:       *benchFlag,
+		Watch:       *watchDir != "",
+		List:        hasL,
+		Read:        hasR,
+		StdinStream: len(files) == 0 && stdinIsPipe && *formatStr != "" && (hasC || hasD),
+	}
+	if lockSc.NeedsLock() {
+		release, err := AcquireLock()
+		if err != nil {
+			WriteError("%v", err)
+			os.Exit(1)
+		}
+		defer release()
+	}
+
 	// Handle --bench
 	if *benchFlag {
 		customFile := ""
@@ -1158,6 +1178,13 @@ func printHelp() {
 	fmt.Print(" Instalar autocompletado para la shell (bash, zsh o fish)\n")
 	w(Yellow, "  --version")
 	fmt.Print("            Mostrar versión instalada de crush y salir\n\n")
+	w(BoldBlue, "Instancia única:\n")
+	fmt.Print("  Solo una instancia de crush puede comprimir, descomprimir, agregar, verificar,\n")
+	fmt.Print("  medir (--bench) u observar (-watch) a la vez, para no saturar el equipo.\n")
+	fmt.Print("  Si inicia otra, se rechaza indicando el PID de la que está en ejecución.\n")
+	fmt.Print("  El bloqueo (/tmp/crush.lock) se libera solo al terminar o morir el proceso.\n")
+	fmt.Print("  Quedan exentos -l, -r y los modos por pipe (stdin → stdout), así que\n")
+	fmt.Print("  'crush -r a.gz | crush -c -f xz' sigue funcionando.\n\n")
 	w(BoldBlue, "Ejemplos:\n")
 	w(Yellow, "  crush -c                                               # compresión interactiva del directorio actual\n")
 	w(Yellow, "  crush -d                                               # descompresión interactiva de detectados en subcarpetas\n")

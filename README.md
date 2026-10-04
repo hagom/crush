@@ -52,6 +52,8 @@
 
 - **Suite de benchmarking integrada (`--bench`):** Permite evaluar el throughput (MB/s) y el ratio de compresión en tu máquina con datasets deterministas y verificación criptográfica SHA-256.
 
+- **Instancia única con archivo de bloqueo (`/tmp/crush.lock`):** Al estilo de `apt`, impide que corran varias instancias de compresión, descompresión, `-a`, `-t`, `--bench` o `-watch` a la vez y saturen el equipo; la segunda se rechaza indicando el PID de la que está activa. Usa `flock(2)`, por lo que el bloqueo se libera solo si el proceso termina o muere (nunca queda un lock huérfano). `-l`, `-r` y los modos por pipe (stdin → stdout) están exentos.
+
 - **Autocompletado de comandos:** Instalación nativa de completion para Bash, Zsh y Fish.
 
 - **Cero dependencias externas en Go:** 100% biblioteca estándar de Go (`stdlib`).
@@ -404,6 +406,9 @@ crush/
 ├── util.go          # NCPU, límites RAM, pipeline streaming, ProgressTracker, SHA-256
 ├── util_linux.go    # F_SETPIPE_SZ (1 MiB) y splice(2) zero-copy
 ├── util_other.go    # Fallbacks de pipe y splice
+├── lock.go          # LockError, ruta del lock y modos que lo requieren (lockScope)
+├── lock_unix.go     # AcquireLock con flock(2) (instancia única)
+├── lock_other.go    # Fallback sin bloqueo en plataformas no Unix
 ├── pkgmgr.go        # Gestor multiplataforma de dependencias del sistema
 ├── Makefile         # Comandos de compilación, testeo e instalación
 ├── *_test.go        # Tests unitarios y de integración table-driven

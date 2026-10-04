@@ -116,6 +116,9 @@ crush/
 ├── util.go          # NCPU, GetMemLimit, FormatSize, pipeline, lockedWriter, execCommand, SHA-256
 ├── util_linux.go    # F_SETPIPE_SZ (1 MiB) y splice(2) zero-copy
 ├── util_other.go    # Fallbacks de pipe y splice
+├── lock.go          # LockError, lockFilePath, lockScope.NeedsLock (qué modos requieren lock)
+├── lock_unix.go     # AcquireLock con flock(2): instancia única, se libera sola al morir el proceso
+├── lock_other.go    # Fallback sin bloqueo en plataformas no Unix
 ├── pkgmgr.go        # DetectPkgManager, InstallMissingDeps, list helpers
 ├── Makefile
 ├── .github/workflows/ci.yml  # GitHub Actions: test matrix Go 1.21-1.23, race detector, build

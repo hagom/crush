@@ -103,9 +103,18 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		opts.Formats = nil
 	}
 
-	singleItem := len(files) == 1
+	singleItem := len(files) == 1 && !opts.Combine
+	singleIsDir := false
+	if singleItem {
+		if fi, err := os.Stat(files[0]); err == nil && fi.IsDir() {
+			singleIsDir = true
+		}
+	}
 
 	ext := ExtForFormat(opts.Format)
+	if singleItem {
+		ext = ExtForItem(opts.Format, singleIsDir)
+	}
 
 	if opts.SplitSize > 0 {
 		if opts.Format.IsContainer() || opts.Format == Lrz {
@@ -121,12 +130,13 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	calcOutPath := func() string {
 		if singleItem {
-			base := filepath.Base(files[0])
-			baseName := base
-			if fi, err := os.Stat(files[0]); err == nil && !fi.IsDir() {
-				baseName = strings.TrimSuffix(base, filepath.Ext(base))
-			}
 			targetDir := opts.OutputDir
+			var baseName string
+			if singleIsDir {
+				baseName = filepath.Base(files[0])
+			} else {
+				baseName = opts.Format.ArchiveBaseName(files[0])
+			}
 			if opts.SplitSize > 0 {
 				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
 			}
@@ -157,7 +167,11 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 			if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
 				opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
 				opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br {
-				WriteLogf("%s[Simulacro] Formato: tar.%s (Multi-archivo → tar pipe)%s\n", Blue, opts.Format, NC)
+				if singleItem && !singleIsDir {
+					WriteLogf("%s[Simulacro] Formato: %s (1 archivo → 1 archivo comprimido)%s\n", Blue, opts.Format, NC)
+				} else {
+					WriteLogf("%s[Simulacro] Formato: tar.%s (Multi-archivo → tar pipe)%s\n", Blue, opts.Format, NC)
+				}
 			} else {
 				WriteLogf("%s[Simulacro] Formato: %s%s\n", Blue, ext, NC)
 			}
@@ -226,6 +240,17 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
+	singleItem = len(filteredFiles) == 1 && !opts.Combine
+	singleIsDir = false
+	if singleItem {
+		if fi, err := os.Stat(filteredFiles[0]); err == nil && fi.IsDir() {
+			singleIsDir = true
+		}
+		ext = ExtForItem(opts.Format, singleIsDir)
+	} else {
+		ext = ExtForFormat(opts.Format)
+	}
+
 	canParallel := !singleItem && len(filteredFiles) > 1 && !opts.Combine
 	filesTotal := 1
 	if canParallel {
@@ -279,7 +304,11 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	opts.TotalSize = totalSize
 	realOut := splitOutPath(outPath, opts)
 	_, preExistErr := os.Stat(realOut)
-	err = compressItems(filteredFiles, outPath, opts)
+	if singleItem {
+		err = compressSingleFile(filteredFiles[0], outPath, opts, nil, totalSize)
+	} else {
+		err = compressItems(filteredFiles, outPath, opts)
+	}
 	if err != nil {
 		if preExistErr != nil {
 			if rmErr := os.Remove(realOut); rmErr == nil {
@@ -392,7 +421,6 @@ func expandGlobs(items []string) []string {
 	}
 	return result
 }
-
 
 func splitOutPath(outPath string, opts CompressOptions) string {
 	return outPath
@@ -521,7 +549,7 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("lz4", args...)
 	case "br":
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 11))}
+		args := []string{"-c", "-q", fmt.Sprintf("%d", fastOrSlow(opts, 11))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return exec.Command("brotli", args...)
 	case "lrz":

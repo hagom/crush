@@ -1,7 +1,10 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -141,7 +144,7 @@ func TestCompressUniqueNameWithOutputDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first) != 1 || first[0] != "out/a.tar.gz" {
+	if len(first) != 1 || first[0] != "out/a.txt.gz" {
 		t.Fatalf("primera compresión outPath = %v", first)
 	}
 
@@ -149,11 +152,11 @@ func TestCompressUniqueNameWithOutputDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second) != 1 || second[0] != "out/a_1.tar.gz" {
+	if len(second) != 1 || second[0] != "out/a.txt_1.gz" {
 		t.Fatalf("segunda compresión outPath = %v (debería evitar colisión)", second)
 	}
 
-	for _, want := range []string{"out/a.tar.gz", "out/a_1.tar.gz"} {
+	for _, want := range []string{"out/a.txt.gz", "out/a.txt_1.gz"} {
 		if _, statErr := os.Stat(want); statErr != nil {
 			t.Errorf("Esperaba %s: %v", want, statErr)
 		}
@@ -631,7 +634,7 @@ func TestCompressSplitDedicatedDirectory(t *testing.T) {
 		t.Fatalf("esperado 1 archivo de salida, obtenido %d: %v", len(out), out)
 	}
 
-	expectedDir := filepath.Join(tmpDir, "myfile_parts")
+	expectedDir := filepath.Join(tmpDir, "myfile.txt_parts")
 	fi, err := os.Stat(expectedDir)
 	if err != nil || !fi.IsDir() {
 		t.Fatalf("se esperaba la creación del directorio dedicado %s", expectedDir)
@@ -1385,6 +1388,7 @@ func TestDoAppendTarGz(t *testing.T) {
 		Format:    Gz,
 		OutputDir: tmpDir,
 		KeepOrig:  true,
+		Combine:   true,
 	}
 	out, err := DoCompress([]string{f1}, opts)
 	if err != nil || len(out) == 0 {
@@ -1819,4 +1823,197 @@ func TestGetDirSize(t *testing.T) {
 	}
 }
 
+func gunzipFile(t *testing.T, path string) []byte {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("%s no es gzip válido: %v", path, err)
+	}
+	data, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("leyendo gzip %s: %v", path, err)
+	}
+	return data
+}
 
+func TestDoCompressSingleFileIsStreamWithoutTar(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "notas.txt")
+	content := []byte(strings.Repeat("contenido de prueba\n", 500))
+	if err := os.WriteFile(src, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(tmpDir, "out")
+
+	outPaths, err := DoCompress([]string{src}, CompressOptions{Format: Gz, OutputDir: outDir, KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoCompress: %v", err)
+	}
+	want := filepath.Join(outDir, "notas.txt.gz")
+	if len(outPaths) != 1 || outPaths[0] != want {
+		t.Fatalf("outPaths = %v, want [%s]", outPaths, want)
+	}
+	if got := gunzipFile(t, want); !bytes.Equal(got, content) {
+		t.Errorf("el .gz de un archivo simple debe contener el archivo directo (sin tar): %d bytes vs %d originales", len(got), len(content))
+	}
+}
+
+func TestDoCompressSingleDirectoryIsTarredAutomatically(t *testing.T) {
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar no disponible")
+	}
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "proyecto")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("bbb"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(tmpDir, "out")
+
+	outPaths, err := DoCompress([]string{dir}, CompressOptions{Format: Gz, OutputDir: outDir, KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoCompress: %v", err)
+	}
+	want := filepath.Join(outDir, "proyecto.tar.gz")
+	if len(outPaths) != 1 || outPaths[0] != want {
+		t.Fatalf("outPaths = %v, want [%s]", outPaths, want)
+	}
+	tr := tar.NewReader(bytes.NewReader(gunzipFile(t, want)))
+	found := false
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if strings.HasSuffix(h.Name, "b.txt") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("el .tar.gz de una carpeta debe contener un tar con b.txt")
+	}
+}
+
+func TestDoCompressSingleFilesWithSameStemDoNotCollide(t *testing.T) {
+	tmpDir := t.TempDir()
+	outDir := filepath.Join(tmpDir, "out")
+	var outs []string
+	for _, name := range []string{"datos.txt", "datos.csv"} {
+		src := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(src, []byte("contenido de "+name), 0644); err != nil {
+			t.Fatal(err)
+		}
+		p, err := DoCompress([]string{src}, CompressOptions{Format: Gz, OutputDir: outDir, KeepOrig: true})
+		if err != nil {
+			t.Fatalf("DoCompress %s: %v", name, err)
+		}
+		outs = append(outs, p...)
+	}
+	for i, want := range []string{"datos.txt.gz", "datos.csv.gz"} {
+		if filepath.Base(outs[i]) != want {
+			t.Errorf("salida %d = %s, want %s (sin colisión ni sufijo _1)", i, outs[i], want)
+		}
+	}
+}
+
+func TestDoCompressSingleFileStreamRoundTrip(t *testing.T) {
+	tests := []struct {
+		format  Format
+		tool    string
+		wantExt string
+	}{
+		{Gz, "gzip", ".txt.gz"},
+		{Xz, "xz", ".txt.xz"},
+		{Zst, "zstd", ".txt.zst"},
+		{Bz2, "bzip2", ".txt.bz2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.format.String(), func(t *testing.T) {
+			if _, err := exec.LookPath(tt.tool); err != nil {
+				t.Skipf("%s no disponible", tt.tool)
+			}
+			tmpDir := t.TempDir()
+			src := filepath.Join(tmpDir, "doc.txt")
+			content := []byte(strings.Repeat("round trip ", 1000))
+			if err := os.WriteFile(src, content, 0644); err != nil {
+				t.Fatal(err)
+			}
+			outDir := filepath.Join(tmpDir, "out")
+			outPaths, err := DoCompress([]string{src}, CompressOptions{Format: tt.format, OutputDir: outDir, KeepOrig: true})
+			if err != nil {
+				t.Fatalf("DoCompress: %v", err)
+			}
+			if len(outPaths) != 1 || !strings.HasSuffix(outPaths[0], tt.wantExt) || strings.Contains(outPaths[0], ".tar.") {
+				t.Fatalf("outPaths = %v, want sufijo %s sin .tar.", outPaths, tt.wantExt)
+			}
+			extractDir := filepath.Join(tmpDir, "extract")
+			if err := DoDecompress(outPaths, DecompressOptions{OutputDir: extractDir, Force: true}); err != nil {
+				t.Fatalf("DoDecompress: %v", err)
+			}
+			got, err := os.ReadFile(filepath.Join(extractDir, "doc.txt"))
+			if err != nil {
+				t.Fatalf("doc.txt no se recuperó con su nombre original: %v", err)
+			}
+			if !bytes.Equal(got, content) {
+				t.Error("el contenido extraído no coincide con el original")
+			}
+		})
+	}
+}
+
+func TestDoCompressSingleFileSplit(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "grande.bin")
+	data := make([]byte, 3*1024*1024)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(tmpDir, "out")
+	outPaths, err := DoCompress([]string{src}, CompressOptions{Format: Gz, OutputDir: outDir, KeepOrig: true, SplitSize: 1})
+	if err != nil {
+		t.Fatalf("DoCompress: %v", err)
+	}
+	if len(outPaths) != 1 || !strings.HasSuffix(outPaths[0], "grande.bin.gz") {
+		t.Fatalf("outPaths = %v, want .../grande.bin.gz", outPaths)
+	}
+	if len(globSplitParts(outPaths[0])) == 0 {
+		t.Errorf("se esperaban partes divididas junto a %s", outPaths[0])
+	}
+}
+
+func TestBuildCompressCmdBrotliQualityFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts CompressOptions
+		want string
+	}{
+		{"por defecto", CompressOptions{Format: Br}, "11"},
+		{"fast", CompressOptions{Format: Br, CompressionOpts: "-fast"}, "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := buildCompressCmd(tc.opts).Args[1:]
+			found := false
+			for i, a := range args {
+				if len(a) > 2 && a[0] == '-' && a[1] != '-' && a[1] >= '0' && a[1] <= '9' {
+					t.Errorf("brotli no acepta calidad pegada (%q): se interpretaría como flags sueltos", a)
+				}
+				if a == "-q" && i+1 < len(args) && args[i+1] == tc.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("args = %v, se esperaba '-q %s'", args, tc.want)
+			}
+		})
+	}
+}

@@ -111,6 +111,16 @@ func ExtForFormat(f Format) string {
 	return "tar." + f.String()
 }
 
+func ExtForItem(f Format, isDir bool) string {
+	if f.IsContainer() {
+		return f.String()
+	}
+	if isDir {
+		return "tar." + f.String()
+	}
+	return f.String()
+}
+
 func ParseFormat(s string) (Format, error) {
 	for f, name := range formatNames {
 		if strings.EqualFold(s, name) {
@@ -282,5 +292,3 @@ func FormatMaxThreads(f Format) int {
 		return NCPU()
 	}
 }
-
-

@@ -450,6 +450,43 @@ func TestFormatMaxThreads(t *testing.T) {
 	}
 }
 
-
-
-
+func TestExtForItem(t *testing.T) {
+	tests := []struct {
+		format Format
+		isDir  bool
+		want   string
+	}{
+		{Gz, false, "gz"},
+		{Gz, true, "tar.gz"},
+		{Xz, false, "xz"},
+		{Xz, true, "tar.xz"},
+		{Bz2, false, "bz2"},
+		{Bz2, true, "tar.bz2"},
+		{Bz3, false, "bz3"},
+		{Bz3, true, "tar.bz3"},
+		{Zst, false, "zst"},
+		{Zst, true, "tar.zst"},
+		{Lz, false, "lz"},
+		{Lz, true, "tar.lz"},
+		{Lrz, false, "lrz"},
+		{Lrz, true, "tar.lrz"},
+		{Lz4, false, "lz4"},
+		{Lz4, true, "tar.lz4"},
+		{Br, false, "br"},
+		{Br, true, "tar.br"},
+		{Zip, false, "zip"},
+		{Zip, true, "zip"},
+		{SevenZ, false, "7z"},
+		{SevenZ, true, "7z"},
+		{Tar, false, "tar"},
+		{Tar, true, "tar"},
+		{Rar, false, "rar"},
+		{Rar, true, "rar"},
+	}
+	for _, tt := range tests {
+		got := ExtForItem(tt.format, tt.isDir)
+		if got != tt.want {
+			t.Errorf("ExtForItem(%v, isDir=%v) = %q, want %q", tt.format, tt.isDir, got, tt.want)
+		}
+	}
+}

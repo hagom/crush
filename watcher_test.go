@@ -73,7 +73,7 @@ func TestWatcher_Compress_Inotify(t *testing.T) {
 		t.Fatalf("creando archivo de prueba: %v", err)
 	}
 
-	expectedOut := filepath.Join(tmpDir, "sample.tar.gz")
+	expectedOut := filepath.Join(tmpDir, "sample.txt.gz")
 	success := waitForCondition(t, 5*time.Second, func() bool {
 		st, err := os.Stat(expectedOut)
 		return err == nil && st.Size() > 0
@@ -180,7 +180,7 @@ func TestWatcher_Polling_Fallback_Compress(t *testing.T) {
 		t.Fatalf("creando archivo de prueba: %v", err)
 	}
 
-	expectedOut := filepath.Join(tmpDir, "poll_sample.tar.gz")
+	expectedOut := filepath.Join(tmpDir, "poll_sample.txt.gz")
 	success := waitForCondition(t, 5*time.Second, func() bool {
 		st, err := os.Stat(expectedOut)
 		return err == nil && st.Size() > 0
@@ -413,4 +413,3 @@ func TestWatcher_CLI_Flags(t *testing.T) {
 		})
 	}
 }
-

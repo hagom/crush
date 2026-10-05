@@ -259,6 +259,8 @@ func main() {
 	diffFlag := flag.Bool("diff", false, "Comparar diferencias de contenido entre dos archivos comprimidos")
 	cleanFlag := flag.Bool("clean", false, "Modo sanitización: excluir automáticamente temporales, dependencias y basura de SO")
 	notifyFlag := flag.Bool("notify", false, "Emitir notificación de escritorio y campana al completar la tarea")
+	convertFlag := flag.Bool("convert", false, "Transcodificar/convertir directamente archivo comprimido a otro formato")
+	recompressFlag := flag.Bool("recompress", false, "Alias de -convert")
 
 	flag.Parse()
 
@@ -321,9 +323,10 @@ func main() {
 	hasL := *listFlag
 	hasT := *testFlag || *verifyFlag
 	hasR := *readFlag
+	hasConvert := *convertFlag || *recompressFlag
 
 	writeModes := 0
-	for _, m := range []bool{hasC, hasD, hasA} {
+	for _, m := range []bool{hasC, hasD, hasA, hasConvert} {
 		if m {
 			writeModes++
 		}
@@ -338,7 +341,7 @@ func main() {
 	conflict := false
 	var conflictFlags []string
 
-	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 || (hasT && (hasL || hasR || hasA)) {
+	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 || (hasT && (hasL || hasR || hasA || hasConvert)) {
 		conflict = true
 	}
 
@@ -347,7 +350,7 @@ func main() {
 			v    bool
 			name string
 		}{
-			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"},
+			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"},
 		} {
 			if f.v {
 				conflictFlags = append(conflictFlags, f.name)
@@ -391,7 +394,7 @@ func main() {
 			v    bool
 			name string
 		}{
-			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"},
+			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"},
 		} {
 			if m.v {
 				WriteError("--bench no se puede combinar con %s", m.name)
@@ -404,6 +407,10 @@ func main() {
 	if *watchDir != "" {
 		if hasA {
 			WriteError("-watch no se puede combinar con -a o -u")
+			os.Exit(1)
+		}
+		if hasConvert {
+			WriteError("-watch no se puede combinar con -convert")
 			os.Exit(1)
 		}
 		if !*compressFlag && !*decompressFlag {
@@ -423,9 +430,9 @@ func main() {
 		}
 	}
 
-	// -f solo tiene sentido con -c (excepto en modo pipe stdin)
-	if *formatStr != "" && !*compressFlag && !stdinIsPipe {
-		WriteWarning("-f solo tiene efecto con -c (ignorado)")
+	// -f solo tiene sentido con -c o -convert (excepto en modo pipe stdin)
+	if *formatStr != "" && !*compressFlag && !stdinIsPipe && !hasConvert {
+		WriteWarning("-f solo tiene efecto con -c o -convert (ignorado)")
 	}
 	// -F solo tiene sentido con -c (excepto en modo pipe stdin)
 	if (*formatsMulti != "" || *formatsMultiLong != "") && !*compressFlag && !stdinIsPipe {
@@ -555,6 +562,7 @@ func main() {
 		Tree:        *treeFlag,
 		Find:        *findFlag != "",
 		Diff:        *diffFlag,
+		Convert:     hasConvert,
 		StdinStream: len(files) == 0 && stdinIsPipe && *formatStr != "" && (hasC || hasD),
 	}
 	if lockSc.NeedsLock() {
@@ -662,6 +670,42 @@ func main() {
 			WriteError("%v", err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// Handle -convert / -recompress
+	if hasConvert {
+		if len(files) == 0 {
+			WriteError("debe especificar al menos un archivo comprimido para convertir\nUso: crush -convert -f FORMATO ARCHIVO...")
+			os.Exit(1)
+		}
+		if *formatStr == "" {
+			WriteError("-convert requiere especificar el formato de destino con -f")
+			os.Exit(1)
+		}
+		targetFmt, err := ParseFormat(*formatStr)
+		if err != nil {
+			WriteError("%v", err)
+			os.Exit(1)
+		}
+		convOutDir := *outputDir
+		if !outDirSet {
+			convOutDir = ""
+		}
+		opts := ConvertOptions{
+			OutputDir:   convOutDir,
+			KeepOrig:    *keepOrig,
+			Force:       *force,
+			Verbose:     *verbose,
+			Password:    cliPassword,
+			Hash:        *hashFlag,
+			ThreadLimit: NCPU(),
+		}
+		if err := DoConvert(files, targetFmt, opts); err != nil {
+			WriteError("%v", err)
+			os.Exit(1)
+		}
+		NotifyTaskComplete("crush", "Conversión completada", time.Since(appStartTime), *notifyFlag)
 		return
 	}
 
@@ -1162,6 +1206,7 @@ func printHelp() {
 	w(Yellow, "  crush -t archivo...                                    # verificar integridad de archivos comprimidos\n")
 	w(Yellow, "  crush -verify archivo...                               # verificar integridad y checksum SHA-256 si existe .sha256\n")
 	w(Yellow, "  crush -r archivo...                                    # leer contenido de archivo comprimido a stdout\n")
+	w(Yellow, "  crush -convert -f FORMATO [opciones] archivo...        # transcodificar/convertir directamente a otro formato\n")
 	w(Yellow, "  crush --install                                        # instalar binario crush en /usr/local/bin\n")
 	w(Yellow, "  crush --install-deps                                   # instalar solo herramientas faltantes del sistema\n")
 	w(Yellow, "  crush --uninstall                                      # desinstalar binario crush del sistema\n")
@@ -1185,6 +1230,8 @@ func printHelp() {
 	fmt.Print("              Verificar integridad y checksum SHA-256 si existe .sha256\n")
 	w(Yellow, "  -r")
 	fmt.Print("                   Leer contenido de archivo comprimido a stdout\n")
+	w(Yellow, "  -convert, -recompress")
+	fmt.Print(" Transcodificar directamente archivo comprimido a otro formato\n")
 	w(Yellow, "  --bench")
 	fmt.Print("              Medir velocidad y ratio de compresión por formato\n")
 	w(Yellow, "  --bench-size N")
@@ -1304,6 +1351,7 @@ func printHelp() {
 	w(Yellow, "  crush -find \"*.sql\" backups/*.tar.gz                    # buscar archivos por patrón dentro de comprimidos\n")
 	w(Yellow, "  crush -diff release_v1.zip release_v2.zip               # comparar cambios y diferencias entre dos comprimidos\n")
 	w(Yellow, "  crush -r archivo.txt.gz | grep error                   # leer y filtrar contenido comprimido a stdout\n")
+	w(Yellow, "  crush -convert -f zst archivo.tar.gz                   # transcodificar directamente de tar.gz a tar.zst\n")
 	w(Yellow, "  crush --bench                                          # benchmark comparativo de todos los formatos (10 MB)\n")
 	w(Yellow, "  crush --bench-size 50 archivo.iso                      # benchmark con dataset de 50 MB o archivo propio\n")
 	w(Yellow, "  crush -h                                               # mostrar esta ayuda completa con opciones y ejemplos\n")

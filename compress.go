@@ -531,15 +531,15 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		if hasTool("pigz") {
 			args := []string{"-c", "-p", threadStr(opts.ThreadLimit), level}
 			args = append(args, strings.Fields(opts.CompressionOpts)...)
-			return exec.Command("pigz", args...)
+			return execCommand("pigz", args...)
 		}
 		args := []string{"-c", level}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command("gzip", args...)
+		return execCommand("gzip", args...)
 	case "xz":
 		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "-e"}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command("xz", args...)
+		return execCommand("xz", args...)
 	case "bz2":
 		bin := bzip2Bin()
 		args := []string{"-c"}
@@ -552,15 +552,15 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		}
 		args = append(args, fmt.Sprintf("-%d", fastOrSlow(opts, 9)))
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command(bin, args...)
+		return execCommand(bin, args...)
 	case "bz3":
 		args := []string{"-c", "-b", "64", "-j", threadStr(opts.ThreadLimit)}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command("bzip3", args...)
+		return execCommand("bzip3", args...)
 	case "zst":
 		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), "--ultra", fmt.Sprintf("-%d", fastOrSlow(opts, 22))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command("zstd", args...)
+		return execCommand("zstd", args...)
 	case "lz":
 		tool := "plzip"
 		if !hasTool("plzip") {
@@ -568,7 +568,7 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		}
 		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "--threads=" + threadStr(opts.ThreadLimit)}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command(tool, args...)
+		return execCommand(tool, args...)
 	case "lz4":
 		args := []string{"-c"}
 		if lz4SupportsThreads() && opts.ThreadLimit > 0 {
@@ -576,17 +576,17 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		}
 		args = append(args, fmt.Sprintf("-%d", fastOrSlow(opts, 9)))
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command("lz4", args...)
+		return execCommand("lz4", args...)
 	case "br":
 		args := []string{"-c", "-q", fmt.Sprintf("%d", fastOrSlow(opts, 11))}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command("brotli", args...)
+		return execCommand("brotli", args...)
 	case "lrz":
 		args := []string{"-z", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-o", "-"}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		return exec.Command("lrzip", args...)
+		return execCommand("lrzip", args...)
 	default:
-		return exec.Command("cat")
+		return execCommand("cat")
 	}
 }
 

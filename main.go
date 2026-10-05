@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // knownShortFlags lists single-dash short flags that can be combined (-tkv).
@@ -257,6 +258,7 @@ func main() {
 	findFlag := flag.String("find", "", "Buscar archivos por patrón dentro de uno o más archivos comprimidos")
 	diffFlag := flag.Bool("diff", false, "Comparar diferencias de contenido entre dos archivos comprimidos")
 	cleanFlag := flag.Bool("clean", false, "Modo sanitización: excluir automáticamente temporales, dependencias y basura de SO")
+	notifyFlag := flag.Bool("notify", false, "Emitir notificación de escritorio y campana al completar la tarea")
 
 	flag.Parse()
 
@@ -564,6 +566,8 @@ func main() {
 		defer release()
 	}
 
+	appStartTime := time.Now()
+
 	// Handle --bench
 	if *benchFlag {
 		customFile := ""
@@ -574,6 +578,7 @@ func main() {
 			WriteError("en benchmark: %v", err)
 			os.Exit(1)
 		}
+		NotifyTaskComplete("crush benchmark", "Benchmark completado", time.Since(appStartTime), *notifyFlag)
 		return
 	}
 
@@ -601,6 +606,7 @@ func main() {
 			os.Exit(1)
 		}
 		WriteSuccess("Archivo comprimido actualizado con éxito: %s", targetArchive)
+		NotifyTaskComplete("crush", "Archivo comprimido actualizado", time.Since(appStartTime), *notifyFlag)
 		return
 	}
 
@@ -867,6 +873,7 @@ func main() {
 				}
 			}
 		}
+		NotifyTaskComplete("crush", "Compresión completada", time.Since(appStartTime), *notifyFlag)
 		return
 	}
 
@@ -915,6 +922,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
+		NotifyTaskComplete("crush", "Descompresión completada", time.Since(appStartTime), *notifyFlag)
 		return
 	}
 
@@ -1237,6 +1245,8 @@ func printHelp() {
 	fmt.Print("               Comparar diferencias de contenido entre dos archivos comprimidos\n")
 	w(Yellow, "  -clean")
 	fmt.Print("              Sanitización automática: excluir basura de SO, VCS y dependencias\n")
+	w(Yellow, "  -notify")
+	fmt.Print("             Emitir notificación de escritorio y campana al completar la tarea\n")
 	w(Yellow, "  --install")
 	fmt.Print("            Instalar binario crush en /usr/local/bin\n")
 	w(Yellow, "  --install-deps")
@@ -1274,6 +1284,7 @@ func printHelp() {
 	w(Yellow, "  crush -c -f 7z -n *.iso                                # modo simulacro (dry-run, no escribe en disco)\n")
 	w(Yellow, "  crush -c -f zip -exclude \"*.bak\" dir/                  # comprimir excluyendo archivos con patrón .bak\n")
 	w(Yellow, "  crush -c -clean -f tar.gz proyecto/                    # comprimir excluyendo automáticamente .git, node_modules, etc.\n")
+	w(Yellow, "  crush -c -f 7z -notify archivo_pesado.iso              # emitir notificación de escritorio y sonido al terminar\n")
 	w(Yellow, "  crush -c -f tar.gz -o /backup/ dir/                    # comprimir enviando el resultado a un directorio\n")
 	w(Yellow, "  crush -c -C -f 7z file1.txt file2.txt file3.txt        # combinar múltiples archivos en un único archivo 7z\n")
 	w(Yellow, "  crush -c -f zst -s 10 archivo_grande.iso               # dividir flujo comprimido en partes de 10 MB\n")

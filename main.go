@@ -253,6 +253,7 @@ func main() {
 	sparseShortFlag := flag.Bool("S", false, "Soporte para archivos dispersos (sparse) en tar (activo por omisión, alias de -sparse)")
 	noSparseFlag := flag.Bool("no-sparse", false, "Desactivar soporte para archivos dispersos (sparse) en tar")
 	filterFlag := flag.String("filter", "", "Filtro de extracción selectiva por patrón")
+	treeFlag := flag.Bool("tree", false, "Mostrar vista en árbol jerárquica del contenido del archivo comprimido")
 
 	flag.Parse()
 
@@ -546,6 +547,7 @@ func main() {
 		Watch:       *watchDir != "",
 		List:        hasL,
 		Read:        hasR,
+		Tree:        *treeFlag,
 		StdinStream: len(files) == 0 && stdinIsPipe && *formatStr != "" && (hasC || hasD),
 	}
 	if lockSc.NeedsLock() {
@@ -608,6 +610,19 @@ func main() {
 				WriteError("listando %s: %v", f, err)
 			}
 			file.Close()
+		}
+		return
+	}
+
+	// Handle -tree
+	if *treeFlag {
+		if len(files) == 0 {
+			WriteError("debe especificar al menos un archivo comprimido para mostrar su árbol\nUso: crush -tree ARCHIVO...")
+			os.Exit(1)
+		}
+		if err := DoTree(files, cliPassword, os.Stdout); err != nil {
+			WriteError("%v", err)
+			os.Exit(1)
 		}
 		return
 	}
@@ -1181,6 +1196,8 @@ func printHelp() {
 	fmt.Print("           Desactivar soporte para archivos dispersos (sparse) en tar\n")
 	w(Yellow, "  -filter patrón")
 	fmt.Print("       Filtro de extracción selectiva por patrón (*.txt, carpetas)\n")
+	w(Yellow, "  -tree")
+	fmt.Print("                Mostrar vista en árbol jerárquica del contenido\n")
 	w(Yellow, "  --install")
 	fmt.Print("            Instalar binario crush en /usr/local/bin\n")
 	w(Yellow, "  --install-deps")
@@ -1232,6 +1249,7 @@ func printHelp() {
 	w(Yellow, "  crush -t *.tar.gz                                      # verificar integridad física de múltiples archivos\n")
 	w(Yellow, "  crush -l archivo.7z                                    # listar contenido detallado de archivo comprimido 7z\n")
 	w(Yellow, "  crush -l *.7z                                          # listar contenido de múltiples archivos comprimidos\n")
+	w(Yellow, "  crush -tree archivo.tar.gz                             # mostrar contenido del archivo en vista de árbol\n")
 	w(Yellow, "  crush -r archivo.txt.gz | grep error                   # leer y filtrar contenido comprimido a stdout\n")
 	w(Yellow, "  crush --bench                                          # benchmark comparativo de todos los formatos (10 MB)\n")
 	w(Yellow, "  crush --bench-size 50 archivo.iso                      # benchmark con dataset de 50 MB o archivo propio\n")

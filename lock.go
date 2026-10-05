@@ -72,6 +72,10 @@ type lockScope struct {
 	Watch       bool
 	List        bool
 	Read        bool
+	Tree        bool
+	Find        bool
+	Diff        bool
+	Convert     bool
 	StdinStream bool
 }
 
@@ -79,5 +83,5 @@ func (s lockScope) NeedsLock() bool {
 	if s.StdinStream {
 		return false
 	}
-	return s.Compress || s.Decompress || s.Add || s.Test || s.Bench || s.Watch
+	return s.Compress || s.Decompress || s.Add || s.Test || s.Bench || s.Watch || s.Convert
 }

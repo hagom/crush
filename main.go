@@ -256,6 +256,7 @@ func main() {
 	treeFlag := flag.Bool("tree", false, "Mostrar vista en árbol jerárquica del contenido del archivo comprimido")
 	findFlag := flag.String("find", "", "Buscar archivos por patrón dentro de uno o más archivos comprimidos")
 	diffFlag := flag.Bool("diff", false, "Comparar diferencias de contenido entre dos archivos comprimidos")
+	cleanFlag := flag.Bool("clean", false, "Modo sanitización: excluir automáticamente temporales, dependencias y basura de SO")
 
 	flag.Parse()
 
@@ -592,6 +593,7 @@ func main() {
 			Verbose:         *verbose,
 			Hash:            *hashFlag,
 			ThreadLimit:     effectiveThreads,
+			Clean:           *cleanFlag,
 			CompressionOpts: *compressionOpts,
 		}
 		if err := DoAppend(targetArchive, itemsToAdd, opts); err != nil {
@@ -816,6 +818,7 @@ func main() {
 			Password:        cliPassword,
 			Sparse:          sparseEnabled,
 			NoSparse:        !sparseEnabled,
+			Clean:           *cleanFlag,
 		}
 		var outPaths []string
 		var err error
@@ -1232,6 +1235,8 @@ func printHelp() {
 	fmt.Print("        Buscar archivos por patrón o nombre dentro de archivos comprimidos\n")
 	w(Yellow, "  -diff")
 	fmt.Print("               Comparar diferencias de contenido entre dos archivos comprimidos\n")
+	w(Yellow, "  -clean")
+	fmt.Print("              Sanitización automática: excluir basura de SO, VCS y dependencias\n")
 	w(Yellow, "  --install")
 	fmt.Print("            Instalar binario crush en /usr/local/bin\n")
 	w(Yellow, "  --install-deps")
@@ -1268,6 +1273,7 @@ func printHelp() {
 	w(Yellow, "  crush -c -f xz -k documento.txt                        # conservar archivo original tras la compresión\n")
 	w(Yellow, "  crush -c -f 7z -n *.iso                                # modo simulacro (dry-run, no escribe en disco)\n")
 	w(Yellow, "  crush -c -f zip -exclude \"*.bak\" dir/                  # comprimir excluyendo archivos con patrón .bak\n")
+	w(Yellow, "  crush -c -clean -f tar.gz proyecto/                    # comprimir excluyendo automáticamente .git, node_modules, etc.\n")
 	w(Yellow, "  crush -c -f tar.gz -o /backup/ dir/                    # comprimir enviando el resultado a un directorio\n")
 	w(Yellow, "  crush -c -C -f 7z file1.txt file2.txt file3.txt        # combinar múltiples archivos en un único archivo 7z\n")
 	w(Yellow, "  crush -c -f zst -s 10 archivo_grande.iso               # dividir flujo comprimido en partes de 10 MB\n")

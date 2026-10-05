@@ -36,6 +36,26 @@ type CompressOptions struct {
 	Password        string
 	Sparse          bool
 	NoSparse        bool
+	Clean           bool
+}
+
+var DefaultCleanExcludes = []string{
+	"*.DS_Store",
+	"Thumbs.db",
+	"desktop.ini",
+	"*.tmp",
+	"*~",
+	".git",
+	".svn",
+	".hg",
+	".idea",
+	".vscode",
+	"node_modules",
+	"__pycache__",
+	"*.pyc",
+	".pytest_cache",
+	".build",
+	"target",
 }
 
 func (opts CompressOptions) UseSparse() bool {
@@ -79,6 +99,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	if len(files) == 0 {
 		return nil, fmt.Errorf("No se encontraron archivos válidos")
+	}
+
+	if opts.Clean {
+		opts.Exclude = append(opts.Exclude, DefaultCleanExcludes...)
 	}
 
 	if len(opts.Formats) > 1 {
@@ -1343,6 +1367,10 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		if _, err := os.Stat(item); err != nil {
 			return fmt.Errorf("el archivo o carpeta a agregar no existe: %s", item)
 		}
+	}
+
+	if opts.Clean {
+		opts.Exclude = append(opts.Exclude, DefaultCleanExcludes...)
 	}
 
 	info, err := DetectFormat(archive)

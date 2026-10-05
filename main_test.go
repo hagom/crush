@@ -680,7 +680,7 @@ func TestHelpEveryOptionHasDescriptionAndExample(t *testing.T) {
 	requiredFlags := []string{
 		"-c", "-d", "-a", "-watch", "-l", "-t", "-verify", "-r", "--bench", "--bench-size",
 		"-h", "-f", "-F", "-o", "-n", "-k", "-v", "-force", "-quick", "-s",
-		"-hash", "-p", "-opts", "-i", "-C", "-exclude", "-sparse", "-filter", "-tree", "-find", "-diff",
+		"-hash", "-p", "-opts", "-i", "-C", "-exclude", "-clean", "-sparse", "-filter", "-tree", "-find", "-diff",
 		"--install", "--install-deps", "--uninstall", "--completion", "--version",
 	}
 

@@ -1163,6 +1163,48 @@ func TestCompressSparseTarFlag(t *testing.T) {
 	}
 }
 
+func TestCompressCleanSanitization(t *testing.T) {
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	var capturedArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "tar" {
+			capturedArgs = append([]string(nil), args...)
+		}
+		return origExec(name, args...)
+	}
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "data.txt")
+	_ = os.WriteFile(f1, []byte("clean content"), 0644)
+
+	opts := CompressOptions{
+		Format:    Tar,
+		Clean:     true,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	_, err := DoCompress([]string{f1}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress with Clean failed: %v", err)
+	}
+
+	foundGit := false
+	foundDSStore := false
+	for _, a := range capturedArgs {
+		if strings.Contains(a, ".git") {
+			foundGit = true
+		}
+		if strings.Contains(a, ".DS_Store") {
+			foundDSStore = true
+		}
+	}
+	if !foundGit || !foundDSStore {
+		t.Errorf("clean mode did not inject default excludes, got args: %v", capturedArgs)
+	}
+}
+
 func TestCompressPasswordWarningOnStream(t *testing.T) {
 	tmpDir := t.TempDir()
 	src := filepath.Join(tmpDir, "stream_warn.txt")

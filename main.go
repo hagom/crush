@@ -432,7 +432,7 @@ func main() {
 
 	// -f solo tiene sentido con -c o -convert (excepto en modo pipe stdin)
 	if *formatStr != "" && !*compressFlag && !stdinIsPipe && !hasConvert {
-		WriteWarning("-f solo tiene efecto con -c o -convert (ignorado)")
+		WriteWarning("-f solo tiene efecto con -c (ignorado)")
 	}
 	// -F solo tiene sentido con -c (excepto en modo pipe stdin)
 	if (*formatsMulti != "" || *formatsMultiLong != "") && !*compressFlag && !stdinIsPipe {

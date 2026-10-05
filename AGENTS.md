@@ -106,8 +106,14 @@ La arquitectura de `crush` aplica rigurosamente los principios SOLID para garant
 crush/
 ├── main.go          # CLI flags, dispatch (-c, -d, -l, -t, -r, -watch, -verify, --bench, --install)
 ├── format.go        # FormatInfo, ParseFormat, DetectFormat, ExtForFormat
-├── compress.go      # DoCompress, compressItems, tar-pipe, -hash, -p, -sparse
+├── compress.go      # DoCompress, compressItems, tar-pipe, -hash, -p, -sparse, -clean
 ├── decompress.go    # DoDecompress, splitWriter, -p, -filter
+├── archive_list.go  # Lector polimórfico de miembros de archivo sin extracción a disco
+├── tree.go          # Generador de vista en árbol jerárquica (-tree)
+├── find.go          # Motor de búsqueda por patrón glob en comprimidos (-find)
+├── diff.go          # Comparador y diff entre archivos comprimidos (-diff)
+├── convert.go       # Transcodificador directo entre formatos (-convert, -recompress)
+├── notify.go        # Notificaciones de escritorio (notify-send) y campana acústica (-notify)
 ├── watcher.go       # Watcher, DoWatch, loop con stdlib
 ├── watcher_linux.go # Backend inotify (IN_CLOSE_WRITE, IN_MOVED_TO)
 ├── watcher_other.go # Backend fallback por sondeo
@@ -121,6 +127,7 @@ crush/
 ├── lock_other.go    # Fallback sin bloqueo en plataformas no Unix
 ├── pkgmgr.go        # DetectPkgManager, InstallMissingDeps, list helpers
 ├── Makefile
+├── TODO.md          # Propuestas y mejoras futuras (entropía previa, paridad)
 ├── .github/workflows/ci.yml  # GitHub Actions: test matrix Go 1.21-1.23, race detector, build
 ├── *_test.go        # Tests por paquete
 └── mock_test.go     # Tests con mocks de exec.Command (patrón TestHelperProcess)
@@ -128,8 +135,15 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 444 tests nativos pasando con race detector (-race). ~15350 líneas. 0 bugs conocidos.
+- Go: migración completa. 496 tests nativos pasando con race detector (-race). ~16800 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Suite de Nuevas Funcionalidades (Transcodificación, Inspección Avanzada, Sanitización y Alertas):
+    - **Transcodificación directa entre formatos (`-convert` / `-recompress` / `convert.go`):** Conversión directa entre formatos con tubería de streaming (`descompresor | compresor`) para formatos tar/stream con cero archivos intermedios en disco y extracción efímera segura para contenedores, con soporte para contraseñas, hashes SHA-256 y multihilo.
+    - **Vista jerárquica en árbol (`-tree` / `tree.go`):** Inspección visual del árbol interno de directorios y archivos de cualquier formato comprimido (`tar`, `tar.*`, `zip`, `7z`, `rar`) con cálculo de tamaños y conteo de nodos sin extracción a disco.
+    - **Búsqueda profunda en archivos comprimidos (`-find` / `find.go`):** Búsqueda por patrón o nombre en uno o múltiples comprimidos en lote reportando coincidencia y tamaño en tiempo real.
+    - **Comparador y Diff de archivos comprimidos (`-diff` / `diff.go`):** Comparación detallada elemento a elemento detectando adiciones (`+`), eliminaciones (`-`), cambios de tamaño (`~`) y resumen estadístico.
+    - **Modo sanitización automática pre-compresión (`-clean`):** Inyección de exclusiones automáticas de artefactos de SO (`.DS_Store`, `Thumbs.db`), control de versiones (`.git`, `.svn`) y dependencias voluminosas (`node_modules`, `__pycache__`, `.venv`, `.cargo/target`).
+    - **Notificaciones de escritorio y campana acústica (`-notify` / `notify.go`):** Integración con `notify-send` y alerta acústica en terminal (`\a`) al finalizar tareas largas (>10s) o de manera forzada con `-notify`.
   - Eliminación de Latencia de Inicio y Progreso en Tiempo Real:
     - **Medición de Flujo en Entrada (`compressTarPipe` con `io.Pipe` y `countingReader`):** Captura en tiempo real del flujo de datos sin comprimir generado por `tar` antes de ingresar al compresor. La barra de progreso y velocidad se actualizan desde el segundo cero con exactitud matemática al 100%, eliminando la pausa producida por los búferes internos de los compresores (`zstd`, `xz`, `pigz`, etc.).
     - **Diccionario Adaptativo LZMA2 en 7-Zip (`adaptive7zDict`):** Selección dinámica del tamaño de diccionario `-md` acoplado al volumen real de los archivos a comprimir ($\le 16\text{M}, 32\text{M}, 64\text{M}, 128\text{M}, 256\text{M}$) y adaptado a la memoria RAM disponible del sistema, erradicando reservas inútiles de memoria virtual en archivos pequeños/medianos y previniendo colapsos OOM en equipos modestos sin perder ratio de compresión.

@@ -455,10 +455,6 @@ func splitOutPath(outPath string, opts CompressOptions) string {
 	return outPath
 }
 
-func isTarBased(f Format) bool {
-	return f.IsStream()
-}
-
 func compressToolName(f Format) string {
 	switch f {
 	case Gz:
@@ -505,7 +501,7 @@ func CheckCompressTools(f Format) error {
 
 func compressItems(files []string, outPath string, opts CompressOptions) error {
 	// ponytail: no FileProgress in sequential path — single archive
-	if isTarBased(opts.Format) {
+	if opts.Format.IsStream() {
 		return compressTarPipe(files, outPath, opts, nil)
 	}
 
@@ -604,7 +600,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 
 	fi, statErr := os.Stat(file)
 	if statErr == nil && fi.IsDir() {
-		if isTarBased(opts.Format) {
+		if opts.Format.IsStream() {
 			return compressTarPipe([]string{file}, outPath, opts, fp)
 		}
 		switch opts.Format {
@@ -621,7 +617,7 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 		}
 	}
 
-	if isTarBased(opts.Format) {
+	if opts.Format.IsStream() {
 		ext := opts.Format.String()
 		if ext == "lrz" {
 			args := []string{"-f", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath, file}
@@ -838,7 +834,7 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 				}
 			}
 			fileExt := ext
-			if fi, err := os.Stat(file); err == nil && fi.IsDir() && isTarBased(opts.Format) {
+			if fi, err := os.Stat(file); err == nil && fi.IsDir() && opts.Format.IsStream() {
 				fileExt = ExtForFormat(opts.Format)
 			}
 			outPath := GetUniqueName(filepath.Join(targetDir, baseName), fileExt)

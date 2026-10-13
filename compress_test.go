@@ -1403,13 +1403,17 @@ func TestDoAppendZip(t *testing.T) {
 	}
 
 	// 3. Verificar que los archivos están dentro de zipPath
-	members, ok := listSevenZipMembers(zipPath, "")
-	if !ok {
-		t.Fatalf("no se pudo listar miembros de zip actualizado")
+	members, err := ListArchiveMembers(zipPath, "")
+	if err != nil {
+		t.Fatalf("no se pudo listar miembros de zip actualizado: %v", err)
 	}
-	joined := strings.Join(members, " ")
+	var memberNames []string
+	for _, m := range members {
+		memberNames = append(memberNames, m.Path)
+	}
+	joined := strings.Join(memberNames, " ")
 	if !strings.Contains(joined, "f1.txt") || !strings.Contains(joined, "f2.txt") {
-		t.Errorf("zip no contiene f1 y f2: %v", members)
+		t.Errorf("zip no contiene f1 y f2: %v", memberNames)
 	}
 }
 
@@ -1519,13 +1523,17 @@ func TestDoAppend7z(t *testing.T) {
 		t.Fatalf("DoAppend 7z falló: %v", err)
 	}
 
-	members, ok := listSevenZipMembers(archive7z, "")
-	if !ok {
-		t.Fatalf("no se pudo listar miembros de 7z actualizado")
+	members, err := ListArchiveMembers(archive7z, "")
+	if err != nil {
+		t.Fatalf("no se pudo listar miembros de 7z actualizado: %v", err)
 	}
-	joined := strings.Join(members, " ")
+	var memberNames []string
+	for _, m := range members {
+		memberNames = append(memberNames, m.Path)
+	}
+	joined := strings.Join(memberNames, " ")
 	if !strings.Contains(joined, "file1.txt") || !strings.Contains(joined, "file2.txt") {
-		t.Errorf("7z actualizado no contiene ambos archivos: %v", members)
+		t.Errorf("7z actualizado no contiene ambos archivos: %v", memberNames)
 	}
 }
 

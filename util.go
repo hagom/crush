@@ -781,12 +781,6 @@ func GetUniqueName(base, ext string) string {
 	return name
 }
 
-func ResetReservedNames() {
-	uniqueNameMu.Lock()
-	defer uniqueNameMu.Unlock()
-	reservedNames = make(map[string]bool)
-}
-
 // --- Logging ---
 
 func SetupLogging() error {

@@ -219,7 +219,7 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		return fmt.Errorf("extrayendo archivo para conversión: %w", err)
 	}
 
-	if isTarBased(targetFormat) || targetFormat == Tar {
+	if targetFormat.IsStream() || targetFormat == Tar {
 		if targetFormat == Tar {
 			cmd := execCommand("tar", "-cf", outPath, "-C", tmpDir, ".")
 			if err := cmd.Run(); err != nil {
@@ -371,7 +371,7 @@ func DoConvert(files []string, targetFormat Format, opts ConvertOptions) error {
 		WriteLogf("%sTranscodificando:%s %s → %s\n", BoldBlue, NC, file, outPath)
 
 		isTarSrc := HasTarSuffix(file) || srcInfo.Format == Tar
-		isTarTgt := targetFormat == Tar || isTarBased(targetFormat)
+		isTarTgt := targetFormat == Tar || targetFormat.IsStream()
 
 		isStreamSrc := !isTarSrc && !srcInfo.IsContainer()
 		isStreamTgt := !targetFormat.IsContainer() && targetFormat != Tar

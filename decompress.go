@@ -263,33 +263,16 @@ func listArchiveOutputs(file string, dir string, info FormatInfo, passwords ...s
 	if len(passwords) > 0 {
 		password = passwords[0]
 	}
-	if info.Tool == "" {
-		if fi, err := DetectFormat(file); err == nil {
-			info = fi
-		}
-	}
-	if info.IsTar || info.Format == Tar {
-		if members, ok := listTarMembers(file); ok {
-			return resolveOutputs(members, dir)
-		}
+	members, err := ListArchiveMembers(file, password)
+	if len(members) == 0 && err != nil {
 		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
 		return nil
 	}
-	if info.Format == SevenZ || info.Format == Zip {
-		if members, ok := listSevenZipMembers(file, password); ok {
-			return resolveOutputs(members, dir)
-		}
-		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
-		return nil
+	var paths []string
+	for _, m := range members {
+		paths = append(paths, m.Path)
 	}
-	if info.Format == Rar {
-		if members, ok := listRarMembers(file, password); ok {
-			return resolveOutputs(members, dir)
-		}
-		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
-		return nil
-	}
-	return []string{filepath.Join(dir, stripCompressionExt(filepath.Base(file)))}
+	return resolveOutputs(paths, dir)
 }
 
 func listTarMembers(file string) ([]string, bool) {
@@ -315,31 +298,6 @@ func listTarMembers(file string) ([]string, bool) {
 	for _, line := range strings.Split(out.String(), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			members = append(members, line)
-		}
-	}
-	return members, len(members) > 0
-}
-
-func listSevenZipMembers(file string, password string) ([]string, bool) {
-	sevenz := sevenzBin()
-	if !hasTool(sevenz) {
-		return nil, false
-	}
-	args := []string{"l", "-ba", "-slt"}
-	if password != "" {
-		args = append(args, "-p"+password)
-	}
-	args = append(args, "--", file)
-	cmd := exec.Command(sevenz, args...)
-	var out strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
-	_ = cmd.Run()
-	var members []string
-	for _, line := range strings.Split(out.String(), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Path = ") {
-			members = append(members, strings.TrimPrefix(line, "Path = "))
 		}
 	}
 	return members, len(members) > 0
@@ -670,10 +628,6 @@ func pipeCmdForParts(info FormatInfo, parts []string, pt *ProgressTracker, fp *F
 	return cmd, mc, nil
 }
 
-func pipeCmdForProgress(info FormatInfo, file string, pt *ProgressTracker, fp *FileProgress, threads ...int) (*exec.Cmd, io.Closer, error) {
-	return pipeCmdForParts(info, findSplitParts(file), pt, fp, threads...)
-}
-
 func decompressSingle(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
 	ext := strings.ToLower(file)
 
@@ -874,15 +828,6 @@ func checkAndApplyIsoExtension(outputPath string) {
 	if (err == nil || errors.Is(err, io.EOF)) && n == 5 && string(buf) == "CD001" {
 		_ = os.Rename(outputPath, outputPath+".iso")
 	}
-}
-
-func resolveTargetDir(outputDir, file string) string {
-	return ResolveDecompressDir(file, outputDir)
-}
-
-
-func stripTarExt(file string) string {
-	return StripTarSuffix(file)
 }
 
 var singleCompExts = []string{".gz", ".xz", ".bz2", ".bz3", ".zst", ".lz", ".lrz", ".lz4", ".br"}

@@ -62,6 +62,16 @@ make install        # install -m 755 crush /usr/local/bin/
 - **Sistemas target**: Debian (apt) y RedHat (dnf/yum). El instalador de dependencias debe priorizar estos gestores.
 - Si la versión paralela de un compresor no está disponible, caer en la versión serial (`gzip`, `bzip2`, etc.) como último recurso, nunca fallar.
 
+## Filosofía Ponytail (Minimalismo, Stdlib y YAGNI)
+
+- **Escalera de decisión:**
+  1. **¿Necesita existir?** Si es una necesidad especulativa o para "más adelante", no se construye (YAGNI).
+  2. **¿La biblioteca estándar de Go (`stdlib`) ya lo cubre?** Usar la stdlib. Cero dependencias externas en `go.mod`.
+  3. **¿El sistema operativo o kernel ya lo resuelve?** Usar primitivas nativas (`splice(2)`, `flock(2)`, `inotify(7)`, pipes UNIX).
+  4. **Código mínimo:** El diff funcional más corto y simple siempre gana. Eliminación sobre adición.
+- **Marcado de simplificaciones:** Cualquier atajo o simplificación deliberada se documenta explícitamente con `// ponytail: <explicación>`.
+- **Skills disponibles:** `ponytail` (modo activo), `ponytail-audit` (auditoría de sobreingeniería), `ponytail-review` (revisión de diffs), `ponytail-debt` (registro de deuda) y `ponytail-help`.
+
 ## Principios de Diseño SOLID
 
 La arquitectura de `crush` aplica rigurosamente los principios SOLID para garantizar mantenibilidad, extensibilidad y desacoplamiento sin dependencias externas:
@@ -73,7 +83,7 @@ La arquitectura de `crush` aplica rigurosamente los principios SOLID para garant
 
 ### 2. OCP — Open/Closed Principle (Principio de Abierto/Cerrado)
 - **Extensibilidad de Formatos:** Nuevos compresores o formatos se incorporan registrándolos en `format.go` (`formatNames`, `FormatInfoFromFormat`, `knownTarSuffixes`), sin necesidad de modificar switches hardcodeados en `compress.go`, `decompress.go`, `pkgmgr.go` o `test_cmd.go`.
-- **Diferenciación Flujo vs Contenedor:** Funciones como `ExtForFormat`, `isTarBased`, `listArchiveOutputs` y validación de `SplitSize` consumen los métodos polimórficos `info.IsContainer()` e `info.IsStream()`, permaneciendo cerradas a modificación cuando se añade un nuevo formato de compresión.
+- **Diferenciación Flujo vs Contenedor:** Funciones como `ExtForFormat`, `listArchiveOutputs` y validación de `SplitSize` consumen los métodos polimórficos `info.IsContainer()` e `info.IsStream()`, permaneciendo cerradas a modificación cuando se añade un nuevo formato de compresión.
 
 ### 3. LSP — Liskov Substitution Principle (Principio de Sustitución de Liskov)
 - **Intercambiabilidad de Herramientas:** Las herramientas concurrentes (`pigz`, `lbzip2`, `plzip`, `bzip3`, `xz`, `zstd`, `lrzip`, `7z`, `rar`) y sus fallbacks secuenciales (`gzip`, `bzip2`, `lzip`) respetan idénticos contratos de entrada/salida y comportamiento vía pipes (`-dc`, `-c`, `-f`, stdout/stdin).

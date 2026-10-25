@@ -39,6 +39,8 @@ var (
 	logMu          sync.Mutex
 	loggingActive  atomic.Bool
 
+	activeProgressTracker atomic.Pointer[ProgressTracker]
+
 	execCommand = exec.Command
 )
 
@@ -1152,6 +1154,7 @@ type ProgressTracker struct {
 	files         []*FileProgress
 	linesRendered int
 	writer        io.Writer
+	renderMu      sync.Mutex
 }
 
 func (pt *ProgressTracker) out() io.Writer {
@@ -1194,6 +1197,7 @@ func (pt *ProgressTracker) Start() {
 	if !pt.stderrIsTTY || pt.started.Swap(true) {
 		return
 	}
+	activeProgressTracker.Store(pt)
 	loggingActive.Store(true)
 	io.WriteString(pt.out(), "\033[?25l")
 	pt.ticker = time.NewTicker(100 * time.Millisecond)
@@ -1203,7 +1207,10 @@ func (pt *ProgressTracker) Start() {
 		for {
 			select {
 			case <-pt.ticker.C:
-				pt.render()
+				if pt.renderMu.TryLock() {
+					pt.render()
+					pt.renderMu.Unlock()
+				}
 			case <-pt.done:
 				pt.ticker.Stop()
 				return
@@ -1220,11 +1227,14 @@ func (pt *ProgressTracker) Stop() {
 	} else {
 		close(pt.done)
 	}
+	activeProgressTracker.CompareAndSwap(pt, nil)
 	loggingActive.Store(false)
+	pt.renderMu.Lock()
 	pt.eraseBlock()
 	if pt.stderrIsTTY {
 		io.WriteString(pt.out(), "\033[?25h")
 	}
+	pt.renderMu.Unlock()
 	logMu.Lock()
 	if logBuf.Len() > 0 {
 		os.Stderr.Write(logBuf.Bytes())
@@ -1234,6 +1244,46 @@ func (pt *ProgressTracker) Stop() {
 	if pt.stderrIsTTY {
 		pt.renderFinal()
 	}
+}
+
+func (pt *ProgressTracker) Suspend(fn func()) {
+	if pt == nil || !pt.started.Load() {
+		fn()
+		return
+	}
+	pt.renderMu.Lock()
+	defer pt.renderMu.Unlock()
+
+	pt.eraseBlock()
+	pt.linesRendered = 0
+	if pt.stderrIsTTY {
+		io.WriteString(pt.out(), "\033[?25h")
+	}
+
+	prevLogging := loggingActive.Swap(false)
+	logMu.Lock()
+	if logBuf.Len() > 0 {
+		os.Stderr.Write(logBuf.Bytes())
+		logBuf.Reset()
+	}
+	logMu.Unlock()
+
+	defer func() {
+		loggingActive.Store(prevLogging)
+		if pt.stderrIsTTY {
+			io.WriteString(pt.out(), "\033[?25l")
+		}
+	}()
+
+	fn()
+}
+
+func SuspendActiveProgress(fn func()) {
+	if pt := activeProgressTracker.Load(); pt != nil {
+		pt.Suspend(fn)
+		return
+	}
+	fn()
 }
 
 func (pt *ProgressTracker) eraseBlock() {

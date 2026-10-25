@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -221,3 +222,88 @@ func TestPasswordManager_ConcurrentAccess(t *testing.T) {
 		t.Errorf("esperaba 'concurrentPass', obtuvo %q", pm.GetSessionCached())
 	}
 }
+
+func TestDefaultPromptUserPassword_Clarity(t *testing.T) {
+	origRead := readPasswordFunc
+	origTerm := isTerminalFunc
+	defer func() {
+		readPasswordFunc = origRead
+		isTerminalFunc = origTerm
+	}()
+
+	isTerminalFunc = func() bool { return true }
+
+	var receivedPrompt string
+	readPasswordFunc = func(prompt string) (string, error) {
+		receivedPrompt = prompt
+		return "secret123", nil
+	}
+
+	testFile := "/path/to/archive_important.7z"
+	pass, err := defaultPromptUserPassword(testFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pass != "secret123" {
+		t.Errorf("got pass %q, want 'secret123'", pass)
+	}
+
+	// El prompt interactivo DEBE incluir explícitamente el nombre del archivo para que el usuario sepa con total claridad qué archivo está pidiendo la contraseña
+	if !strings.Contains(receivedPrompt, "archive_important.7z") {
+		t.Errorf("el prompt interactivo %q NO incluye el nombre del archivo 'archive_important.7z'", receivedPrompt)
+	}
+}
+
+func TestResolvePassword_SuspendsProgressAndShowsPromptClearly(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file.txt")
+	_ = os.WriteFile(f1, []byte("contenido secreto"), 0644)
+	arch7z := filepath.Join(tmpDir, "my_protected_data.7z")
+
+	cmd := exec.Command(sevenzBin(), "a", "-pcorrecta123", arch7z, f1)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("error creando 7z: %v, salida: %s", err, string(out))
+	}
+
+	passFile := filepath.Join(tmpDir, "passwords.txt")
+	pm := NewPasswordManager(passFile)
+
+	// Simular ProgressTracker activo en terminal interactiva
+	pt := NewProgressTracker(1000, 1)
+	pt.stderrIsTTY = true
+	pt.Start()
+	defer pt.Stop()
+
+	promptCount := 0
+	wasLoggingActiveInsidePrompt := true
+	pm.promptFunc = func(file string) (string, error) {
+		promptCount++
+		// Mientras se pide la contraseña, loggingActive NO debe estar activo (debe estar suspendido)
+		// para que los avisos y prompts se muestren directamente en terminal y no queden ocultos en logBuf.
+		wasLoggingActiveInsidePrompt = loggingActive.Load()
+		if promptCount == 1 {
+			return "claveIncorrecta", nil
+		}
+		return "correcta123", nil
+	}
+
+	resolved, err := pm.ResolvePassword(arch7z, SevenZ, "")
+	if err != nil {
+		t.Fatalf("ResolvePassword falló: %v", err)
+	}
+	if resolved != "correcta123" {
+		t.Errorf("esperaba 'correcta123', obtuvo %q", resolved)
+	}
+	if promptCount != 2 {
+		t.Errorf("esperaba 2 llamadas al prompt, obtuvo %d", promptCount)
+	}
+	if wasLoggingActiveInsidePrompt {
+		t.Errorf("loggingActive estaba activo durante el prompt interactivo; los mensajes quedaron retenidos en logBuf")
+	}
+}
+
+

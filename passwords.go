@@ -15,6 +15,7 @@ var (
 	ErrPasswordSkipped = errors.New("descompresión omitida por el usuario (sin contraseña)")
 	globalPasswordMu   sync.Mutex
 	globalPasswordMgr  *PasswordManager
+	isTerminalFunc     = isTerminal
 )
 
 func GetPasswordManager() *PasswordManager {
@@ -252,35 +253,49 @@ func (pm *PasswordManager) ResolvePassword(file string, format Format, cliPasswo
 	}
 
 	base := filepath.Base(file)
-	for attempt := 1; attempt <= 3; attempt++ {
-		pass, err := promptFn(file)
-		if err != nil {
-			return "", err
-		}
-		pass = strings.TrimSpace(pass)
-		if pass == "" {
-			return "", fmt.Errorf("%w: %s", ErrPasswordSkipped, base)
-		}
+	var resolved string
+	var resolveErr error
 
-		if checkArchivePassword(file, format, pass) {
-			pm.AddSuccessful(pass)
-			return pass, nil
-		}
+	SuspendActiveProgress(func() {
+		for attempt := 1; attempt <= 3; attempt++ {
+			pass, err := promptFn(file)
+			if err != nil {
+				resolveErr = err
+				return
+			}
+			pass = strings.TrimSpace(pass)
+			if pass == "" {
+				resolveErr = fmt.Errorf("%w: %s", ErrPasswordSkipped, base)
+				return
+			}
 
-		if attempt < 3 {
-			WriteLogf("  %s✗ Contraseña incorrecta (intento %d/3).%s\n", Red, attempt, NC)
+			if checkArchivePassword(file, format, pass) {
+				pm.AddSuccessful(pass)
+				resolved = pass
+				return
+			}
+
+			if attempt < 3 {
+				fmt.Fprintf(os.Stderr, "  %s✗ Contraseña incorrecta para '%s' (intento %d/3).%s\n", Red, base, attempt, NC)
+			}
 		}
+		resolveErr = fmt.Errorf("contraseña incorrecta para %s tras 3 intentos", base)
+	})
+
+	if resolveErr != nil {
+		return "", resolveErr
 	}
-
-	return "", fmt.Errorf("contraseña incorrecta para %s tras 3 intentos", base)
+	return resolved, nil
 }
 
 func defaultPromptUserPassword(file string) (string, error) {
-	if !isTerminal() {
+	if !isTerminalFunc() {
 		return "", fmt.Errorf("el archivo %s requiere contraseña (terminal no interactiva)", filepath.Base(file))
 	}
-	WriteLogf("\n%s🔒 '%s' está protegido con contraseña.%s\n", Yellow, filepath.Base(file), NC)
-	pass, err := readPasswordFunc("Ingrese contraseña (o Enter para omitir): ")
+	base := filepath.Base(file)
+	fmt.Fprintf(os.Stderr, "\n%s🔒 '%s' está protegido con contraseña.%s\n", Yellow, base, NC)
+	prompt := fmt.Sprintf("  Ingrese contraseña para '%s' (o Enter para omitir): ", base)
+	pass, err := readPasswordFunc(prompt)
 	if err != nil {
 		return "", err
 	}

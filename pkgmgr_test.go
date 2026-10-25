@@ -109,10 +109,11 @@ func TestListCompressedLz4(t *testing.T) {
 	if err := os.WriteFile(src, []byte("contenido de prueba"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := exec.Command("lz4", "-q", src).Run(); err != nil {
+	dst := filepath.Join(tmp, "data.txt.lz4")
+	if err := exec.Command("lz4", "-q", "-f", src, dst).Run(); err != nil {
 		t.Fatal(err)
 	}
-	f, err := os.Open(filepath.Join(tmp, "data.txt.lz4"))
+	f, err := os.Open(dst)
 	if err != nil {
 		t.Fatal(err)
 	}

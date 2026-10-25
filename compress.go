@@ -770,6 +770,7 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 	}
 
 	sizesSlice := make([]int64, len(files))
+	caps := make([]int, len(files))
 	var totalBatchSize int64
 	for i, f := range files {
 		sz := fileSizes[f]
@@ -777,12 +778,22 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 			sizesSlice[i] = sz
 			totalBatchSize += sz
 		}
+		c := MaxEffectiveThreads(opts.Format, sz)
+		c = MemorySafeMaxThreads(opts.Format, c)
+		fmtMax := FormatMaxThreads(opts.Format)
+		if c > fmtMax {
+			c = fmtMax
+		}
+		if c < 1 {
+			c = 1
+		}
+		caps[i] = c
 	}
 
-	pool := NewDynamicThreadPool(totalCores, 1, maxFmtThreads, len(files), totalBatchSize)
+	pool := NewDynamicThreadPool(totalCores, 1, maxFmtThreads, len(files), totalBatchSize, maxWorkers)
 	var preAlloc []int
 	if len(files) <= maxWorkers {
-		preAlloc = AllocateThreadsProportional(sizesSlice, totalCores, 1, maxFmtThreads)
+		preAlloc = AllocateThreadsProportionalWithCaps(sizesSlice, totalCores, 1, caps)
 	}
 
 	sem := make(chan struct{}, maxWorkers)
@@ -821,7 +832,7 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 			if len(preAlloc) == len(files) {
 				th = preAlloc[idx]
 			} else {
-				th = pool.Acquire(fileSizes[file])
+				th = pool.Acquire(fileSizes[file], caps[idx])
 				defer pool.Release(th)
 			}
 			fileOpts.ThreadLimit = th

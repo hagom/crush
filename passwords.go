@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -39,10 +41,16 @@ func SetPasswordManager(pm *PasswordManager) func() {
 	}
 }
 
+type PasswordEntry struct {
+	Password string
+	Count    int
+}
+
 type PasswordManager struct {
 	mu            sync.RWMutex
 	promptMu      sync.Mutex
 	passwords     []string
+	entries       []PasswordEntry
 	sessionCached string
 	filePath      string
 	promptFunc    func(file string) (string, error)
@@ -77,15 +85,40 @@ func (pm *PasswordManager) load() {
 	}
 	defer f.Close()
 
-	var list []string
+	var entries []PasswordEntry
 	seen := make(map[string]bool)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		p := strings.TrimSpace(scanner.Text())
-		if p != "" && !seen[p] {
-			seen[p] = true
-			list = append(list, p)
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
 		}
+		var pass string
+		count := 1
+		if parts := strings.Split(line, "\t"); len(parts) >= 2 {
+			pass = parts[0]
+			if c, err := strconv.Atoi(parts[1]); err == nil && c > 0 {
+				count = c
+			}
+		} else {
+			pass = line
+		}
+		if pass != "" && !seen[pass] {
+			seen[pass] = true
+			entries = append(entries, PasswordEntry{Password: pass, Count: count})
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Count > entries[j].Count
+	})
+	pm.entries = entries
+	pm.syncPasswordsLocked()
+}
+
+func (pm *PasswordManager) syncPasswordsLocked() {
+	list := make([]string, len(pm.entries))
+	for i, e := range pm.entries {
+		list[i] = e.Password
 	}
 	pm.passwords = list
 }
@@ -98,8 +131,10 @@ func (pm *PasswordManager) saveLocked() {
 	_ = os.MkdirAll(dir, 0700)
 
 	var sb strings.Builder
-	for _, p := range pm.passwords {
-		sb.WriteString(p)
+	for _, e := range pm.entries {
+		sb.WriteString(e.Password)
+		sb.WriteString("\t")
+		sb.WriteString(strconv.Itoa(e.Count))
 		sb.WriteString("\n")
 	}
 	_ = os.WriteFile(pm.filePath, []byte(sb.String()), 0600)
@@ -114,15 +149,32 @@ func (pm *PasswordManager) AddSuccessful(pass string) {
 
 	pm.sessionCached = pass
 
-	var newList []string
-	newList = append(newList, pass)
-	for _, p := range pm.passwords {
-		if p != pass {
-			newList = append(newList, p)
+	found := false
+	for i := range pm.entries {
+		if pm.entries[i].Password == pass {
+			pm.entries[i].Count++
+			found = true
+			break
 		}
 	}
-	pm.passwords = newList
+	if !found {
+		pm.entries = append(pm.entries, PasswordEntry{Password: pass, Count: 1})
+	}
+
+	sort.SliceStable(pm.entries, func(i, j int) bool {
+		return pm.entries[i].Count > pm.entries[j].Count
+	})
+
+	pm.syncPasswordsLocked()
 	pm.saveLocked()
+}
+
+func (pm *PasswordManager) GetStoredPasswords() []string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	res := make([]string, len(pm.passwords))
+	copy(res, pm.passwords)
+	return res
 }
 
 func (pm *PasswordManager) GetSessionCached() string {
@@ -224,6 +276,7 @@ func FileRequiresInteractivePassword(file string, cliPassword string) bool {
 	candidates := pm.GetCandidates(cliPassword)
 	for _, p := range candidates {
 		if checkArchivePassword(file, info.Format, p) {
+			pm.AddSuccessful(p)
 			return false
 		}
 	}

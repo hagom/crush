@@ -50,6 +50,35 @@ func TestPasswordManager_LoadAndSave(t *testing.T) {
 	}
 }
 
+func TestPasswordManager_FrequencySort(t *testing.T) {
+	tmpDir := t.TempDir()
+	passFile := filepath.Join(tmpDir, "passwords.txt")
+	pm := NewPasswordManager(passFile)
+
+	// passA usado 1 vez
+	pm.AddSuccessful("passA")
+	// passB usado 3 veces
+	pm.AddSuccessful("passB")
+	pm.AddSuccessful("passB")
+	pm.AddSuccessful("passB")
+	// passC usado 2 veces
+	pm.AddSuccessful("passC")
+	pm.AddSuccessful("passC")
+
+	stored := pm.GetStoredPasswords()
+	if len(stored) != 3 || stored[0] != "passB" || stored[1] != "passC" || stored[2] != "passA" {
+		t.Errorf("orden esperado por frecuencia [passB, passC, passA], obtenido %v", stored)
+	}
+
+	// Recargar desde disco para verificar persistencia de frecuencias
+	pm2 := NewPasswordManager(passFile)
+	stored2 := pm2.GetStoredPasswords()
+	if len(stored2) != 3 || stored2[0] != "passB" || stored2[1] != "passC" || stored2[2] != "passA" {
+		t.Errorf("recarga de frecuencias falló: %v", stored2)
+	}
+}
+
+
 func TestPasswordManager_SessionCache(t *testing.T) {
 	tmpDir := t.TempDir()
 	passFile := filepath.Join(tmpDir, "passwords.txt")
@@ -162,10 +191,10 @@ func TestPasswordManager_ResolvePassword_PromptAndSave(t *testing.T) {
 		t.Errorf("segundo archivo NO debió llamar al prompt, llamadas: %d", promptCalled)
 	}
 
-	// 3. Verificar que se persistió en disco
+	// 3. Verificar que se persistió en disco con su frecuencia
 	data, _ := os.ReadFile(passFile)
-	if string(data) != "nuevaClave456\n" {
-		t.Errorf("archivo en disco esperado 'nuevaClave456\\n', obtenido %q", string(data))
+	if !strings.HasPrefix(string(data), "nuevaClave456\t") {
+		t.Errorf("archivo en disco esperado que empiece por 'nuevaClave456\\t', obtenido %q", string(data))
 	}
 }
 

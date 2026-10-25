@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -680,6 +681,9 @@ func EstimateUncompressedSize(file string) int64 {
 		}
 
 	case strings.HasSuffix(f, ".rar"):
+		if fi, err := os.Stat(file); err == nil && fi.Size() > 64*1024*1024 {
+			return fi.Size() * 3
+		}
 		cmd := exec.Command(sevenzBin(), "l", "-slt", "--", file)
 		out, _ := cmd.Output()
 		var sum int64
@@ -1748,12 +1752,55 @@ func readPasswordTerminal(prompt string) (string, error) {
 
 var readPasswordFunc = readPasswordTerminal
 
+// MemorySafeMaxThreads throttles thread allocation if available system memory is insufficient
+// for the given format, preventing OOM crashes.
+func MemorySafeMaxThreads(f Format, threads int) int {
+	if threads <= 1 {
+		return 1
+	}
+	memMB := getMemLimit()
+	if memMB <= 0 {
+		return threads
+	}
+	var mbPerThread int
+	switch f {
+	case Xz, SevenZ:
+		mbPerThread = 100
+	case Bz3:
+		mbPerThread = 64
+	case Zst:
+		mbPerThread = 30
+	case Bz2:
+		mbPerThread = 8
+	default:
+		mbPerThread = 4
+	}
+	maxSafe := memMB / mbPerThread
+	if maxSafe < 1 {
+		maxSafe = 1
+	}
+	if threads > maxSafe {
+		return maxSafe
+	}
+	return threads
+}
+
 // AllocateThreadsProportional distributes totalCores among files based on their sizes.
 // Files with larger sizes receive proportionally more threads, ensuring all files finish
 // at approximately the same time and eliminating tail latency (idle CPU cores).
 // Each file receives at least minThreads (default 1) and at most maxThreadsPerJob.
 // If sizes are 0 or unknown, it distributes threads evenly.
 func AllocateThreadsProportional(sizes []int64, totalCores int, minThreads int, maxThreadsPerJob int) []int {
+	caps := make([]int, len(sizes))
+	for i := range caps {
+		caps[i] = maxThreadsPerJob
+	}
+	return AllocateThreadsProportionalWithCaps(sizes, totalCores, minThreads, caps)
+}
+
+// AllocateThreadsProportionalWithCaps distributes totalCores among files based on their sizes,
+// respecting an individual maximum thread cap for each file.
+func AllocateThreadsProportionalWithCaps(sizes []int64, totalCores int, minThreads int, maxCaps []int) []int {
 	n := len(sizes)
 	if n == 0 {
 		return nil
@@ -1761,19 +1808,27 @@ func AllocateThreadsProportional(sizes []int64, totalCores int, minThreads int, 
 	if minThreads < 1 {
 		minThreads = 1
 	}
-	if maxThreadsPerJob < minThreads {
-		maxThreadsPerJob = minThreads
-	}
-	if totalCores < n*minThreads {
-		totalCores = n * minThreads
+
+	caps := make([]int, n)
+	sumCaps := 0
+	for i := 0; i < n; i++ {
+		c := totalCores
+		if i < len(maxCaps) && maxCaps[i] > 0 {
+			c = maxCaps[i]
+		}
+		if c < minThreads {
+			c = minThreads
+		}
+		caps[i] = c
+		sumCaps += c
 	}
 
 	result := make([]int, n)
 
 	if n == 1 {
 		t := totalCores
-		if t > maxThreadsPerJob {
-			t = maxThreadsPerJob
+		if t > caps[0] {
+			t = caps[0]
 		}
 		if t < minThreads {
 			t = minThreads
@@ -1782,7 +1837,14 @@ func AllocateThreadsProportional(sizes []int64, totalCores int, minThreads int, 
 		return result
 	}
 
-	if maxThreadsPerJob == 1 {
+	allOneCap := true
+	for _, c := range caps {
+		if c != 1 {
+			allOneCap = false
+			break
+		}
+	}
+	if allOneCap {
 		for i := range result {
 			result[i] = 1
 		}
@@ -1798,21 +1860,32 @@ func AllocateThreadsProportional(sizes []int64, totalCores int, minThreads int, 
 		}
 	}
 
+	targetTotal := totalCores
+	if targetTotal > sumCaps {
+		targetTotal = sumCaps
+	}
+
 	if allZero || totalSize == 0 {
-		base := totalCores / n
-		rem := totalCores % n
+		allocated := 0
 		for i := 0; i < n; i++ {
-			t := base
-			if i < rem {
-				t++
+			result[i] = minThreads
+			allocated += minThreads
+		}
+		for allocated < targetTotal {
+			added := false
+			for i := 0; i < n; i++ {
+				if result[i] < caps[i] {
+					result[i]++
+					allocated++
+					added = true
+					if allocated == targetTotal {
+						break
+					}
+				}
 			}
-			if t > maxThreadsPerJob {
-				t = maxThreadsPerJob
+			if !added {
+				break
 			}
-			if t < minThreads {
-				t = minThreads
-			}
-			result[i] = t
 		}
 		return result
 	}
@@ -1827,47 +1900,65 @@ func AllocateThreadsProportional(sizes []int64, totalCores int, minThreads int, 
 	remainders := make([]itemRemainder, n)
 
 	for i, sz := range sizes {
-		raw := float64(totalCores) * float64(max(0, sz)) / float64(totalSize)
+		raw := float64(targetTotal) * float64(max(0, sz)) / float64(totalSize)
 		count := int(raw)
 		if count < minThreads {
 			count = minThreads
 		}
-		if count > maxThreadsPerJob {
-			count = maxThreadsPerJob
+		if count > caps[i] {
+			count = caps[i]
 		}
 		result[i] = count
 		allocated += count
 		remainders[i] = itemRemainder{index: i, remainder: raw - float64(int(raw))}
 	}
 
-	if allocated < totalCores {
-		diff := totalCores - allocated
+	if allocated < targetTotal {
 		sort.Slice(remainders, func(i, j int) bool {
 			if remainders[i].remainder == remainders[j].remainder {
 				return sizes[remainders[i].index] > sizes[remainders[j].index]
 			}
 			return remainders[i].remainder > remainders[j].remainder
 		})
-		for i := 0; i < diff && i < n; i++ {
-			idx := remainders[i%n].index
-			if result[idx] < maxThreadsPerJob {
-				result[idx]++
-				allocated++
+		for allocated < targetTotal {
+			added := false
+			for _, rem := range remainders {
+				idx := rem.index
+				if result[idx] < caps[idx] {
+					result[idx]++
+					allocated++
+					added = true
+					if allocated == targetTotal {
+						break
+					}
+				}
+			}
+			if !added {
+				break
 			}
 		}
-	} else if allocated > totalCores {
-		diff := allocated - totalCores
+	} else if allocated > targetTotal {
 		sort.Slice(remainders, func(i, j int) bool {
 			if remainders[i].remainder == remainders[j].remainder {
 				return sizes[remainders[i].index] < sizes[remainders[j].index]
 			}
 			return remainders[i].remainder < remainders[j].remainder
 		})
-		for i := 0; i < diff && i < n; i++ {
-			idx := remainders[i%n].index
-			if result[idx] > minThreads {
-				result[idx]--
-				allocated--
+		for allocated > targetTotal {
+			reduced := false
+			for _, rem := range remainders {
+				idx := rem.index
+				if result[idx] > minThreads {
+					result[idx]--
+					allocated--
+					reduced = true
+					if allocated == targetTotal {
+						break
+					}
+				}
+			}
+			if !reduced {
+				break
 			}
 		}
 	}
@@ -1915,10 +2006,12 @@ type DynamicThreadPool struct {
 	maxThreads      int
 	remainingFiles  int
 	remainingBytes  int64
+	maxWorkers      int
+	activeWorkers   int
 }
 
 // NewDynamicThreadPool creates a new thread pool with the specified limits.
-func NewDynamicThreadPool(totalCores, minThreads, maxThreads, totalFiles int, totalBytes int64) *DynamicThreadPool {
+func NewDynamicThreadPool(totalCores, minThreads, maxThreads, totalFiles int, totalBytes int64, maxWorkers ...int) *DynamicThreadPool {
 	if totalCores < 1 {
 		totalCores = NCPU()
 	}
@@ -1928,6 +2021,16 @@ func NewDynamicThreadPool(totalCores, minThreads, maxThreads, totalFiles int, to
 	if maxThreads < minThreads {
 		maxThreads = totalCores
 	}
+	mw := 8
+	if len(maxWorkers) > 0 && maxWorkers[0] > 0 {
+		mw = maxWorkers[0]
+	}
+	if totalFiles > 0 && mw > totalFiles {
+		mw = totalFiles
+	}
+	if mw < 1 {
+		mw = 1
+	}
 	return &DynamicThreadPool{
 		totalTokens:     totalCores,
 		availableTokens: totalCores,
@@ -1935,18 +2038,30 @@ func NewDynamicThreadPool(totalCores, minThreads, maxThreads, totalFiles int, to
 		maxThreads:      maxThreads,
 		remainingFiles:  totalFiles,
 		remainingBytes:  totalBytes,
+		maxWorkers:      mw,
 	}
 }
 
 // Acquire requests thread tokens for a file of fileSize bytes.
-func (p *DynamicThreadPool) Acquire(fileSize int64) int {
+func (p *DynamicThreadPool) Acquire(fileSize int64, maxFileThreads ...int) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.remainingFiles <= 1 || p.remainingBytes <= 0 || fileSize >= p.remainingBytes {
+	capLimit := p.maxThreads
+	if len(maxFileThreads) > 0 && maxFileThreads[0] > 0 && maxFileThreads[0] < capLimit {
+		capLimit = maxFileThreads[0]
+	}
+
+	p.activeWorkers++
+	slotsRemaining := p.maxWorkers - (p.activeWorkers - 1)
+	if slotsRemaining < 1 {
+		slotsRemaining = 1
+	}
+
+	if p.remainingFiles <= 1 || p.remainingBytes <= 0 || fileSize >= p.remainingBytes || slotsRemaining <= 1 {
 		tokens := p.availableTokens
-		if tokens > p.maxThreads {
-			tokens = p.maxThreads
+		if tokens > capLimit {
+			tokens = capLimit
 		}
 		if tokens < p.minThreads {
 			tokens = p.minThreads
@@ -1960,13 +2075,28 @@ func (p *DynamicThreadPool) Acquire(fileSize int64) int {
 		return tokens
 	}
 
-	ratio := float64(fileSize) / float64(p.remainingBytes)
-	target := int(float64(p.availableTokens) * ratio)
+	avgRemaining := p.remainingBytes / int64(p.remainingFiles)
+	if avgRemaining <= 0 {
+		avgRemaining = 1
+	}
+
+	ratio := float64(fileSize) / float64(avgRemaining)
+	base := float64(p.availableTokens) / float64(slotsRemaining)
+	target := int(math.Round(base * ratio))
+
+	maxAllowed := p.availableTokens - (slotsRemaining-1)*p.minThreads
+	if maxAllowed < p.minThreads {
+		maxAllowed = p.minThreads
+	}
+	if target > maxAllowed {
+		target = maxAllowed
+	}
+
 	if target < p.minThreads {
 		target = p.minThreads
 	}
-	if target > p.maxThreads {
-		target = p.maxThreads
+	if target > capLimit {
+		target = capLimit
 	}
 	if target > p.availableTokens && p.availableTokens >= p.minThreads {
 		target = p.availableTokens
@@ -1985,6 +2115,10 @@ func (p *DynamicThreadPool) Acquire(fileSize int64) int {
 func (p *DynamicThreadPool) Release(tokens int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.activeWorkers--
+	if p.activeWorkers < 0 {
+		p.activeWorkers = 0
+	}
 	p.availableTokens += tokens
 	if p.availableTokens > p.totalTokens {
 		p.availableTokens = p.totalTokens

@@ -292,3 +292,48 @@ func FormatMaxThreads(f Format) int {
 		return NCPU()
 	}
 }
+
+// MaxEffectiveThreads returns the maximum number of CPU threads that the compressor
+// can physically utilize for an input of fileSize bytes.
+// Multi-threaded compressors split data into blocks (e.g. 24MB for xz, 16MB for 7z, 64MB for bzip3).
+// If a file is smaller than the block size, assigning dozens of threads produces idle workers.
+func MaxEffectiveThreads(f Format, fileSize int64) int {
+	fmtMax := FormatMaxThreads(f)
+	if fmtMax <= 1 {
+		return 1
+	}
+	if fileSize <= 0 {
+		return fmtMax
+	}
+
+	var maxUseful int
+	switch f {
+	case Xz:
+		maxUseful = int(fileSize / (24 * 1024 * 1024))
+	case SevenZ:
+		maxUseful = int(fileSize / (16 * 1024 * 1024))
+	case Bz3:
+		maxUseful = int(fileSize / (64 * 1024 * 1024))
+	case Zst:
+		maxUseful = int(fileSize / (4 * 1024 * 1024))
+	case Gz:
+		maxUseful = int(fileSize / (128 * 1024))
+	case Bz2:
+		maxUseful = int(fileSize / (900 * 1024))
+	case Lz4:
+		maxUseful = int(fileSize / (4 * 1024 * 1024))
+	case Lz:
+		maxUseful = int(fileSize / (2 * 1024 * 1024))
+	default:
+		maxUseful = fmtMax
+	}
+
+	if maxUseful < 1 {
+		maxUseful = 1
+	}
+	if maxUseful > fmtMax {
+		maxUseful = fmtMax
+	}
+	return maxUseful
+}
+

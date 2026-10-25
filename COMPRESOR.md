@@ -40,7 +40,8 @@ crush/
 - [x] Soporte para 13 formatos: `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`.
 - [x] Compresión máxima real y auto-paralelismo (`NCPU()`) sin flags manuales.
 - [x] Planificación LPT (*Longest Processing Time first*) para compresión y descompresión concurrente.
-- [x] Distribución dinámica proporcional de hilos (`AllocateThreadsProportional`) y pool de tokens (`DynamicThreadPool`).
+- [x] Distribución dinámica proporcional de hilos (`AllocateThreadsProportionalWithCaps`), balanceo de ventana activa (`DynamicThreadPool`), techos por payload y control de memoria RAM.
+- [x] Gestión inteligente de contraseñas con reorganización por frecuencia de uso (MFU) y cola diferida en descompresión.
 - [x] Compresión interactiva del directorio actual (`crush -c` sin argumentos con confirmación interactiva).
 - [x] Adición y actualización in-place de archivos/carpetas en comprimidos existentes (`-a` / `-u`) para zip, 7z, rar, tar y tar.*.
 - [x] Streaming directo sin `.tar` temporales a disco y zero-copy en Linux vía `splice(2)`.

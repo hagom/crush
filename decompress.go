@@ -219,8 +219,36 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 		}
 	} else {
 		totalCores := NCPU()
+		sizesSlice := make([]int64, len(files))
+		caps := make([]int, len(files))
+		var totalDecompBytes int64
+		allMono := true
+		for i, f := range files {
+			sz := archiveSizes[f]
+			if sz > 0 {
+				sizesSlice[i] = sz
+				totalDecompBytes += sz
+			}
+			info, err := DetectFormat(f)
+			if err == nil {
+				c := MaxEffectiveThreads(info.Format, sz)
+				c = MemorySafeMaxThreads(info.Format, c)
+				fmtMax := FormatMaxThreads(info.Format)
+				if c > fmtMax {
+					c = fmtMax
+				}
+				if c > 1 {
+					allMono = false
+				}
+				caps[i] = c
+			} else {
+				caps[i] = totalCores
+				allMono = false
+			}
+		}
+
 		maxWorkers := opts.Parallel
-		if maxWorkers > 8 {
+		if !allMono && maxWorkers > 8 {
 			maxWorkers = 8
 		}
 		if len(files) < maxWorkers {
@@ -230,20 +258,10 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 			maxWorkers = 1
 		}
 
-		sizesSlice := make([]int64, len(files))
-		var totalDecompBytes int64
-		for i, f := range files {
-			sz := archiveSizes[f]
-			if sz > 0 {
-				sizesSlice[i] = sz
-				totalDecompBytes += sz
-			}
-		}
-
-		pool := NewDynamicThreadPool(totalCores, 1, totalCores, len(files), totalDecompBytes)
+		pool := NewDynamicThreadPool(totalCores, 1, totalCores, len(files), totalDecompBytes, maxWorkers)
 		var preAlloc []int
 		if len(files) <= maxWorkers {
-			preAlloc = AllocateThreadsProportional(sizesSlice, totalCores, 1, totalCores)
+			preAlloc = AllocateThreadsProportionalWithCaps(sizesSlice, totalCores, 1, caps)
 		}
 
 		WriteLogf("%sDescomprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(files), NC)
@@ -270,7 +288,7 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 				if len(preAlloc) == len(files) {
 					th = preAlloc[idx]
 				} else {
-					th = pool.Acquire(archiveSizes[f])
+					th = pool.Acquire(archiveSizes[f], caps[idx])
 					defer pool.Release(th)
 				}
 				fileOpts.ThreadLimit = th

@@ -1451,6 +1451,24 @@ func TestAllocateThreadsProportional(t *testing.T) {
 			t.Errorf("expected sum 16, got %d", sum)
 		}
 	})
+
+	t.Run("individual caps allow surplus redistribution", func(t *testing.T) {
+		// Archivo 1 pequeño (5MB) con cap de 1 hilo
+		// Archivo 2 grande (2GB) con cap de 32 hilos
+		// En 32 cores: Archivo 1 debe recibir 1, y Archivo 2 debe absorber los 31 restantes
+		sizes := []int64{5 * 1024 * 1024, 2 * 1024 * 1024 * 1024}
+		caps := []int{1, 32}
+		got := AllocateThreadsProportionalWithCaps(sizes, 32, 1, caps)
+		if len(got) != 2 {
+			t.Fatalf("expected 2 entries, got %d", len(got))
+		}
+		if got[0] != 1 {
+			t.Errorf("expected file 1 to receive 1 thread (its cap), got %d", got[0])
+		}
+		if got[1] != 31 {
+			t.Errorf("expected file 2 to absorb 31 threads, got %d", got[1])
+		}
+	})
 }
 
 func TestPipeFlagsForThreads(t *testing.T) {
@@ -1508,6 +1526,59 @@ func TestDynamicThreadPool(t *testing.T) {
 		t.Errorf("expected 32 available tokens after release, got %d", pool.availableTokens)
 	}
 }
+
+func TestDynamicThreadPool_ActiveWindowFullUtilization(t *testing.T) {
+	// 32 cores, 20 files de 100MB cada uno (total 2000MB), maxWorkers = 8
+	// Cuando los primeros 8 workers adquieren tokens, deben repartirse los 32 núcleos
+	// (aproximadamente 4 hilos por worker), y NO solo 1 hilo cada uno.
+	pool := NewDynamicThreadPool(32, 1, 32, 20, 2000, 8)
+
+	allocated := make([]int, 8)
+	sum := 0
+	for i := 0; i < 8; i++ {
+		allocated[i] = pool.Acquire(100)
+		sum += allocated[i]
+	}
+
+	if sum != 32 {
+		t.Errorf("los 8 workers activos debieron utilizar los 32 núcleos completos, suma obtenida: %d (asignaciones: %v)", sum, allocated)
+	}
+
+	for i, v := range allocated {
+		if v < 3 || v > 5 {
+			t.Errorf("worker %d: esperado ~4 hilos (entre 3 y 5), obtenido %d", i, v)
+		}
+	}
+
+	// Al liberar un worker de 4 hilos, el siguiente worker (archivo 9) debe recibir esos ~4 hilos
+	pool.Release(allocated[0])
+	t9 := pool.Acquire(100)
+	if t9 < 3 || t9 > 5 {
+		t.Errorf("worker 9 debió recibir ~4 hilos liberados, obtuvo %d", t9)
+	}
+}
+
+func TestMemorySafeMaxThreads(t *testing.T) {
+	orig := getMemLimit
+	defer func() { getMemLimit = orig }()
+
+	// Simular 250 MB de memoria disponible
+	getMemLimit = func() int { return 250 }
+
+	// Para Xz (100MB/thread): 250 / 100 = 2 hilos máx
+	safe := MemorySafeMaxThreads(Xz, 8)
+	if safe != 2 {
+		t.Errorf("expected 2 threads for Xz with 250MB RAM, got %d", safe)
+	}
+
+	// Para formato con 1 hilo pedido
+	safe1 := MemorySafeMaxThreads(Xz, 1)
+	if safe1 != 1 {
+		t.Errorf("expected 1 thread for 1 requested, got %d", safe1)
+	}
+}
+
+
 
 
 

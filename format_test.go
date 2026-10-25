@@ -450,6 +450,37 @@ func TestFormatMaxThreads(t *testing.T) {
 	}
 }
 
+func TestMaxEffectiveThreads(t *testing.T) {
+	// Mono-hilo siempre devuelve 1 independientemente del tamaño
+	if got := MaxEffectiveThreads(Tar, 10*1024*1024*1024); got != 1 {
+		t.Errorf("MaxEffectiveThreads(Tar, 10GB) = %d, want 1", got)
+	}
+	if got := MaxEffectiveThreads(Br, 10*1024*1024*1024); got != 1 {
+		t.Errorf("MaxEffectiveThreads(Br, 10GB) = %d, want 1", got)
+	}
+
+	// Archivo pequeño en Xz (5MB) solo puede usar 1 bloque/hilo
+	if got := MaxEffectiveThreads(Xz, 5*1024*1024); got != 1 {
+		t.Errorf("MaxEffectiveThreads(Xz, 5MB) = %d, want 1", got)
+	}
+
+	// Archivo grande en Xz (2GB) aprovecha NCPU
+	if got := MaxEffectiveThreads(Xz, 2*1024*1024*1024); got < 2 {
+		t.Errorf("MaxEffectiveThreads(Xz, 2GB) = %d, want >= 2", got)
+	}
+
+	// Archivo pequeño en SevenZ (8MB) no debe recibir NCPU hilos
+	if got := MaxEffectiveThreads(SevenZ, 8*1024*1024); got != 1 {
+		t.Errorf("MaxEffectiveThreads(SevenZ, 8MB) = %d, want 1", got)
+	}
+
+	// Archivo de 100MB en SevenZ puede usar múltiples bloques
+	if got := MaxEffectiveThreads(SevenZ, 100*1024*1024); got < 2 {
+		t.Errorf("MaxEffectiveThreads(SevenZ, 100MB) = %d, want >= 2", got)
+	}
+}
+
+
 func TestExtForItem(t *testing.T) {
 	tests := []struct {
 		format Format

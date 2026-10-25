@@ -50,6 +50,6 @@ jobs:
           ./crush -h
           echo "crush smoke test" > test_smoke.txt
           ./crush -c -k -f gz test_smoke.txt
-          ./crush -t test_smoke.tar.gz
-          ./crush -d test_smoke.tar.gz -force
-          rm -f test_smoke.txt test_smoke.tar.gz
+          ./crush -t test_smoke.txt.gz
+          ./crush -d test_smoke.txt.gz -force
+          rm -f test_smoke.txt test_smoke.txt.gz

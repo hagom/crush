@@ -872,7 +872,7 @@ func main() {
 		}
 		var outPaths []string
 		var err error
-		if stdinIsPipe {
+		if stdinIsPipe && len(files) == 0 {
 			if len(formats) > 1 {
 				tmpF, err := os.CreateTemp("", "crush-stdin-*")
 				if err != nil {

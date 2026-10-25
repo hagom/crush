@@ -377,5 +377,43 @@ func TestFileRequiresInteractivePassword(t *testing.T) {
 	}
 }
 
+func TestCheckArchivePassword_Rar(t *testing.T) {
+	rar := rarBin()
+	if !hasTool(rar) {
+		t.Skip("rar no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "sample.txt")
+	_ = os.WriteFile(f1, []byte("contenido secreto en rar"), 0644)
+
+	archFree := filepath.Join(tmpDir, "free.rar")
+	archLocked := filepath.Join(tmpDir, "locked.rar")
+
+	_ = exec.Command(rar, "a", "-y", archFree, f1).Run()
+	_ = exec.Command(rar, "a", "-ppassword123", "-y", archLocked, f1).Run()
+
+	// 1. Archivo sin contraseña con clave vacía -> true
+	if !checkArchivePassword(archFree, Rar, "") {
+		t.Errorf("archFree con clave vacía debió ser true")
+	}
+
+	// 2. Archivo protegido con clave vacía -> false (no se cuelga en terminal!)
+	if checkArchivePassword(archLocked, Rar, "") {
+		t.Errorf("archLocked con clave vacía debió ser false")
+	}
+
+	// 3. Archivo protegido con clave incorrecta -> false
+	if checkArchivePassword(archLocked, Rar, "wrongpass") {
+		t.Errorf("archLocked con clave incorrecta debió ser false")
+	}
+
+	// 4. Archivo protegido con clave correcta -> true
+	if !checkArchivePassword(archLocked, Rar, "password123") {
+		t.Errorf("archLocked con clave correcta debió ser true")
+	}
+}
+
+
 
 

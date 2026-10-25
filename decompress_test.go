@@ -604,6 +604,50 @@ func TestDecompressTarProgressTracking(t *testing.T) {
 	}
 }
 
+func TestDecompressRarProgressTracking(t *testing.T) {
+	rar := rarBin()
+	if !hasTool(rar) {
+		t.Skip("rar no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "sample.txt")
+	content := []byte(strings.Repeat("data for rar progress tracking in decompress\n", 200))
+	if err := os.WriteFile(txtFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rarFile := filepath.Join(tmpDir, "test.rar")
+	cmd := exec.Command(rar, "a", "-y", rarFile, txtFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("error creando rar: %v, salida: %s", err, string(out))
+	}
+
+	fi, err := os.Stat(rarFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pt := NewProgressTracker(fi.Size(), 1)
+	opts := DecompressOptions{
+		OutputDir: filepath.Join(tmpDir, "out_rar"),
+		Force:     true,
+		KeepOrig:  true,
+		Progress:  pt,
+	}
+
+	fp := &FileProgress{Name: filepath.Base(rarFile), Size: fi.Size()}
+	err = decompressFile(rarFile, opts, fp)
+	if err != nil {
+		t.Fatalf("decompressFile rar failed: %v", err)
+	}
+
+	if fp.Current.Load() != fi.Size() {
+		t.Errorf("decompressFile rar no actualizó fp.Current al tamaño completo: obtenido %d, esperado %d", fp.Current.Load(), fi.Size())
+	}
+}
+
+
 func TestFindDecompressibleFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 

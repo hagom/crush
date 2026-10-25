@@ -91,6 +91,8 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	}
 	allFiles = uniqueFiles
 
+	WriteLogf("%sPreparando descompresión de %d archivo(s)...%s\n", Bold, len(allFiles), NC)
+
 	for _, f := range allFiles {
 		info, err := DetectFormat(f)
 		if err == nil {
@@ -375,9 +377,12 @@ func listRarMembers(file string, password string) ([]string, bool) {
 	args := []string{"lb"}
 	if password != "" {
 		args = append(args, "-p"+password)
+	} else {
+		args = append(args, "-p-")
 	}
 	args = append(args, file)
 	cmd := exec.Command(tool, args...)
+	cmd.Stdin = getNullFile()
 	var out strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
@@ -478,6 +483,9 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	}
 
 	outputs := listArchiveOutputs(file, dir, info, opts.Password)
+	if len(outputs) > 0 && fp != nil {
+		fp.SetOutPath(outputs[0])
+	}
 	preExisting := make(map[string]bool, len(outputs))
 	for _, o := range outputs {
 		if _, err := os.Stat(o); err == nil {
@@ -774,6 +782,8 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		args := []string{"x", "-y", "-mt" + threadStr(opts.ThreadLimit)}
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
+		} else {
+			args = append(args, "-p-")
 		}
 		if opts.Force {
 			args = append(args, "-o+")
@@ -785,7 +795,9 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			args = append(args, opts.Filter)
 		}
 		cmd := exec.Command(info.Tool, args...)
-		cmd.Stdout = stdoutFor(opts.Progress)
+		if fi, err := os.Stat(file); err == nil {
+			return runWithProgress(cmd, opts.Progress, fi.Size(), fp)
+		}
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 

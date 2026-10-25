@@ -218,44 +218,113 @@ func checkArchivePassword(file string, format Format, pass string) bool {
 	if !formatSupportsPassword(format) {
 		return true
 	}
+	passArg := "-p" + pass
+	if pass == "" {
+		passArg = "-p-"
+	}
+
 	switch format {
 	case SevenZ:
 		sevenz := sevenzBin()
 		if !hasTool(sevenz) {
 			return false
 		}
-		cmd := execCommand(sevenz, "t", "-p"+pass, "-y", file)
-		cmd.Stdout = io.Discard
+		cmd := execCommand(sevenz, "e", "-so", passArg, "-y", file)
+		cmd.Stdin = getNullFile()
 		cmd.Stderr = io.Discard
-		return cmd.Run() == nil
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return false
+		}
+		if err := cmd.Start(); err != nil {
+			return false
+		}
+		buf := make([]byte, 256)
+		n, _ := stdout.Read(buf)
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		waitErr := cmd.Wait()
+		if n > 0 {
+			return true
+		}
+		return waitErr == nil
 
 	case Zip:
 		sevenz := sevenzBin()
 		if hasTool(sevenz) {
-			cmd := execCommand(sevenz, "t", "-p"+pass, "-y", file)
-			cmd.Stdout = io.Discard
+			cmd := execCommand(sevenz, "e", "-so", passArg, "-y", file)
+			cmd.Stdin = getNullFile()
 			cmd.Stderr = io.Discard
-			return cmd.Run() == nil
+			stdout, err := cmd.StdoutPipe()
+			if err == nil {
+				if err := cmd.Start(); err == nil {
+					buf := make([]byte, 256)
+					n, _ := stdout.Read(buf)
+					if cmd.Process != nil {
+						_ = cmd.Process.Kill()
+					}
+					waitErr := cmd.Wait()
+					if n > 0 {
+						return true
+					}
+					return waitErr == nil
+				}
+			}
 		}
-		args := []string{"-t"}
+		args := []string{"-p"}
 		if pass != "" {
 			args = append(args, "-P", pass)
+		} else {
+			args = append(args, "-P", "")
 		}
 		args = append(args, file)
 		cmd := execCommand("unzip", args...)
-		cmd.Stdout = io.Discard
+		cmd.Stdin = getNullFile()
 		cmd.Stderr = io.Discard
-		return cmd.Run() == nil
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return false
+		}
+		if err := cmd.Start(); err != nil {
+			return false
+		}
+		buf := make([]byte, 256)
+		n, _ := stdout.Read(buf)
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		waitErr := cmd.Wait()
+		if n > 0 {
+			return true
+		}
+		return waitErr == nil
 
 	case Rar:
 		rar := rarBin()
 		if !hasTool(rar) {
 			return false
 		}
-		cmd := execCommand(rar, "t", "-p"+pass, "-y", file)
-		cmd.Stdout = io.Discard
+		cmd := execCommand(rar, "p", passArg, "-inul", file)
+		cmd.Stdin = getNullFile()
 		cmd.Stderr = io.Discard
-		return cmd.Run() == nil
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return false
+		}
+		if err := cmd.Start(); err != nil {
+			return false
+		}
+		buf := make([]byte, 256)
+		n, _ := stdout.Read(buf)
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		waitErr := cmd.Wait()
+		if n > 0 {
+			return true
+		}
+		return waitErr == nil
 	}
 	return false
 }

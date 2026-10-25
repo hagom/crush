@@ -118,6 +118,7 @@ crush/
 ├── format.go        # FormatInfo, ParseFormat, DetectFormat, ExtForFormat
 ├── compress.go      # DoCompress, compressItems, tar-pipe, -hash, -p, -sparse, -clean
 ├── decompress.go    # DoDecompress, splitWriter, -p, -filter
+├── passwords.go     # PasswordManager, registro ~/.config/crush/passwords.txt y auto-reutilización
 ├── archive_list.go  # Lector polimórfico de miembros de archivo sin extracción a disco
 ├── tree.go          # Generador de vista en árbol jerárquica (-tree)
 ├── find.go          # Motor de búsqueda por patrón glob en comprimidos (-find)
@@ -145,8 +146,12 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 496 tests nativos pasando con race detector (-race). ~16800 líneas. 0 bugs conocidos.
+- Go: migración completa. 504 tests nativos pasando con race detector (-race). ~17200 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Registro Inteligente y Reutilización Automática de Contraseñas (`passwords.go`):
+    - **Reutilización y Caché de Sesión Zero-Flags:** Al descomprimir (`crush -d`), si los archivos están protegidos por contraseña, `crush` prueba automáticamente la última clave válida usada en la sesión y las contraseñas registradas en `~/.config/crush/passwords.txt` (con permisos seguros `0600`). Si ninguna coincide, solicita la contraseña en terminal **una sola vez**, la guarda en el historial y la propaga automáticamente a los demás archivos del lote sin interrumpir al usuario.
+    - **Soporte Heterogéneo y Resiliencia:** Capacidad para procesar lotes con claves distintas o mixtas (con/sin clave), verificación rápida (*zero-extraction test* <30ms) y opción de omitir (*skip*) con Enter para no frenar la descompresión de los demás archivos.
+    - **Registro Automático en Compresión:** Al comprimir con `-p`, la clave utilizada se añade automáticamente al registro local para futuras descompresiones.
   - Suite de Nuevas Funcionalidades (Transcodificación, Inspección Avanzada, Sanitización y Alertas):
     - **Transcodificación directa entre formatos (`-convert` / `-recompress` / `convert.go`):** Conversión directa entre formatos con tubería de streaming (`descompresor | compresor`) para formatos tar/stream con cero archivos intermedios en disco y extracción efímera segura para contenedores, con soporte para contraseñas, hashes SHA-256 y multihilo.
     - **Vista jerárquica en árbol (`-tree` / `tree.go`):** Inspección visual del árbol interno de directorios y archivos de cualquier formato comprimido (`tar`, `tar.*`, `zip`, `7z`, `rar`) con cálculo de tamaños y conteo de nodos sin extracción a disco.

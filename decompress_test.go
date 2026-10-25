@@ -1645,6 +1645,141 @@ func TestDecompressSelectiveFilter(t *testing.T) {
 	}
 }
 
+func TestDecompress_PasswordAutoReuse_Batch(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	_ = os.WriteFile(f1, []byte("contenido 1"), 0644)
+	f2 := filepath.Join(tmpDir, "file2.txt")
+	_ = os.WriteFile(f2, []byte("contenido 2"), 0644)
+
+	arch1 := filepath.Join(tmpDir, "arch1.7z")
+	arch2 := filepath.Join(tmpDir, "arch2.7z")
+
+	_ = exec.Command(sevenzBin(), "a", "-psharedKey777", "-mhe=on", arch1, f1).Run()
+	_ = exec.Command(sevenzBin(), "a", "-psharedKey777", "-mhe=on", arch2, f2).Run()
+
+	passFile := filepath.Join(tmpDir, "passwords.txt")
+	pm := NewPasswordManager(passFile)
+	promptCalls := 0
+	pm.promptFunc = func(file string) (string, error) {
+		promptCalls++
+		return "sharedKey777", nil
+	}
+
+	cleanup := SetPasswordManager(pm)
+	defer cleanup()
+
+	outDir := filepath.Join(tmpDir, "out")
+	err := DoDecompress([]string{arch1, arch2}, DecompressOptions{OutputDir: outDir, KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoDecompress falló: %v", err)
+	}
+
+	if promptCalls != 1 {
+		t.Errorf("esperaba exactamente 1 llamada al prompt para archivos con misma clave, hubo %d", promptCalls)
+	}
+
+	if _, err := os.Stat(filepath.Join(outDir, "file1.txt")); err != nil {
+		t.Errorf("file1.txt no fue extraído: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "file2.txt")); err != nil {
+		t.Errorf("file2.txt no fue extraído: %v", err)
+	}
+}
+
+func TestDecompress_HeterogeneousPasswords_FromRegistry(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "fA.txt")
+	_ = os.WriteFile(f1, []byte("contenido A"), 0644)
+	f2 := filepath.Join(tmpDir, "fB.txt")
+	_ = os.WriteFile(f2, []byte("contenido B"), 0644)
+
+	archA := filepath.Join(tmpDir, "archA.7z")
+	archB := filepath.Join(tmpDir, "archB.7z")
+
+	_ = exec.Command(sevenzBin(), "a", "-pclaveA", "-mhe=on", archA, f1).Run()
+	_ = exec.Command(sevenzBin(), "a", "-pclaveB", "-mhe=on", archB, f2).Run()
+
+	passFile := filepath.Join(tmpDir, "passwords.txt")
+	_ = os.WriteFile(passFile, []byte("claveA\nclaveB\n"), 0600)
+
+	pm := NewPasswordManager(passFile)
+	pm.promptFunc = func(file string) (string, error) {
+		t.Fatal("no debió pedir clave si ambas están en el registro")
+		return "", nil
+	}
+
+	cleanup := SetPasswordManager(pm)
+	defer cleanup()
+
+	outDir := filepath.Join(tmpDir, "out")
+	err := DoDecompress([]string{archA, archB}, DecompressOptions{OutputDir: outDir, KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoDecompress heterogéneo falló: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(outDir, "fA.txt")); err != nil {
+		t.Errorf("fA.txt no fue extraído: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "fB.txt")); err != nil {
+		t.Errorf("fB.txt no fue extraído: %v", err)
+	}
+}
+
+func TestDecompress_SkipPasswordAndContinueBatch(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file_ok.txt")
+	_ = os.WriteFile(f1, []byte("ok content"), 0644)
+	f2 := filepath.Join(tmpDir, "file_skip.txt")
+	_ = os.WriteFile(f2, []byte("skip content"), 0644)
+
+	archOK := filepath.Join(tmpDir, "arch_ok.7z")
+	archSkip := filepath.Join(tmpDir, "arch_skip.7z")
+
+	// archOK no tiene clave
+	_ = exec.Command(sevenzBin(), "a", archOK, f1).Run()
+	// archSkip tiene clave desconocida
+	_ = exec.Command(sevenzBin(), "a", "-punknownPass", archSkip, f2).Run()
+
+	passFile := filepath.Join(tmpDir, "passwords.txt")
+	pm := NewPasswordManager(passFile)
+	pm.promptFunc = func(file string) (string, error) {
+		// Presionar Enter -> omitir
+		return "", nil
+	}
+
+	cleanup := SetPasswordManager(pm)
+	defer cleanup()
+
+	outDir := filepath.Join(tmpDir, "out")
+	err := DoDecompress([]string{archOK, archSkip}, DecompressOptions{OutputDir: outDir, KeepOrig: true})
+	// Debe retornar error por el archivo omitido, pero archOK debió descomprimirse con éxito
+	if err == nil {
+		t.Fatal("esperaba error indicando que 1 archivo falló/fue omitido")
+	}
+
+	// archOK debe haberse extraído correctamente
+	if _, statErr := os.Stat(filepath.Join(outDir, "file_ok.txt")); statErr != nil {
+		t.Errorf("file_ok.txt debió extraerse a pesar de que el otro archivo fue omitido: %v", statErr)
+	}
+	// file_skip.txt NO debe haberse extraído
+	if _, statErr := os.Stat(filepath.Join(outDir, "file_skip.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("file_skip.txt no debió ser extraído")
+	}
+}
+
 
 
 

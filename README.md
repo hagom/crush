@@ -48,7 +48,7 @@
 
 - **Generación y verificación de checksums SHA-256 (`-hash`, `-verify`):** Generación automática de archivos `.sha256` durante la compresión e integración en verificación para validar la integridad contra el hash.
 
-- **Cifrado y contraseñas (`-p`, `-password`):** Cifrado seguro para formatos de contenedor (`7z`, `zip`, `rar`) con soporte para prompt interactivo con terminal oculta y cifrado de cabeceras (`-mhe=on`).
+- **Cifrado, contraseñas y registro automático (`-p`, `-password`):** Cifrado seguro para formatos de contenedor (`7z`, `zip`, `rar`) con soporte para terminal oculta y cifrado de cabeceras (`-mhe=on`). Al descomprimir (`crush -d`), reutiliza automáticamente contraseñas válidas en la sesión y consulta el registro local persistente (`~/.config/crush/passwords.txt`), solicitando la clave por terminal solo cuando es desconocida y propagándola automáticamente al resto del lote sin repetir preguntas.
 
 - **Soporte implícito para Sparse Files en Tar:** Optimización automática de espacio al empaquetar archivos dispersos (imágenes de máquinas virtuales, bases de datos) en archivos tar, preservando huecos tanto al comprimir como al descomprimir (desactivable con `-no-sparse`).
 
@@ -453,6 +453,7 @@ crush/
 ├── format.go        # Detección de formatos, extensiones y ordenamiento por ratio
 ├── compress.go      # Compresión concurrente paralela, streaming tar-pipe, -hash, -p, -sparse, -clean
 ├── decompress.go    # Descompresión multi-formato, splitWriter, -p y -filter
+├── passwords.go     # PasswordManager, registro ~/.config/crush/passwords.txt y auto-reutilización
 ├── archive_list.go  # Lector polimórfico de miembros de archivo sin extracción a disco
 ├── tree.go          # Generador de vista en árbol jerárquica (-tree)
 ├── find.go          # Motor de búsqueda por patrón glob en comprimidos (-find)

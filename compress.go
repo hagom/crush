@@ -155,6 +155,8 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if opts.Password != "" && opts.Format != SevenZ && opts.Format != Zip && opts.Format != Rar {
 		WriteWarning("el cifrado con contraseña solo está soportado en formatos contenedor (7z, zip, rar); se ignora para %s", opts.Format)
 		opts.Password = ""
+	} else if opts.Password != "" {
+		GetPasswordManager().AddSuccessful(opts.Password)
 	}
 
 	calcOutPath := func() string {
@@ -1372,6 +1374,10 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 	info, err := DetectFormat(archive)
 	if err != nil {
 		return fmt.Errorf("no se pudo determinar el formato de %s: %w", archive, err)
+	}
+
+	if opts.Password != "" {
+		GetPasswordManager().AddSuccessful(opts.Password)
 	}
 
 	switch {

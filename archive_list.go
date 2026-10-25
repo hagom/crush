@@ -26,6 +26,12 @@ func ListArchiveMembers(file string, password string) ([]ArchiveMember, error) {
 		return nil, fmt.Errorf("detectando formato de %s: %w", file, err)
 	}
 
+	if password == "" && info.IsContainer() {
+		if p, err := GetPasswordManager().ResolvePassword(file, info.Format, ""); err == nil && p != "" {
+			password = p
+		}
+	}
+
 	lower := strings.ToLower(file)
 
 	// 1. Standard library Zip reader

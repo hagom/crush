@@ -377,6 +377,17 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		return nil
 	}
 
+	if info.Format.IsContainer() {
+		resolvedPass, passErr := GetPasswordManager().ResolvePassword(file, info.Format, opts.Password)
+		if passErr != nil {
+			if errors.Is(passErr, ErrPasswordSkipped) {
+				WriteLogf("  %s⚠ Omitido: %s requiere contraseña%s\n", Yellow, file, NC)
+			}
+			return passErr
+		}
+		opts.Password = resolvedPass
+	}
+
 	startTime := time.Now()
 	WriteLogf("%s%s%s\n", Bold, file, NC)
 

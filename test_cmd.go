@@ -129,6 +129,12 @@ func TestFile(file string, opts TestOptions) (string, error) {
 }
 
 func testArchiveIntegrity(file string, opts TestOptions) (string, error) {
+	if info, err := DetectFormat(file); err == nil && info.IsContainer() {
+		if p, err := GetPasswordManager().ResolvePassword(file, info.Format, opts.Password); err == nil && p != "" {
+			opts.Password = p
+		}
+	}
+
 	ext := strings.ToLower(file)
 
 	switch {

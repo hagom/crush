@@ -176,6 +176,7 @@ func TestMainDecompressScanNoFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	cmd := exec.Command(binPath, "-d")
 	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(), "CRUSH_LOCK_FILE="+filepath.Join(tmpDir, "test.lock"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("crush -d en dir vacío falló: %v, salida: %s", err, string(out))
@@ -199,6 +200,7 @@ func TestMainDecompressScanCancel(t *testing.T) {
 
 	cmd := exec.Command(binPath, "-d")
 	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(), "CRUSH_LOCK_FILE="+filepath.Join(tmpDir, "test.lock"))
 	cmd.Stdin = strings.NewReader("n\n")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -230,6 +232,7 @@ func TestMainDecompressScanConfirm(t *testing.T) {
 
 	cmd := exec.Command(binPath, "-d")
 	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(), "CRUSH_LOCK_FILE="+filepath.Join(tmpDir, "test.lock"))
 	cmd.Stdin = strings.NewReader("s\n")
 	out, err := cmd.CombinedOutput()
 	if err != nil {

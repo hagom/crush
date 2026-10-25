@@ -15,6 +15,13 @@ var (
 	lockOutput       io.Writer = os.Stderr
 )
 
+func init() {
+	if p := os.Getenv("CRUSH_LOCK_FILE"); p != "" {
+		lockFilePath = p
+	}
+}
+
+
 func setLockOutput(w io.Writer) func() {
 	lockOutputMu.Lock()
 	old := lockOutput

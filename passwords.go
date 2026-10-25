@@ -212,6 +212,25 @@ func archiveRequiresPassword(file string, format Format) bool {
 	return !checkArchivePassword(file, format, "")
 }
 
+func FileRequiresInteractivePassword(file string, cliPassword string) bool {
+	info, err := DetectFormat(file)
+	if err != nil || !info.Format.IsContainer() || !formatSupportsPassword(info.Format) {
+		return false
+	}
+	if !archiveRequiresPassword(file, info.Format) {
+		return false
+	}
+	pm := GetPasswordManager()
+	candidates := pm.GetCandidates(cliPassword)
+	for _, p := range candidates {
+		if checkArchivePassword(file, info.Format, p) {
+			return false
+		}
+	}
+	return true
+}
+
+
 func (pm *PasswordManager) ResolvePassword(file string, format Format, cliPassword string) (string, error) {
 	if !formatSupportsPassword(format) {
 		return "", nil

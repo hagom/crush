@@ -121,25 +121,78 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		}
 	}
 
-	var totalSize int64
+	var readyFiles []string
+	var deferredFiles []string
+
 	for _, f := range allFiles {
+		if FileRequiresInteractivePassword(f, opts.Password) {
+			deferredFiles = append(deferredFiles, f)
+		} else {
+			readyFiles = append(readyFiles, f)
+		}
+	}
+
+	var totalSuccesses, totalErrors int
+
+	// Fase 1: Descompresión de archivos listos (sin clave requerida o con clave en registro)
+	if len(readyFiles) > 0 {
+		if len(deferredFiles) > 0 {
+			WriteLogf("%s[Fase 1/2] Descomprimiendo %d archivo(s) listos en paralelo...%s\n", Bold, len(readyFiles), NC)
+			WriteLogf("  (%d archivo(s) protegidos diferidos para atención posterior)\n\n", len(deferredFiles))
+		}
+		s, e := decompressBatch(readyFiles, archiveSizes, opts)
+		totalSuccesses += s
+		totalErrors += e
+	}
+
+	// Fase 2: Descompresión de archivos protegidos que requieren contraseña interactiva
+	if len(deferredFiles) > 0 {
+		if len(readyFiles) > 0 {
+			WriteLogf("\n%s──────────────────────────────────────────────────%s\n", Blue, NC)
+			WriteLogf("%s[Fase 2/2] Procesando %d archivo(s) protegidos con contraseña...%s\n\n", Bold, len(deferredFiles), NC)
+		}
+		for _, f := range deferredFiles {
+			defOpts := opts
+			defOpts.Progress = nil
+			s, e := decompressBatch([]string{f}, archiveSizes, defOpts)
+			totalSuccesses += s
+			totalErrors += e
+		}
+	}
+
+	WriteLogf("\n")
+	if totalErrors > 0 {
+		WriteLogf("%sCompletado con %d errores, %d exitosos%s\n", Yellow, totalErrors, totalSuccesses, NC)
+		return fmt.Errorf("%d error(es) durante la descompresión", totalErrors)
+	}
+	WriteLogf("%s✓ Descompresión completada (%d archivo(s))%s\n", Green, totalSuccesses, NC)
+	return nil
+}
+
+func decompressBatch(files []string, archiveSizes map[string]int64, opts DecompressOptions) (int, int) {
+	if len(files) == 0 {
+		return 0, 0
+	}
+
+	var totalSize int64
+	for _, f := range files {
 		totalSize += archiveSizes[f]
 	}
 	pt := opts.Progress
 	if pt == nil {
-		pt = NewProgressTracker(totalSize, len(allFiles))
+		pt = NewProgressTracker(totalSize, len(files))
 		opts.Progress = pt
 	} else {
 		pt.total = totalSize
-		pt.filesTotal = len(allFiles)
+		pt.filesTotal = len(files)
 	}
 
 	if opts.Parallel < 1 {
 		opts.Parallel = NCPU()
 	}
 
-	fps := make([]*FileProgress, len(allFiles))
-	for i, f := range allFiles {
+	fps := make([]*FileProgress, len(files))
+	for i, f := range files {
 		parts := findSplitParts(f)
 		fps[i] = &FileProgress{Name: filepath.Base(f), Size: archiveSizes[f]}
 		if len(parts) > 1 {
@@ -149,14 +202,13 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	}
 	pt.SetFiles(fps)
 
-	results := make(chan error, len(allFiles))
 	var successes, errors int
 
-	if len(allFiles) == 1 {
+	if len(files) == 1 {
 		pt.Start()
 		defer pt.Stop()
 
-		err := decompressFile(allFiles[0], opts, fps[0])
+		err := decompressFile(files[0], opts, fps[0])
 		if err != nil {
 			fps[0].SetStatus("error")
 			WriteLogf("%s✗ %s%s\n", Red, err, NC)
@@ -171,16 +223,16 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		if maxWorkers > 8 {
 			maxWorkers = 8
 		}
-		if len(allFiles) < maxWorkers {
-			maxWorkers = len(allFiles)
+		if len(files) < maxWorkers {
+			maxWorkers = len(files)
 		}
 		if maxWorkers < 1 {
 			maxWorkers = 1
 		}
 
-		sizesSlice := make([]int64, len(allFiles))
+		sizesSlice := make([]int64, len(files))
 		var totalDecompBytes int64
-		for i, f := range allFiles {
+		for i, f := range files {
 			sz := archiveSizes[f]
 			if sz > 0 {
 				sizesSlice[i] = sz
@@ -188,24 +240,24 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 			}
 		}
 
-		pool := NewDynamicThreadPool(totalCores, 1, totalCores, len(allFiles), totalDecompBytes)
+		pool := NewDynamicThreadPool(totalCores, 1, totalCores, len(files), totalDecompBytes)
 		var preAlloc []int
-		if len(allFiles) <= maxWorkers {
+		if len(files) <= maxWorkers {
 			preAlloc = AllocateThreadsProportional(sizesSlice, totalCores, 1, totalCores)
 		}
 
-		WriteLogf("%sDescomprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(allFiles), NC)
-		WriteLogf("  Hilos: %d total (distribución adaptativa LPT)\n", totalCores)
-		WriteLogf("\n")
+		WriteLogf("%sDescomprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(files), NC)
+		WriteLogf("  Hilos: %d total (distribución adaptativa LPT)\n\n", totalCores)
 
 		pt.Start()
 		defer pt.Stop()
 
 		sem := make(chan struct{}, maxWorkers)
 		var wg sync.WaitGroup
+		results := make(chan error, len(files))
 		startTime := time.Now()
 
-		for i, file := range allFiles {
+		for i, file := range files {
 			fp := fps[i]
 			wg.Add(1)
 			go func(f string, fp *FileProgress, idx int) {
@@ -215,7 +267,7 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 				fileOpts := opts
 				var th int
-				if len(preAlloc) == len(allFiles) {
+				if len(preAlloc) == len(files) {
 					th = preAlloc[idx]
 				} else {
 					th = pool.Acquire(archiveSizes[f])
@@ -249,13 +301,7 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		WriteLogf("\n%sTiempo total: %v%s\n", Bold, elapsed.Round(time.Second), NC)
 	}
 
-	WriteLogf("\n")
-	if errors > 0 {
-		WriteLogf("%sCompletado con %d errores, %d exitosos%s\n", Yellow, errors, successes, NC)
-		return fmt.Errorf("%d error(es) durante la descompresión", errors)
-	}
-	WriteLogf("%s✓ Descompresión completada (%d archivo(s))%s\n", Green, successes, NC)
-	return nil
+	return successes, errors
 }
 
 func listArchiveOutputs(file string, dir string, info FormatInfo, passwords ...string) []string {

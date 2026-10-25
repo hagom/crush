@@ -306,4 +306,47 @@ func TestResolvePassword_SuspendsProgressAndShowsPromptClearly(t *testing.T) {
 	}
 }
 
+func TestFileRequiresInteractivePassword(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "sample.txt")
+	_ = os.WriteFile(f1, []byte("data"), 0644)
+
+	archFree := filepath.Join(tmpDir, "free.7z")
+	archLocked := filepath.Join(tmpDir, "locked.7z")
+
+	_ = exec.Command(sevenzBin(), "a", archFree, f1).Run()
+	_ = exec.Command(sevenzBin(), "a", "-ppassword123", archLocked, f1).Run()
+
+	passFile := filepath.Join(tmpDir, "passwords.txt")
+	pm := NewPasswordManager(passFile)
+	cleanup := SetPasswordManager(pm)
+	defer cleanup()
+
+	// 1. Archivo sin contraseña -> false
+	if FileRequiresInteractivePassword(archFree, "") {
+		t.Errorf("archFree no requiere clave, esperaba false")
+	}
+
+	// 2. Archivo protegido sin clave en registro -> true
+	if !FileRequiresInteractivePassword(archLocked, "") {
+		t.Errorf("archLocked sin clave en registro, esperaba true")
+	}
+
+	// 3. Con clave provista en argumento -> false
+	if FileRequiresInteractivePassword(archLocked, "password123") {
+		t.Errorf("archLocked con clave correcta en CLI, esperaba false")
+	}
+
+	// 4. Con clave agregada al registro de contraseñas -> false
+	pm.AddSuccessful("password123")
+	if FileRequiresInteractivePassword(archLocked, "") {
+		t.Errorf("archLocked con clave en registro, esperaba false")
+	}
+}
+
+
 

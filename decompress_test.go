@@ -1780,6 +1780,66 @@ func TestDecompress_SkipPasswordAndContinueBatch(t *testing.T) {
 	}
 }
 
+func TestDecompress_DeferredPasswordQueue(t *testing.T) {
+	if !hasTool(sevenzBin()) {
+		t.Skip("7z no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	fFree := filepath.Join(tmpDir, "free.txt")
+	_ = os.WriteFile(fFree, []byte("contenido libre"), 0644)
+	fLocked := filepath.Join(tmpDir, "locked.txt")
+	_ = os.WriteFile(fLocked, []byte("contenido bloqueado"), 0644)
+
+	archFree := filepath.Join(tmpDir, "free.7z")
+	archLocked := filepath.Join(tmpDir, "locked.7z")
+
+	// archFree: sin clave
+	_ = exec.Command(sevenzBin(), "a", archFree, fFree).Run()
+	// archLocked: con clave secreta no presente en registro
+	_ = exec.Command(sevenzBin(), "a", "-ppassSecret999", "-mhe=on", archLocked, fLocked).Run()
+
+	passFile := filepath.Join(tmpDir, "passwords.txt")
+	pm := NewPasswordManager(passFile)
+
+	outDir := filepath.Join(tmpDir, "out")
+	freeWasExtractedBeforePrompt := false
+	promptCalls := 0
+
+	pm.promptFunc = func(file string) (string, error) {
+		promptCalls++
+		// En la cola diferida, todos los archivos libres deben haberse descomprimido completamente
+		// antes de que se solicite la contraseña de los archivos protegidos.
+		if _, err := os.Stat(filepath.Join(outDir, "free.txt")); err == nil {
+			freeWasExtractedBeforePrompt = true
+		}
+		return "passSecret999", nil
+	}
+
+	cleanup := SetPasswordManager(pm)
+	defer cleanup()
+
+	err := DoDecompress([]string{archFree, archLocked}, DecompressOptions{OutputDir: outDir, KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoDecompress con cola diferida falló: %v", err)
+	}
+
+	if promptCalls != 1 {
+		t.Errorf("esperaba 1 llamada al prompt para locked.7z, hubo %d", promptCalls)
+	}
+	if !freeWasExtractedBeforePrompt {
+		t.Errorf("la cola diferida falló: los archivos sin clave NO se completaron antes de solicitar la contraseña")
+	}
+
+	if _, err := os.Stat(filepath.Join(outDir, "free.txt")); err != nil {
+		t.Errorf("free.txt no fue extraído: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "locked.txt")); err != nil {
+		t.Errorf("locked.txt no fue extraído: %v", err)
+	}
+}
+
+
 
 
 

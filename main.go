@@ -684,8 +684,12 @@ func main() {
 			os.Exit(1)
 		}
 		targetFmt, err := ParseFormat(*formatStr)
-		if err != nil {
-			WriteError("%v", err)
+		if err != nil || targetFmt == Auto {
+			if targetFmt == Auto {
+				WriteError("-convert requiere un formato de destino concreto (no 'auto')")
+			} else {
+				WriteError("%v", err)
+			}
 			os.Exit(1)
 		}
 		convOutDir := *outputDir
@@ -840,7 +844,7 @@ func main() {
 			formats = []Format{format}
 		} else {
 			WriteError("debe especificar formato con -f o múltiples formatos con -F")
-			WriteInfo("Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br")
+			WriteInfo("Formatos: gz xz bz2 bz3 zst lz lrz zip 7z tar rar lz4 br auto")
 			printHelp()
 			os.Exit(1)
 		}
@@ -951,8 +955,12 @@ func main() {
 		}
 		if stdinIsPipe && *formatStr != "" && len(files) == 0 {
 			f, err := ParseFormat(*formatStr)
-			if err != nil {
-				WriteError("%v", err)
+			if err != nil || f == Auto {
+				if f == Auto {
+					WriteError("la descompresión por pipe requiere un formato concreto (no 'auto')")
+				} else {
+					WriteError("%v", err)
+				}
 				os.Exit(1)
 			}
 			info := FormatInfoFromFormat(f)
@@ -1194,6 +1202,7 @@ func printHelp() {
 
 	w(BoldBlue, "CRUSH  Herramienta multi-formato de compresión y descompresión\n\n")
 	w(BoldBlue, "Uso:\n")
+	w(Yellow, "  crush -c -f auto [opciones] archivo...                 # comprimir adaptando inteligentemente el formato por contenido\n")
 	w(Yellow, "  crush -c -f FORMATO [opciones] archivo...              # comprimir archivos en el formato especificado\n")
 	w(Yellow, "  crush -c -F FORMATOS [opciones] archivo...             # comprimir archivos en múltiples formatos a la vez\n")
 	w(Yellow, "  crush -c [opciones]                                    # compresión interactiva del directorio actual\n")
@@ -1248,9 +1257,9 @@ func printHelp() {
 	w(Yellow, "  -f FORMATO")
 	fmt.Print("           Formato de compresión: ")
 	fmt.Print(strings.Join(ordered, ", "))
-	fmt.Print("\n                       lrz ofrece la máxima compresión\n")
+	fmt.Print(", auto\n                       lrz ofrece la máxima compresión; 'auto' detecta el formato óptimo por contenido\n")
 	w(Yellow, "  -F, --formats LISTA")
-	fmt.Print("  Comprimir en múltiples formatos separados por coma (ej: -F gz,xz,zst)\n")
+	fmt.Print("  Comprimir concurrentemente en múltiples formatos separados por coma (ej: -F gz,xz,zst o -F auto,7z)\n")
 
 	w(Yellow, "  -o DIRECTORIO")
 	fmt.Print("        Directorio de salida (por defecto: .)\n")
@@ -1319,6 +1328,7 @@ func printHelp() {
 	w(Yellow, "  crush -watch /backup/inbox -c -f zst                   # monitorear directorio y comprimir archivos entrantes\n")
 	w(Yellow, "  crush -watch /descargas -d -o /extraidos/              # monitorear directorio y descomprimir archivos entrantes\n")
 	w(Yellow, "  crush -c -f gz documento.txt                           # compresión básica de archivo en formato gz\n")
+	w(Yellow, "  crush -c -f auto doc.txt video.mp4                     # comprimir adaptando el formato al tipo de contenido\n")
 	w(Yellow, "  crush -c -F gz,xz,zst documento.txt                    # comprimir en múltiples formatos a la vez\n")
 	w(Yellow, "  crush -c -f gz -t documento.txt                        # comprimir y verificar integridad inmediatamente\n")
 	w(Yellow, "  crush -c -f gz -hash documento.txt                     # comprimir y generar checksum SHA-256 (.sha256)\n")

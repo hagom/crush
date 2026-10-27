@@ -708,3 +708,21 @@ func TestHelpEveryOptionHasDescriptionAndExample(t *testing.T) {
 	}
 }
 
+func TestCLIAutoFormat(t *testing.T) {
+	fmtChoice, err := ParseFormat("auto")
+	if err != nil {
+		t.Fatalf("ParseFormat(auto) error: %v", err)
+	}
+	if fmtChoice != Auto {
+		t.Errorf("ParseFormat(auto) = %v, want Auto", fmtChoice)
+	}
+
+	multiList, err := ParseFormatList("auto,xz")
+	if err != nil {
+		t.Fatalf("ParseFormatList(auto,xz) error: %v", err)
+	}
+	if len(multiList) != 2 || multiList[0] != Auto || multiList[1] != Xz {
+		t.Errorf("ParseFormatList(auto,xz) = %v, want [Auto, Xz]", multiList)
+	}
+}
+

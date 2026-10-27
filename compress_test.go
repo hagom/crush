@@ -2065,3 +2065,195 @@ func TestBuildCompressCmdBrotliQualityFlag(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateCompressionTasks(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "text.txt")
+	f2 := filepath.Join(tmpDir, "clip.mp4")
+	if err := os.WriteFile(f1, []byte("plain text sample"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("video data sample"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Matrix -F gz,tar across 2 files -> 4 tasks
+	optsMatrix := CompressOptions{
+		Formats:   []Format{Gz, Tar},
+		OutputDir: tmpDir,
+	}
+	tasks, err := generateCompressionTasks([]string{f1, f2}, optsMatrix)
+	if err != nil {
+		t.Fatalf("generateCompressionTasks matrix error: %v", err)
+	}
+	if len(tasks) != 4 {
+		t.Fatalf("generateCompressionTasks matrix tasks = %d, want 4", len(tasks))
+	}
+
+	// 2. Auto mode -f auto across 2 files -> text.txt is Xz, clip.mp4 is Zst
+	optsAuto := CompressOptions{
+		Format:    Auto,
+		OutputDir: tmpDir,
+	}
+	tasksAuto, err := generateCompressionTasks([]string{f1, f2}, optsAuto)
+	if err != nil {
+		t.Fatalf("generateCompressionTasks auto error: %v", err)
+	}
+	if len(tasksAuto) != 2 {
+		t.Fatalf("generateCompressionTasks auto tasks = %d, want 2", len(tasksAuto))
+	}
+	for _, task := range tasksAuto {
+		if task.File == f1 && task.Format != Xz {
+			t.Errorf("task for f1 format = %v, want Xz", task.Format)
+		}
+		if task.File == f2 && task.Format != Zst {
+			t.Errorf("task for f2 format = %v, want Zst", task.Format)
+		}
+	}
+
+	// 3. Deduplication in -F auto,xz on text.txt -> only 1 task (Xz)
+	optsDedup := CompressOptions{
+		Formats:   []Format{Auto, Xz},
+		OutputDir: tmpDir,
+	}
+	tasksDedup, err := generateCompressionTasks([]string{f1}, optsDedup)
+	if err != nil {
+		t.Fatalf("generateCompressionTasks dedup error: %v", err)
+	}
+	if len(tasksDedup) != 1 {
+		t.Fatalf("generateCompressionTasks dedup tasks = %d, want 1", len(tasksDedup))
+	}
+	if tasksDedup[0].Format != Xz {
+		t.Errorf("dedup task format = %v, want Xz", tasksDedup[0].Format)
+	}
+}
+
+func TestHeterogeneousCompression_AutoMode(t *testing.T) {
+	if !hasTool("pigz") && !hasTool("gzip") {
+		t.Skip("gzip no disponible")
+	}
+	if !hasTool("xz") {
+		t.Skip("xz no disponible")
+	}
+	if !hasTool("zstd") {
+		t.Skip("zstd no disponible")
+	}
+
+	tmpDir := t.TempDir()
+	txtFile := filepath.Join(tmpDir, "notes.txt")
+	mp4File := filepath.Join(tmpDir, "video.mp4")
+
+	if err := os.WriteFile(txtFile, []byte("Line 1 of notes\nLine 2 of notes\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mp4File, []byte("fake mp4 payload"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Auto,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+
+	outPaths, err := DoCompress([]string{txtFile, mp4File}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress auto mode failed: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("DoCompress auto mode outPaths = %d, want 2", len(outPaths))
+	}
+
+	foundXz := false
+	foundZst := false
+	for _, p := range outPaths {
+		if strings.HasSuffix(p, ".xz") {
+			foundXz = true
+		}
+		if strings.HasSuffix(p, ".zst") {
+			foundZst = true
+		}
+	}
+	if !foundXz {
+		t.Errorf("expected an output with .xz for notes.txt, got %v", outPaths)
+	}
+	if !foundZst {
+		t.Errorf("expected an output with .zst for video.mp4, got %v", outPaths)
+	}
+}
+
+func TestHeterogeneousCompression_KeepOrigSafety(t *testing.T) {
+	if !hasTool("tar") {
+		t.Skip("tar no disponible")
+	}
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "critical.txt")
+	if err := os.WriteFile(srcFile, []byte("important content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Formats:   []Format{Gz, Tar},
+		OutputDir: tmpDir,
+		KeepOrig:  false,
+	}
+
+	outPaths, err := DoCompress([]string{srcFile}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress error: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("DoCompress outPaths = %d, want 2", len(outPaths))
+	}
+	if _, err := os.Stat(srcFile); !os.IsNotExist(err) {
+		t.Errorf("source file should have been deleted when all tasks succeed with KeepOrig: false")
+	}
+}
+
+func TestHeterogeneousCompression_ProgressFormatting(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "text.txt")
+	f2 := filepath.Join(tmpDir, "video.mp4")
+	if err := os.WriteFile(f1, []byte("text data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("video data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Auto,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Progress:  NewProgressTracker(0, 2),
+	}
+
+	outPaths, err := DoCompress([]string{f1, f2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress error: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("outPaths len = %d, want 2", len(outPaths))
+	}
+
+	files := opts.Progress.files
+	if len(files) != 2 {
+		t.Fatalf("progress files len = %d, want 2", len(files))
+	}
+	foundTxtFmt := false
+	foundVidFmt := false
+	for _, fp := range files {
+		if strings.Contains(fp.Name, "text.txt") && strings.Contains(fp.Name, "[xz]") {
+			foundTxtFmt = true
+		}
+		if strings.Contains(fp.Name, "video.mp4") && strings.Contains(fp.Name, "[zst]") {
+			foundVidFmt = true
+		}
+	}
+	if !foundTxtFmt {
+		t.Errorf("expected progress label containing 'text.txt [xz]', got %v and %v", files[0].Name, files[1].Name)
+	}
+	if !foundVidFmt {
+		t.Errorf("expected progress label containing 'video.mp4 [zst]', got %v and %v", files[0].Name, files[1].Name)
+	}
+}

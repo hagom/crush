@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,6 +57,103 @@ var DefaultCleanExcludes = []string{
 	".pytest_cache",
 	".build",
 	"target",
+}
+
+type CompressionTask struct {
+	ID        int
+	File      string
+	Format    Format
+	Size      int64
+	ThreadCap int
+	OutPath   string
+}
+
+func FormatComplexityWeight(f Format) int64 {
+	switch f {
+	case Xz, SevenZ:
+		return 4
+	case Bz3, Lrz:
+		return 3
+	case Bz2, Br, Lz, Rar:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func generateCompressionTasks(items []string, opts CompressOptions) ([]CompressionTask, error) {
+	var tasks []CompressionTask
+	id := 0
+
+	for _, item := range items {
+		var formatsToUse []Format
+		if len(opts.Formats) > 0 {
+			seen := make(map[Format]bool)
+			for _, f := range opts.Formats {
+				targetFmt := f
+				if f == Auto {
+					targetFmt = DetectAutoFormat(item)
+				}
+				if !seen[targetFmt] {
+					seen[targetFmt] = true
+					formatsToUse = append(formatsToUse, targetFmt)
+				}
+			}
+		} else {
+			targetFmt := opts.Format
+			if targetFmt == Auto {
+				targetFmt = DetectAutoFormat(item)
+			}
+			formatsToUse = []Format{targetFmt}
+		}
+
+		fi, statErr := os.Stat(item)
+		isDir := (statErr == nil && fi.IsDir())
+		var itemSize int64
+		if statErr == nil {
+			if isDir {
+				itemSize, _ = GetDirSize(item)
+			} else {
+				itemSize = fi.Size()
+			}
+		}
+
+		for _, fmtChoice := range formatsToUse {
+			id++
+			task := CompressionTask{
+				ID:     id,
+				File:   item,
+				Format: fmtChoice,
+				Size:   itemSize,
+			}
+
+			baseName := fmtChoice.ArchiveBaseName(item)
+			targetDir := opts.OutputDir
+			if opts.SplitSize > 0 {
+				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
+			}
+			ext := ExtForItem(fmtChoice, isDir)
+			outPath := GetUniqueName(filepath.Join(targetDir, baseName), ext)
+			fileOpts := opts
+			fileOpts.Format = fmtChoice
+			outPath = splitOutPath(outPath, fileOpts)
+			task.OutPath = outPath
+
+			cap := MaxEffectiveThreads(fmtChoice, itemSize)
+			cap = MemorySafeMaxThreads(fmtChoice, cap)
+			fmtMax := FormatMaxThreads(fmtChoice)
+			if cap > fmtMax {
+				cap = fmtMax
+			}
+			if cap < 1 {
+				cap = 1
+			}
+			task.ThreadCap = cap
+
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks, nil
 }
 
 func (opts CompressOptions) UseSparse() bool {
@@ -105,7 +203,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		opts.Exclude = append(opts.Exclude, DefaultCleanExcludes...)
 	}
 
-	if len(opts.Formats) > 1 {
+	if opts.Combine && len(opts.Formats) > 1 {
 		var allOut []string
 		origKeep := opts.KeepOrig
 		for idx, fmtChoice := range opts.Formats {
@@ -132,11 +230,20 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		opts.Formats = nil
 	}
 
-	singleItem := len(files) == 1 && !opts.Combine
+	singleItem := len(files) == 1 && !opts.Combine && len(opts.Formats) <= 1
 	singleIsDir := false
 	if singleItem {
+		if opts.Format == Auto {
+			opts.Format = DetectAutoFormat(files[0])
+		}
 		if fi, err := os.Stat(files[0]); err == nil && fi.IsDir() {
 			singleIsDir = true
+		}
+	} else if opts.Combine && opts.Format == Auto {
+		if hasTool(sevenzBin()) {
+			opts.Format = SevenZ
+		} else {
+			opts.Format = Zst
 		}
 	}
 
@@ -181,17 +288,16 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return GetUniqueName(filepath.Join(targetDir, baseName), ext)
 	}
 
+	canParallel := !singleItem && !opts.Combine
+
 	if opts.DryRun {
 		WriteLogf("%s[Simulacro] Comprimiendo %d archivo(s)%s\n", Blue, len(files), NC)
-		if !singleItem && len(files) > 1 && !opts.Combine {
+		if canParallel {
+			tasks, _ := generateCompressionTasks(files, opts)
 			mode := "paralelo"
-			WriteLogf("%s[Simulacro] Modo: %s (%d archivos × %d núcleos)%s\n", Blue, mode, len(files), NCPU(), NC)
-			if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
-				opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
-				opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br {
-				WriteLogf("%s[Simulacro] Formato: %s (1 archivo → 1 archivo comprimido)%s\n", Blue, opts.Format, NC)
-			} else {
-				WriteLogf("%s[Simulacro] Formato: %s%s\n", Blue, ext, NC)
+			WriteLogf("%s[Simulacro] Modo: %s (%d tareas × %d núcleos)%s\n", Blue, mode, len(tasks), NCPU(), NC)
+			for _, t := range tasks {
+				WriteLogf("%s[Simulacro]   %s → %s [%s]%s\n", Blue, t.File, t.OutPath, t.Format, NC)
 			}
 		} else {
 			WriteLogf("%s[Simulacro] Salida: %s%s\n", Blue, calcOutPath(), NC)
@@ -210,8 +316,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, nil
 	}
 
-	if err := CheckCompressTools(opts.Format); err != nil {
-		return nil, err
+	if opts.Format != Auto && len(opts.Formats) <= 1 {
+		if err := CheckCompressTools(opts.Format); err != nil {
+			return nil, err
+		}
 	}
 
 	sizeCache := make(map[string]int64, len(files))
@@ -271,45 +379,106 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
 	}
 
-	singleItem = len(filteredFiles) == 1 && !opts.Combine
+	singleItem = len(filteredFiles) == 1 && !opts.Combine && len(opts.Formats) <= 1
 	singleIsDir = false
 	if singleItem {
+		if opts.Format == Auto {
+			opts.Format = DetectAutoFormat(filteredFiles[0])
+		}
 		if fi, err := os.Stat(filteredFiles[0]); err == nil && fi.IsDir() {
 			singleIsDir = true
 		}
 		ext = ExtForItem(opts.Format, singleIsDir)
+	} else if opts.Combine && opts.Format == Auto {
+		if hasTool(sevenzBin()) {
+			opts.Format = SevenZ
+		} else {
+			opts.Format = Zst
+		}
+		ext = ExtForFormat(opts.Format)
 	} else {
 		ext = ExtForFormat(opts.Format)
 	}
 
-	canParallel := !singleItem && len(filteredFiles) > 1 && !opts.Combine
-	filesTotal := 1
-	if canParallel {
-		filesTotal = len(filteredFiles)
+	canParallel = !singleItem && !opts.Combine
+	if opts.Progress == nil {
+		filesTotal := 1
+		if canParallel {
+			filesTotal = len(filteredFiles)
+		}
+		opts.Progress = NewProgressTracker(totalSize, filesTotal)
 	}
-	opts.Progress = NewProgressTracker(totalSize, filesTotal)
 	pt := opts.Progress
 
 	if canParallel {
+		tasks, err := generateCompressionTasks(filteredFiles, opts)
+		if err != nil {
+			return nil, err
+		}
+		if len(tasks) == 0 {
+			return nil, fmt.Errorf("no se generaron tareas de compresión válidas")
+		}
+
+		for _, t := range tasks {
+			if err := CheckCompressTools(t.Format); err != nil {
+				return nil, err
+			}
+		}
+
 		totalSize = 0
-		for _, f := range filteredFiles {
-			totalSize += getSize(f)
+		var totalEstimated int64
+		for _, t := range tasks {
+			totalSize += t.Size
+			totalEstimated += EstimateCompressedSize(t.Size, t.Format, []string{t.File})
 		}
 		opts.TotalSize = totalSize
 
-		parFormat := opts.Format.String()
-		if opts.Format == SevenZ {
-			parFormat = "7z"
+		if err := CheckDiskSpace(totalEstimated, opts.OutputDir, "comprimir"); err != nil {
+			return nil, err
 		}
-		WriteLogf("%sComprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(filteredFiles), NC)
-		WriteLogf("  Formato: %s\n", parFormat)
-		WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
+
+		if opts.Progress == nil {
+			opts.Progress = NewProgressTracker(totalSize, len(tasks))
+		}
+		pt = opts.Progress
+
+		hasMixedFormats := false
+		if len(tasks) > 0 {
+			firstFmt := tasks[0].Format
+			for _, t := range tasks[1:] {
+				if t.Format != firstFmt {
+					hasMixedFormats = true
+					break
+				}
+			}
+		}
+
+		if hasMixedFormats || len(opts.Formats) > 1 {
+			fmtCounts := make(map[Format]int)
+			for _, t := range tasks {
+				fmtCounts[t.Format]++
+			}
+			var fmtSummary []string
+			for f, count := range fmtCounts {
+				fmtSummary = append(fmtSummary, fmt.Sprintf("%s (%d)", f, count))
+			}
+			WriteLogf("%sComprimiendo %d tarea(s) en paralelo...%s\n", Bold, len(tasks), NC)
+			WriteLogf("  Formatos: %s\n", strings.Join(fmtSummary, ", "))
+		} else {
+			parFormat := opts.Format.String()
+			if opts.Format == SevenZ {
+				parFormat = "7z"
+			}
+			WriteLogf("%sComprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(filteredFiles), NC)
+			WriteLogf("  Formato: %s\n", parFormat)
+			WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
+		}
 		WriteLogf("\n")
 
 		pt.Start()
 		defer pt.Stop()
 
-		outPaths, err = compressParallel(filteredFiles, opts, sizeCache)
+		outPaths, err = compressParallelTasks(tasks, opts, sizeCache)
 		return outPaths, err
 	}
 
@@ -750,65 +919,134 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 		return -1
 	})
 
-	ext := opts.Format.String()
+	tasks, err := generateCompressionTasks(files, opts)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		if sz, ok := fileSizes[tasks[i].File]; ok && tasks[i].Size <= 0 {
+			tasks[i].Size = sz
+		}
+	}
+	return compressParallelTasks(tasks, opts, fileSizes)
+}
+
+func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precalcSizes ...map[string]int64) ([]string, error) {
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+
+	var sizeCache map[string]int64
+	if len(precalcSizes) > 0 && precalcSizes[0] != nil {
+		sizeCache = precalcSizes[0]
+	}
+	for i := range tasks {
+		if tasks[i].Size <= 0 && sizeCache != nil {
+			if sz, ok := sizeCache[tasks[i].File]; ok {
+				tasks[i].Size = sz
+			}
+		}
+	}
+
+	hasMixedFormats := false
+	if len(tasks) > 0 {
+		firstFmt := tasks[0].Format
+		for _, t := range tasks[1:] {
+			if t.Format != firstFmt {
+				hasMixedFormats = true
+				break
+			}
+		}
+	}
+
+	if hasMixedFormats || len(opts.Formats) > 1 {
+		sort.SliceStable(tasks, func(i, j int) bool {
+			weightI := tasks[i].Size * FormatComplexityWeight(tasks[i].Format)
+			weightJ := tasks[j].Size * FormatComplexityWeight(tasks[j].Format)
+			if weightI != weightJ {
+				return weightI > weightJ
+			}
+			return tasks[i].Size > tasks[j].Size
+		})
+	} else {
+		sort.SliceStable(tasks, func(i, j int) bool {
+			return tasks[i].Size > tasks[j].Size
+		})
+	}
+
 	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", opts.OutputDir, err)
 	}
 
-	maxFmtThreads := FormatMaxThreads(opts.Format)
 	totalCores := NCPU()
-
 	maxWorkers := opts.Parallel
-	if maxFmtThreads > 1 && maxWorkers > 8 {
+	anyMultiThreaded := false
+	for _, t := range tasks {
+		if FormatMaxThreads(t.Format) > 1 {
+			anyMultiThreaded = true
+			break
+		}
+	}
+	if anyMultiThreaded && maxWorkers > 8 {
 		maxWorkers = 8
 	}
-	if len(files) < maxWorkers {
-		maxWorkers = len(files)
+	if len(tasks) < maxWorkers {
+		maxWorkers = len(tasks)
 	}
 	if maxWorkers < 1 {
 		maxWorkers = 1
 	}
 
-	sizesSlice := make([]int64, len(files))
-	caps := make([]int, len(files))
+	sizesSlice := make([]int64, len(tasks))
+	caps := make([]int, len(tasks))
 	var totalBatchSize int64
-	for i, f := range files {
-		sz := fileSizes[f]
+	for i, t := range tasks {
+		sz := t.Size
 		if sz > 0 {
 			sizesSlice[i] = sz
 			totalBatchSize += sz
 		}
-		c := MaxEffectiveThreads(opts.Format, sz)
-		c = MemorySafeMaxThreads(opts.Format, c)
-		fmtMax := FormatMaxThreads(opts.Format)
-		if c > fmtMax {
-			c = fmtMax
-		}
+		c := t.ThreadCap
 		if c < 1 {
 			c = 1
 		}
 		caps[i] = c
 	}
 
-	pool := NewDynamicThreadPool(totalCores, 1, maxFmtThreads, len(files), totalBatchSize, maxWorkers)
+	pool := NewDynamicThreadPool(totalCores, 1, totalCores, len(tasks), totalBatchSize, maxWorkers)
 	var preAlloc []int
-	if len(files) <= maxWorkers {
+	if len(tasks) <= maxWorkers {
 		preAlloc = AllocateThreadsProportionalWithCaps(sizesSlice, totalCores, 1, caps)
 	}
 
 	sem := make(chan struct{}, maxWorkers)
-	errCh := make(chan error, len(files))
-	outFiles := make([]string, 0, len(files))
+	errCh := make(chan error, len(tasks))
+	outFiles := make([]string, 0, len(tasks))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	fps := make([]*FileProgress, len(files))
-	for i, f := range files {
-		var sz int64
-		if s, ok := fileSizes[f]; ok && s >= 0 {
-			sz = s
+	pendingTasks := make(map[string]*atomic.Int32)
+	for _, t := range tasks {
+		if _, ok := pendingTasks[t.File]; !ok {
+			pendingTasks[t.File] = &atomic.Int32{}
 		}
-		fps[i] = &FileProgress{Name: filepath.Base(f), Size: sz}
+		pendingTasks[t.File].Add(1)
+	}
+	var failedFiles sync.Map
+	var removedMu sync.Mutex
+	var removedCount int
+
+	fps := make([]*FileProgress, len(tasks))
+	for i, t := range tasks {
+		label := filepath.Base(t.File)
+		if len(opts.Formats) > 1 || hasMixedFormats {
+			label = fmt.Sprintf("%s [%s]", filepath.Base(t.File), t.Format.String())
+		}
+		var sz int64
+		if t.Size >= 0 {
+			sz = t.Size
+		}
+		fps[i] = &FileProgress{Name: label, Size: sz}
 		fps[i].SetStatus("waiting")
 	}
 	if opts.Progress != nil {
@@ -817,10 +1055,10 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 
 	startTime := time.Now()
 
-	for i, f := range files {
+	for i, task := range tasks {
 		wg.Add(1)
 		fp := fps[i]
-		go func(file string, fp *FileProgress, idx int) {
+		go func(t CompressionTask, fp *FileProgress, idx int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -828,31 +1066,30 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 			fp.SetStart(time.Now())
 
 			fileOpts := opts
+			fileOpts.Format = t.Format
 			var th int
-			if len(preAlloc) == len(files) {
+			if len(preAlloc) == len(tasks) {
 				th = preAlloc[idx]
 			} else {
-				th = pool.Acquire(fileSizes[file], caps[idx])
+				th = pool.Acquire(t.Size, caps[idx])
 				defer pool.Release(th)
 			}
 			fileOpts.ThreadLimit = th
 
-			baseName := opts.Format.ArchiveBaseName(file)
 			targetDir := opts.OutputDir
+			baseName := t.Format.ArchiveBaseName(t.File)
 			if opts.SplitSize > 0 {
 				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
 				if err := os.MkdirAll(targetDir, 0755); err != nil {
-					errCh <- fmt.Errorf("%s: %w", file, err)
+					fp.SetStatus("error")
+					failedFiles.Store(t.File, true)
+					errCh <- fmt.Errorf("%s: %w", t.File, err)
+					pendingTasks[t.File].Add(-1)
 					return
 				}
 			}
-			fileExt := ext
-			if fi, err := os.Stat(file); err == nil && fi.IsDir() && opts.Format.IsStream() {
-				fileExt = ExtForFormat(opts.Format)
-			}
-			outPath := GetUniqueName(filepath.Join(targetDir, baseName), fileExt)
-			outPath = splitOutPath(outPath, fileOpts)
 
+			outPath := t.OutPath
 			fp.SetOutPath(outPath)
 
 			mu.Lock()
@@ -860,19 +1097,20 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 			mu.Unlock()
 
 			if opts.Verbose {
-				WriteLogf("  %s → %s (hilos: %d)\n", file, outPath, th)
+				WriteLogf("  %s → %s (formato: %s, hilos: %d)\n", t.File, outPath, t.Format, th)
 			}
 
 			_, preExistErr := os.Stat(outPath)
-			err := compressSingleFile(file, outPath, fileOpts, fp, fileSizes[file])
+			err := compressSingleFile(t.File, outPath, fileOpts, fp, t.Size)
 			if err != nil {
 				fp.SetStatus("error")
+				failedFiles.Store(t.File, true)
 				if preExistErr != nil {
 					if rmErr := os.Remove(outPath); rmErr == nil {
 						WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, outPath, NC)
 					}
 				}
-				errCh <- fmt.Errorf("%s: %w", file, err)
+				errCh <- fmt.Errorf("%s [%s]: %w", t.File, t.Format, err)
 			} else {
 				if opts.Hash {
 					for _, p := range append([]string{outPath}, globSplitParts(outPath)...) {
@@ -881,7 +1119,20 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 				}
 				fp.SetStatus("done")
 			}
-		}(f, fp, i)
+
+			remaining := pendingTasks[t.File].Add(-1)
+			if remaining == 0 {
+				if _, failed := failedFiles.Load(t.File); !failed {
+					if !opts.KeepOrig && !opts.SkipCleanup {
+						if err := os.RemoveAll(t.File); err == nil {
+							removedMu.Lock()
+							removedCount++
+							removedMu.Unlock()
+						}
+					}
+				}
+			}
+		}(task, fp, i)
 	}
 
 	wg.Wait()
@@ -897,8 +1148,25 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 
 	WriteLogf("\n")
 	WriteLogf("%s=== Reporte de Compresión Paralela ===%s\n", Green, NC)
-	WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, ext, NC)
-	WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(files), NC)
+	if hasMixedFormats || len(opts.Formats) > 1 {
+		fmtCounts := make(map[Format]int)
+		for _, t := range tasks {
+			fmtCounts[t.Format]++
+		}
+		var fmtSummary []string
+		for f, count := range fmtCounts {
+			fmtSummary = append(fmtSummary, fmt.Sprintf("%s (%d)", f, count))
+		}
+		WriteLogf("%sFormatos:%s          %s%s%s\n", Blue, NC, Yellow, strings.Join(fmtSummary, ", "), NC)
+		WriteLogf("%sTareas:%s            %s%d%s\n", Blue, NC, Bold, len(tasks), NC)
+	} else {
+		ext := tasks[0].Format.String()
+		if tasks[0].Format == SevenZ {
+			ext = "7z"
+		}
+		WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, ext, NC)
+		WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(tasks), NC)
+	}
 	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
 	WriteLogf("%sHilos:%s             %s%d total (distribución adaptativa LPT)%s\n", Blue, NC, Bold, totalCores, NC)
 	if opts.SplitSize > 0 {
@@ -917,23 +1185,19 @@ func compressParallel(files []string, opts CompressOptions, precalcSizes ...map[
 			WriteLogf("  %s✗ %s%s\n", Red, e, NC)
 		}
 	} else {
-		WriteLogf("%s%s✓ Todos los archivos comprimidos exitosamente%s\n", Green, Bold, NC)
+		WriteLogf("%s%s✓ Todas las tareas completadas exitosamente%s\n", Green, Bold, NC)
 	}
 	WriteLogf("%s=============================%s\n", Green, NC)
 
-	successFiles := make([]string, 0, len(files))
-	for i, fp := range fps {
-		if fp.Status() == "done" {
-			successFiles = append(successFiles, files[i])
+	var successFiles []string
+	for file := range pendingTasks {
+		if _, failed := failedFiles.Load(file); !failed {
+			successFiles = append(successFiles, file)
 		}
 	}
-
 	CompressCleanupFiles = successFiles
-	if !opts.KeepOrig && !opts.SkipCleanup {
-		removed := removeFiles(successFiles, opts.Verbose)
-		if removed > 0 {
-			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
-		}
+	if removedCount > 0 {
+		WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removedCount, NC)
 	}
 
 	if len(errors) > 0 {

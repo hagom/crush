@@ -37,7 +37,10 @@ crush/
 
 ### Funcionalidades Implementadas
 
-- [x] Soporte para 13 formatos: `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`.
+- [x] Soporte para 13 formatos: `gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br` y modo `auto`.
+- [x] Compresión heterogénea concurrente: matriz multi-formato simultánea (`-F`) con unificación de cola LPT ponderada en `DynamicThreadPool`.
+- [x] Modo adaptativo automático (`-f auto`): selección heurística inteligente del formato óptimo por contenido y extensión.
+- [x] Control atómico de referencias para eliminación segura de originales (`KeepOrig`).
 - [x] Compresión máxima real y auto-paralelismo (`NCPU()`) sin flags manuales.
 - [x] Planificación LPT (*Longest Processing Time first*) para compresión y descompresión concurrente.
 - [x] Distribución dinámica proporcional de hilos (`AllocateThreadsProportionalWithCaps`), balanceo de ventana activa (`DynamicThreadPool`), techos por payload y control de memoria RAM.

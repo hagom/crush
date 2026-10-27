@@ -36,7 +36,11 @@
 
 - **Notificaciones de escritorio y campana acústica (`-notify`):** Emite automáticamente alertas visuales de escritorio con `notify-send` y señal acústica en terminal (`\a`) al finalizar operaciones prolongadas (>10s) o de manera forzada con `-notify`.
 
-- **Compresión simultánea multi-formato (`-F` / `--formats`):** Permite comprimir en múltiples formatos en una sola pasada (ej: `crush -c -F gz,xz,zst archivo.txt`), preservando los archivos originales durante todas las fases intermedias y reportando el avance y verificación de cada formato.
+- **Compresión heterogénea concurrente y modo adaptativo (`-f auto` / `-F`):**
+  - **Modo Adaptativo Inteligente (`-f auto`):** Detección heurística de formato óptimo según el tipo de contenido (texto, código y logs $\to$ `xz`/`7z`, multimedia y pre-comprimidos $\to$ `zstd`, directorios $\to$ `7z`/`tar.zst`, y análisis de primeros 512 bytes para binarios sin extensión).
+  - **Matriz Concurrente Multi-Formato (`-F` / `--formats`):** Permite comprimir en múltiples formatos de manera simultánea en una sola pasada (ej: `crush -c -F gz,xz,zst archivo.txt`), procesando todas las tareas $(archivo \times formato)$ en paralelo en una única cola gobernada por `DynamicThreadPool` con reparto proporcional de hilos LPT y cero núcleos ociosos.
+  - **Preservación Segura de Originales:** Conteo atómico de referencias por archivo original (`pendingTasks`), garantizando que un fichero original nunca sea eliminado hasta que **todas** sus variantes de formato hayan culminado con éxito (cuando `-k` no está activo).
+  - **Monitoreo Visual con Formato:** Cada worker reporta el archivo y el formato objetivo en tiempo real (`archivo [fmt]`).
 
 - **Auto-instalación de herramientas multihilo y fallback secuencial inteligente:** Detección de herramientas concurrentes (`pigz`, `lbzip2`, `plzip`, `lz4 -T`, `7z`, `xz`, `zstd`); si la herramienta óptima multihilo no se encuentra en el sistema, `crush` intenta instalarla automáticamente mediante el gestor de paquetes (`apt`, `dnf`, etc.); si no está en los repositorios o no se puede instalar, recurre transparentemente a la herramienta secuencial (`gzip`, `bzip2`, `lzip`) con advertencia en consola; y si ninguna está disponible, emite un aviso de error detallado.
 
@@ -199,6 +203,12 @@ crush -c -f 7z                               # O especificando formato
 
 # Compresión de archivo individual
 crush -c -f gz documento.txt                 # → documento.tar.gz
+
+# Compresión adaptativa automática según contenido (-f auto)
+crush -c -f auto codigo.go video.mp4 dir/    # → codigo.go.xz, video.mp4.zst, dir.7z
+
+# Compresión concurrente multi-formato en paralelo (-F)
+crush -c -F gz,xz,zst archivo.txt            # → genera archivo.txt.gz, .xz y .zst simultáneamente
 
 # Compresión paralela multi-archivo y multi-carpeta (cada elemento genera su propio comprimido)
 crush -c -f 7z *.iso
@@ -419,8 +429,8 @@ Uso:
 
 | Opción | Argumento | Descripción | Por Defecto |
 |---|---|---|---|
-| `-f` | `FORMATO` | Formato objetivo (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`). | Requerido en `-c` (o `-F`) y `-convert` |
-| `-F`, `--formats` | `LISTA` | Comprimir en múltiples formatos separados por coma (ej: `gz,xz,zst`). | — |
+| `-f` | `FORMATO` | Formato objetivo (`gz`, `xz`, `bz2`, `bz3`, `zst`, `lz`, `lrz`, `zip`, `7z`, `tar`, `rar`, `lz4`, `br`, o `auto`). | Requerido en `-c` (o `-F`) y `-convert` |
+| `-F`, `--formats` | `LISTA` | Comprimir concurrentemente en múltiples formatos separados por coma (ej: `gz,xz,zst` o `auto,7z`). | — |
 | `-o` | `DIR` | Directorio de salida. | `.` |
 | `-k` | — | Conservar archivos originales tras compresión o conversión. | `false` (los elimina) |
 | `-v` | — | Modo verbose (muestra los comandos del sistema invocados). | `false` |

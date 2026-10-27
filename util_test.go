@@ -1709,6 +1709,59 @@ func TestMemorySafeMaxThreads(t *testing.T) {
 	}
 }
 
+func TestGetNullFile_ReadWriteAndConcurrency(t *testing.T) {
+	nullF := getNullFile()
+	if nullF == nil {
+		t.Fatal("getNullFile() returned nil")
+	}
+
+	// Verify reading from nullFile returns 0 bytes and EOF (valid stdin)
+	buf := make([]byte, 16)
+	n, err := nullF.Read(buf)
+	if n != 0 || (err != nil && err != io.EOF) {
+		t.Errorf("nullFile.Read = (%d, %v), want (0, EOF)", n, err)
+	}
+
+	// Verify writing to nullFile succeeds (valid stdout/stderr discard)
+	wn, werr := nullF.Write([]byte("discard"))
+	if werr != nil || wn != 7 {
+		t.Errorf("nullFile.Write = (%d, %v), want (7, nil)", wn, werr)
+	}
+
+	// Verify concurrency safety across 50 goroutines
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f := getNullFile()
+			if f == nil {
+				t.Errorf("concurrent getNullFile returned nil")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestFileProgress_UncompressedSizeMethods(t *testing.T) {
+	fp := &FileProgress{Name: "test.tar", Size: 1000}
+	if sz := fp.GetUncompressedSize(); sz != 0 {
+		t.Errorf("initial GetUncompressedSize = %d, want 0", sz)
+	}
+	fp.SetUncompressedSize(50000)
+	if sz := fp.GetUncompressedSize(); sz != 50000 {
+		t.Errorf("GetUncompressedSize after set = %d, want 50000", sz)
+	}
+
+	// Test nil receiver safety
+	var nilFP *FileProgress
+	nilFP.SetUncompressedSize(100)
+	if sz := nilFP.GetUncompressedSize(); sz != 0 {
+		t.Errorf("nilFP.GetUncompressedSize() = %d, want 0", sz)
+	}
+}
+
+
 
 
 

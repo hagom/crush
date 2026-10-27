@@ -1113,14 +1113,15 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 				}
 				errCh <- fmt.Errorf("%s [%s]: %w", t.File, t.Format, err)
 			} else {
+				allOutParts := append([]string{outPath}, globSplitParts(outPath)...)
 				if opts.Hash {
-					for _, p := range append([]string{outPath}, globSplitParts(outPath)...) {
+					for _, p := range allOutParts {
 						_, _ = WriteSHA256File(p)
 					}
 				}
 				totalOrigBytes.Add(t.Size)
 				var finalSize int64
-				for _, p := range append([]string{outPath}, globSplitParts(outPath)...) {
+				for _, p := range allOutParts {
 					if info, err := os.Stat(p); err == nil {
 						finalSize += info.Size()
 					}

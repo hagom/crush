@@ -2051,6 +2051,50 @@ func TestDecompressIsoRenameReportMeasurement(t *testing.T) {
 	}
 }
 
+func TestDecompressFile_ZeroByteLegitimateFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyFile := filepath.Join(tmpDir, "empty.txt")
+	if err := os.WriteFile(emptyFile, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gzFile := filepath.Join(tmpDir, "empty.txt.gz")
+	makeGz(t, emptyFile, gzFile)
+	_ = os.Remove(emptyFile)
+
+	outDir := filepath.Join(tmpDir, "out")
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+	err = decompressFile(gzFile, opts, nil)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if err != nil {
+		t.Fatalf("decompressFile falló: %v", err)
+	}
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	reportStr := buf.String()
+
+	if !strings.Contains(reportStr, "Tamaño Descomprimido:") || !strings.Contains(reportStr, FormatSize(0)) {
+		t.Errorf("Reporte para archivo vacío legítimo debe mostrar '%s', obtenido:\n%s", FormatSize(0), reportStr)
+	}
+}
+
+
 
 
 

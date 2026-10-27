@@ -537,6 +537,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	elapsed := time.Since(startTime)
 
 	var realSize int64
+	var foundDiskFiles bool
 	for _, o := range outputs {
 		targetPath := o
 		fi, err := os.Lstat(targetPath)
@@ -547,6 +548,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 			}
 		}
 		if err == nil {
+			foundDiskFiles = true
 			if !fi.IsDir() {
 				realSize += fi.Size()
 			}
@@ -558,16 +560,19 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 			targetPath += ".iso"
 		}
 		if fi, err := os.Lstat(targetPath); err == nil && fi.IsDir() {
+			foundDiskFiles = true
 			realSize, _ = GetDirSize(targetPath)
 		}
 	}
 
 	uncompressedSize := realSize
-	if uncompressedSize == 0 {
-		uncompressedSize = needed
-	}
-	if uncompressedSize == 0 {
-		uncompressedSize = compressedSize * 4
+	if !foundDiskFiles {
+		if uncompressedSize == 0 {
+			uncompressedSize = needed
+		}
+		if uncompressedSize == 0 {
+			uncompressedSize = compressedSize * 4
+		}
 	}
 
 	if fp != nil {

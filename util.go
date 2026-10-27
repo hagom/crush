@@ -33,8 +33,9 @@ var (
 	rarOnce  sync.Once
 	rarCache string
 
-	logFile  *os.File
-	nullFile *os.File
+	logFile      *os.File
+	nullFile     *os.File
+	nullFileOnce sync.Once
 
 	logBuf         bytes.Buffer
 	logMu          sync.Mutex
@@ -675,6 +676,8 @@ func EstimateUncompressedSize(file string) int64 {
 						mult = 1024 * 1024
 					case "GIB", "GB", "G":
 						mult = 1024 * 1024 * 1024
+					case "TIB", "TB", "T":
+						mult = 1024 * 1024 * 1024 * 1024
 					}
 					sum += int64(fval * mult)
 				}
@@ -1100,13 +1103,13 @@ func augmentErr(cmd *exec.Cmd, err error) error {
 }
 
 func getNullFile() *os.File {
-	if nullFile == nil {
-		f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-		if err != nil {
-			return os.Stderr
+	nullFileOnce.Do(func() {
+		if f, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {
+			nullFile = f
+		} else {
+			nullFile = os.Stderr
 		}
-		nullFile = f
-	}
+	})
 	return nullFile
 }
 

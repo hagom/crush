@@ -34,7 +34,7 @@
 - Consumes:
   `Format`, `formatNames`, `hasTool`
 
-- [ ] **Step 1: Write the failing tests in `format_test.go`**
+- [x] **Step 1: Write the failing tests in `format_test.go`**
   - Test `ParseFormat("auto")` returns `Auto, nil`.
   - Test `DetectAutoFormat` for directories returns `SevenZ` (or `Zst`/`Gz` based on tools).
   - Test `DetectAutoFormat` for multimedia/compressed extensions (`.mp4`, `.zip`, `.jpg`) returns `Zst`.
@@ -42,18 +42,18 @@
   - Test `DetectAutoFormat` for unknown extension with text contents returns `Xz`.
   - Test `DetectAutoFormat` for unknown extension with binary/null bytes returns `Zst`.
 
-- [ ] **Step 2: Run tests to confirm failure (RED)**
+- [x] **Step 2: Run tests to confirm failure (RED)**
   - Run `go test -run TestDetectAutoFormat ./...`.
 
-- [ ] **Step 3: Implement `Auto` enum, `ParseFormat`, and `DetectAutoFormat` in `format.go` (GREEN)**
+- [x] **Step 3: Implement `Auto` enum, `ParseFormat`, and `DetectAutoFormat` in `format.go` (GREEN)**
   - Add `Auto Format = 14` in `Format` enum.
   - Add `"auto"` to `formatNames`.
   - Implement `DetectAutoFormat(path string) Format`.
 
-- [ ] **Step 4: Run tests to confirm passing (GREEN)**
+- [x] **Step 4: Run tests to confirm passing (GREEN)**
   - Run `go test -race -run TestDetectAutoFormat ./...`.
 
-- [ ] **Step 5: Refactor and commit**
+- [x] **Step 5: Refactor and commit**
   - Verify zero lint issues with `go vet ./...`.
   - Git commit: `feat(format): add Auto format enum and DetectAutoFormat heuristic`.
 
@@ -81,27 +81,27 @@
 - Consumes:
   `DetectAutoFormat`, `DynamicThreadPool`, `MaxEffectiveThreads`, `MemorySafeMaxThreads`, `FormatMaxThreads`, `ProgressTracker`
 
-- [ ] **Step 1: Write failing tests in `compress_test.go`**
+- [x] **Step 1: Write failing tests in `compress_test.go`**
   - Test `generateCompressionTasks` expands multi-format matrix (`-F gz,xz`) across multiple files into discrete tasks.
   - Test `generateCompressionTasks` resolves `-f auto` per file/directory based on content/type.
   - Test `TestHeterogeneousCompression_ConcurrentMatrix`: files compressed to multiple formats concurrently in single run.
   - Test `TestHeterogeneousCompression_KeepOrigSafety`: original file is only removed if all formats succeed and `KeepOrig` is false.
   - Test `TestHeterogeneousCompression_WorkerTitle`: `FileProgress` labels include format tag `[<fmt>]`.
 
-- [ ] **Step 2: Run tests to confirm failure (RED)**
+- [x] **Step 2: Run tests to confirm failure (RED)**
   - Run `go test -run TestHeterogeneousCompression ./...`.
 
-- [ ] **Step 3: Implement `CompressionTask`, `generateCompressionTasks`, and unified queue in `compress.go` (GREEN)**
+- [x] **Step 3: Implement `CompressionTask`, `generateCompressionTasks`, and unified queue in `compress.go` (GREEN)**
   - Define `CompressionTask`.
   - Implement task generator resolving `-f auto` and matrix `-F`.
   - Refactor `compressParallel` to process a slice of `CompressionTask` in a single concurrent pass.
   - Implement atomic reference counter `pendingTasks map[string]*atomic.Int32` and `failedFiles sync.Map` to safely delete originals only when all format tasks for that source file finish successfully.
   - Update `FileProgress` label to include `[<fmt>]`.
 
-- [ ] **Step 4: Run tests to confirm passing (GREEN)**
+- [x] **Step 4: Run tests to confirm passing (GREEN)**
   - Run `go test -race -run TestHeterogeneousCompression ./...`.
 
-- [ ] **Step 5: Refactor and commit**
+- [x] **Step 5: Refactor and commit**
   - Verify race conditions with `go test -race ./...`.
   - Git commit: `feat(compress): implement concurrent multi-format matrix and atomic KeepOrig cleanup`.
 
@@ -119,21 +119,21 @@
   `crush -c -F gz,xz,zst [files...]`
   `crush -c -F auto,xz [files...]`
 
-- [ ] **Step 1: Write test for CLI parsing of `-f auto` and `-F auto,xz`**
+- [x] **Step 1: Write test for CLI parsing of `-f auto` and `-F auto,xz`**
   - Verify `-f auto` sets `opts.Format = Auto`.
   - Verify `-F auto,xz` parses correctly into `opts.Formats = []Format{Auto, Xz}`.
 
-- [ ] **Step 2: Run test to confirm failure (RED)**
+- [x] **Step 2: Run test to confirm failure (RED)**
   - Run `go test -run TestCLIAutoFormat ./...`.
 
-- [ ] **Step 3: Update `main.go` and `printHelp()` (GREEN)**
+- [x] **Step 3: Update `main.go` and `printHelp()` (GREEN)**
   - Update format flag validation to allow `auto`.
   - Update help text with examples of `-f auto` and concurrent `-F`.
 
-- [ ] **Step 4: Run all tests to confirm passing (GREEN)**
+- [x] **Step 4: Run all tests to confirm passing (GREEN)**
   - Run `go test -race ./...`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   - Git commit: `feat(cli): wire -f auto and concurrent -F multi-format compression`.
 
 ---
@@ -145,29 +145,29 @@
 - Modify: `AGENTS.md`
 - Modify: `COMPRESOR.md`
 
-- [ ] **Step 1: Update `README.md`**
+- [x] **Step 1: Update `README.md`**
   - Document `-f auto` (adaptive intelligent format selection).
   - Document concurrent `-F fmt1,fmt2,...` matrix execution.
   - Add usage examples and clarify zero-idle CPU parallelism.
 
-- [ ] **Step 2: Update `AGENTS.md`**
+- [x] **Step 2: Update `AGENTS.md`**
   - Record the feature in "Estado actual" and conventions.
   - Document `DetectAutoFormat`, `CompressionTask`, and safe `KeepOrig` atomic ref counting.
 
-- [ ] **Step 3: Update `COMPRESOR.md`**
+- [x] **Step 3: Update `COMPRESOR.md`**
   - Document the architecture, LPT scheduling of mixed format tasks, and benchmarks/expectations.
 
-- [ ] **Step 4: Commit documentation**
+- [x] **Step 4: Commit documentation**
   - Git commit: `docs: document concurrent multi-format and adaptive auto compression`.
 
 ---
 
 ### Task 5: End-to-End Verification and Push
 
-- [ ] **Step 1: Run comprehensive tests and linting**
+- [x] **Step 1: Run comprehensive tests and linting**
   - `go test -race ./...`
   - `go vet ./...`
   - `go build -o crush .`
 
-- [ ] **Step 2: Push to remote repository**
+- [x] **Step 2: Push to remote repository**
   - `git push origin main`

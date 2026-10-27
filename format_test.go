@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -24,6 +26,8 @@ func TestParseFormat(t *testing.T) {
 		{"rar", Rar, false},
 		{"lz4", Lz4, false},
 		{"br", Br, false},
+		{"auto", Auto, false},
+		{"AUTO", Auto, false},
 		{"unknown", 0, true},
 		{"", 0, true},
 	}
@@ -519,5 +523,69 @@ func TestExtForItem(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("ExtForItem(%v, isDir=%v) = %q, want %q", tt.format, tt.isDir, got, tt.want)
 		}
+	}
+}
+
+func TestDetectAutoFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Directory
+	dirFmt := DetectAutoFormat(tmpDir)
+	if hasTool(sevenzBin()) {
+		if dirFmt != SevenZ {
+			t.Errorf("DetectAutoFormat(dir) = %v, want SevenZ", dirFmt)
+		}
+	} else if hasTool("zstd") {
+		if dirFmt != Zst {
+			t.Errorf("DetectAutoFormat(dir) = %v, want Zst", dirFmt)
+		}
+	} else {
+		if dirFmt != Gz {
+			t.Errorf("DetectAutoFormat(dir) = %v, want Gz", dirFmt)
+		}
+	}
+
+	// 2. Multimedia / pre-compressed
+	for _, ext := range []string{"movie.mp4", "song.flac", "photo.jpg", "archive.zip", "data.tar.gz", "video.mkv"} {
+		f := DetectAutoFormat(ext)
+		if f != Zst {
+			t.Errorf("DetectAutoFormat(%q) = %v, want Zst", ext, f)
+		}
+	}
+
+	// 3. Text / code / structured data
+	for _, ext := range []string{"main.go", "app.py", "notes.txt", "doc.json", "query.sql", "archive.tar"} {
+		f := DetectAutoFormat(ext)
+		if f != Xz {
+			t.Errorf("DetectAutoFormat(%q) = %v, want Xz", ext, f)
+		}
+	}
+
+	// 4. File without extension - plain text
+	txtFile := filepath.Join(tmpDir, "sample_text")
+	if err := os.WriteFile(txtFile, []byte("This is plain text with lines\nof readable ASCII code\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if f := DetectAutoFormat(txtFile); f != Xz {
+		t.Errorf("DetectAutoFormat(sample_text) = %v, want Xz", f)
+	}
+
+	// 5. File without extension - binary nulls
+	binFile := filepath.Join(tmpDir, "sample_bin")
+	binData := make([]byte, 512)
+	binData[0] = 0x7f
+	binData[1] = 'E'
+	binData[2] = 'L'
+	binData[3] = 'F'
+	if err := os.WriteFile(binFile, binData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if f := DetectAutoFormat(binFile); f != Zst {
+		t.Errorf("DetectAutoFormat(sample_bin) = %v, want Zst", f)
+	}
+
+	// 6. Unknown non-existent file without extension
+	if f := DetectAutoFormat("no_ext_file_nonexistent"); f != Zst {
+		t.Errorf("DetectAutoFormat(nonexistent) = %v, want Zst", f)
 	}
 }

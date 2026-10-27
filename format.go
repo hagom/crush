@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -22,6 +23,7 @@ const (
 	Rar
 	Lz4
 	Br
+	Auto
 )
 
 var formatNames = map[Format]string{
@@ -38,6 +40,7 @@ var formatNames = map[Format]string{
 	Rar:    "rar",
 	Lz4:    "lz4",
 	Br:     "br",
+	Auto:   "auto",
 }
 
 var FormatsByCompression = []Format{
@@ -105,6 +108,9 @@ func (fi FormatInfo) ArchiveBaseName(inputPath string) string {
 }
 
 func ExtForFormat(f Format) string {
+	if f == Auto {
+		return "auto"
+	}
 	if f.IsContainer() {
 		return f.String()
 	}
@@ -112,6 +118,9 @@ func ExtForFormat(f Format) string {
 }
 
 func ExtForItem(f Format, isDir bool) string {
+	if f == Auto {
+		return "auto"
+	}
 	if f.IsContainer() {
 		return f.String()
 	}
@@ -119,6 +128,81 @@ func ExtForItem(f Format, isDir bool) string {
 		return "tar." + f.String()
 	}
 	return f.String()
+}
+
+var mediaOrCompressedExts = map[string]bool{
+	".mp4": true, ".mkv": true, ".avi": true, ".mov": true, ".wmv": true, ".flv": true, ".webm": true,
+	".mp3": true, ".flac": true, ".aac": true, ".ogg": true, ".wav": true, ".m4a": true,
+	".jpg": true, ".jpeg": true, ".png": true, ".webp": true, ".gif": true,
+	".zip": true, ".gz": true, ".xz": true, ".bz2": true, ".bz3": true, ".zst": true, ".7z": true, ".rar": true,
+	".lz": true, ".lrz": true, ".lz4": true, ".br": true, ".tgz": true, ".txz": true, ".tbz2": true, ".tzst": true,
+	".iso": true, ".img": true, ".dmg": true,
+	".pdf": true, ".docx": true, ".xlsx": true, ".pptx": true,
+}
+
+var textOrCodeExts = map[string]bool{
+	".txt": true, ".log": true, ".csv": true, ".tsv": true, ".json": true, ".xml": true, ".html": true, ".htm": true,
+	".css": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
+	".c": true, ".cpp": true, ".h": true, ".hpp": true, ".go": true, ".rs": true, ".py": true, ".java": true,
+	".kt": true, ".cs": true, ".sh": true, ".bash": true, ".zsh": true,
+	".sql": true, ".md": true, ".yaml": true, ".yml": true, ".toml": true, ".ini": true, ".conf": true, ".cfg": true,
+	".bmp": true, ".svg": true, ".psd": true, ".ai": true,
+	".tar": true,
+}
+
+func DetectAutoFormat(path string) Format {
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		if hasTool(sevenzBin()) {
+			return SevenZ
+		}
+		if hasTool("zstd") {
+			return Zst
+		}
+		return Gz
+	}
+
+	lower := strings.ToLower(path)
+	for _, entry := range knownTarSuffixes {
+		if strings.HasSuffix(lower, entry.suffix) {
+			return Zst
+		}
+	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	if mediaOrCompressedExts[ext] {
+		return Zst
+	}
+	if textOrCodeExts[ext] {
+		return Xz
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return Zst
+	}
+	defer f.Close()
+
+	buf := make([]byte, 512)
+	n, err := f.Read(buf)
+	if err != nil || n == 0 {
+		return Zst
+	}
+	buf = buf[:n]
+
+	nullCount := 0
+	controlCount := 0
+	for _, b := range buf {
+		if b == 0x00 {
+			nullCount++
+		} else if b < 0x20 && b != '\n' && b != '\r' && b != '\t' {
+			controlCount++
+		}
+	}
+
+	if nullCount > 0 || float64(controlCount)/float64(n) > 0.10 {
+		return Zst
+	}
+	return Xz
 }
 
 func ParseFormat(s string) (Format, error) {

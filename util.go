@@ -49,6 +49,7 @@ type FileProgress struct {
 	Name                string
 	Size                int64
 	Current             atomic.Int64
+	uncompressedSize    atomic.Int64
 	hasExternalProgress atomic.Bool
 	status              string
 	start               time.Time
@@ -64,6 +65,19 @@ func (fp *FileProgress) HasExternalProgress() bool {
 
 func (fp *FileProgress) SetHasExternalProgress(b bool) {
 	fp.hasExternalProgress.Store(b)
+}
+
+func (fp *FileProgress) SetUncompressedSize(sz int64) {
+	if fp != nil {
+		fp.uncompressedSize.Store(sz)
+	}
+}
+
+func (fp *FileProgress) GetUncompressedSize() int64 {
+	if fp != nil {
+		return fp.uncompressedSize.Load()
+	}
+	return 0
 }
 
 func (fp *FileProgress) Status() string {
@@ -681,10 +695,12 @@ func EstimateUncompressedSize(file string) int64 {
 		}
 
 	case strings.HasSuffix(f, ".rar"):
-		if fi, err := os.Stat(file); err == nil && fi.Size() > 64*1024*1024 {
-			return fi.Size() * 3
+		tool := "7z"
+		if !hasTool("7z") {
+			tool = sevenzBin()
 		}
-		cmd := exec.Command(sevenzBin(), "l", "-slt", "--", file)
+		cmd := execCommand(tool, "l", "-slt", "-p-", "--", file)
+		cmd.Stdin = getNullFile()
 		out, _ := cmd.Output()
 		var sum int64
 		for _, line := range strings.Split(string(out), "\n") {

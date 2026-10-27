@@ -1054,6 +1054,7 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 	}
 
 	startTime := time.Now()
+	var totalOrigBytes, totalFinalBytes atomic.Int64
 
 	for i, task := range tasks {
 		wg.Add(1)
@@ -1117,6 +1118,14 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 						_, _ = WriteSHA256File(p)
 					}
 				}
+				totalOrigBytes.Add(t.Size)
+				var finalSize int64
+				for _, p := range append([]string{outPath}, globSplitParts(outPath)...) {
+					if info, err := os.Stat(p); err == nil {
+						finalSize += info.Size()
+					}
+				}
+				totalFinalBytes.Add(finalSize)
 				fp.SetStatus("done")
 			}
 
@@ -1166,6 +1175,13 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 		}
 		WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, ext, NC)
 		WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(tasks), NC)
+	}
+	origSize := totalOrigBytes.Load()
+	finalSize := totalFinalBytes.Load()
+	if origSize > 0 {
+		WriteLogf("%sTamaño Original:%s   %s%s%s\n", Blue, NC, Red, FormatSize(origSize), NC)
+		WriteLogf("%sTamaño Final:%s      %s%s%s\n", Blue, NC, Green, FormatSize(finalSize), NC)
+		WriteLogf("%sAhorro de espacio:%s %s%s%%%s\n", Blue, NC, Green, CalcPct(origSize, finalSize), NC)
 	}
 	WriteLogf("%sTiempo:%s            %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
 	WriteLogf("%sHilos:%s             %s%d total (distribución adaptativa LPT)%s\n", Blue, NC, Bold, totalCores, NC)

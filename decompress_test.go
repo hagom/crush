@@ -1883,6 +1883,114 @@ func TestDecompress_DeferredPasswordQueue(t *testing.T) {
 	}
 }
 
+func TestDecompressReportExactSizeFromDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	origFile := filepath.Join(tmpDir, "exact_test.txt")
+	data := []byte(strings.Repeat("Antigravity exact decompression test data! ", 1000)) // ~43 KB
+	if err := os.WriteFile(origFile, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	bz2File := filepath.Join(tmpDir, "exact_test.txt.bz2")
+	cmd := exec.Command("bzip2", "-c", origFile)
+	outF, err := os.Create(bz2File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outF
+	if err := cmd.Run(); err != nil {
+		outF.Close()
+		t.Fatalf("bzip2 falló: %v", err)
+	}
+	outF.Close()
+
+	outDir := filepath.Join(tmpDir, "extracted")
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+	decompErr := decompressFile(bz2File, opts, nil)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if decompErr != nil {
+		t.Fatalf("decompressFile falló: %v", decompErr)
+	}
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	reportStr := buf.String()
+
+	expectedSizeStr := FormatSize(int64(len(data)))
+	if !strings.Contains(reportStr, "Tamaño Descomprimido:") || !strings.Contains(reportStr, expectedSizeStr) {
+		t.Errorf("Reporte no contiene el tamaño exacto del archivo extraído (%s).\nReporte:\n%s", expectedSizeStr, reportStr)
+	}
+}
+
+func TestDecompressBatchUnifiedReport(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "batch1.txt")
+	f2 := filepath.Join(tmpDir, "batch2.txt")
+	d1 := []byte("Batch test content 1 " + strings.Repeat("ABC", 500))
+	d2 := []byte("Batch test content 2 " + strings.Repeat("XYZ", 800))
+	os.WriteFile(f1, d1, 0644)
+	os.WriteFile(f2, d2, 0644)
+
+	z1 := filepath.Join(tmpDir, "batch1.gz")
+	z2 := filepath.Join(tmpDir, "batch2.gz")
+	makeGz(t, f1, z1)
+	makeGz(t, f2, z2)
+
+	outDir := filepath.Join(tmpDir, "extracted")
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+	decompErr := DoDecompress([]string{z1, z2}, opts)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if decompErr != nil {
+		t.Fatalf("DoDecompress falló: %v", decompErr)
+	}
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	reportStr := buf.String()
+
+	if !strings.Contains(reportStr, "=== Reporte de Descompresión Paralela ===") {
+		t.Errorf("Reporte paralelo no fue encontrado.\nSalida:\n%s", reportStr)
+	}
+	if strings.Contains(reportStr, "=== Reporte de Descompresión ===") {
+		t.Errorf("No debe imprimirse reporte individual durante descompresión en lote.\nSalida:\n%s", reportStr)
+	}
+	totalUncompExpected := FormatSize(int64(len(d1) + len(d2)))
+	if !strings.Contains(reportStr, totalUncompExpected) {
+		t.Errorf("Reporte paralelo no contiene el tamaño total descomprimido esperado (%s).\nSalida:\n%s", totalUncompExpected, reportStr)
+	}
+}
+
+
 
 
 

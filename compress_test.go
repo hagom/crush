@@ -2257,3 +2257,55 @@ func TestHeterogeneousCompression_ProgressFormatting(t *testing.T) {
 		t.Errorf("expected progress label containing 'video.mp4 [zst]', got %v and %v", files[0].Name, files[1].Name)
 	}
 }
+
+func TestCompressParallelUnifiedReportSizeSavings(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	f2 := filepath.Join(tmpDir, "file2.txt")
+	d1 := []byte(strings.Repeat("Hello Parallel Compression 1 ", 300))
+	d2 := []byte(strings.Repeat("Hello Parallel Compression 2 ", 400))
+	os.WriteFile(f1, d1, 0644)
+	os.WriteFile(f2, d2, 0644)
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	opts := CompressOptions{
+		Format:    Gz,
+		Formats:   []Format{Gz},
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Parallel:  2,
+	}
+
+	_, compErr := DoCompress([]string{f1, f2}, opts)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if compErr != nil {
+		t.Fatalf("DoCompress falló: %v", compErr)
+	}
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	reportStr := buf.String()
+
+	if !strings.Contains(reportStr, "=== Reporte de Compresión Paralela ===") {
+		t.Fatalf("Reporte de compresión paralela no encontrado.\nSalida:\n%s", reportStr)
+	}
+	if !strings.Contains(reportStr, "Tamaño Original:") {
+		t.Errorf("Reporte no contiene 'Tamaño Original:'.\nSalida:\n%s", reportStr)
+	}
+	if !strings.Contains(reportStr, "Tamaño Final:") {
+		t.Errorf("Reporte no contiene 'Tamaño Final:'.\nSalida:\n%s", reportStr)
+	}
+	if !strings.Contains(reportStr, "Ahorro de espacio:") {
+		t.Errorf("Reporte no contiene 'Ahorro de espacio:'.\nSalida:\n%s", reportStr)
+	}
+}
+

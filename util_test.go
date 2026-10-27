@@ -661,6 +661,39 @@ func TestEstimateUncompressedSizeLz4Realistic(t *testing.T) {
 	}
 }
 
+func TestEstimateUncompressedSizeRarWithoutHack(t *testing.T) {
+	tmpDir := t.TempDir()
+	rarPath := filepath.Join(tmpDir, "large_file.rar")
+	f, err := os.Create(rarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Create a sparse file of 100 MB (>64 MB)
+	if err := f.Truncate(100 * 1024 * 1024); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	mockCalled := false
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		mockCalled = true
+		// Return a command that echos "Size = 45000000\n"
+		return exec.Command("echo", "Size = 45000000")
+	}
+
+	size := EstimateUncompressedSize(rarPath)
+	if !mockCalled {
+		t.Errorf("execCommand no fue llamado para archivo RAR >64MB (hack 3x presente)")
+	}
+	if size != 45000000 {
+		t.Errorf("EstimateUncompressedSize = %d, want 45000000", size)
+	}
+}
+
 func TestColoredMessages(t *testing.T) {
 	outBuf := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}

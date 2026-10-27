@@ -25,6 +25,7 @@ type DecompressOptions struct {
 	Progress    *ProgressTracker
 	Password    string
 	Filter      string
+	QuietReport bool
 }
 
 func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
@@ -286,6 +287,7 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 				defer func() { <-sem }()
 
 				fileOpts := opts
+				fileOpts.QuietReport = true
 				var th int
 				if len(preAlloc) == len(files) {
 					th = preAlloc[idx]
@@ -317,8 +319,29 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 			}
 		}
 
+		var totalCompressed, totalUncompressed int64
+		for i, fp := range fps {
+			if fp.Status() != "error" {
+				totalCompressed += archiveSizes[files[i]]
+				totalUncompressed += fp.GetUncompressedSize()
+			}
+		}
+
 		elapsed := time.Since(startTime)
-		WriteLogf("\n%sTiempo total: %v%s\n", Bold, elapsed.Round(time.Second), NC)
+
+		WriteLogf("\n")
+		WriteLogf("%s=== Reporte de Descompresión Paralela ===%s\n", Green, NC)
+		WriteLogf("%sArchivos:%s              %s%d%s\n", Blue, NC, Bold, len(files), NC)
+		WriteLogf("%sTamaño Comprimido:%s     %s%s%s\n", Blue, NC, Red, FormatSize(totalCompressed), NC)
+		WriteLogf("%sTamaño Descomprimido:%s  %s%s%s\n", Blue, NC, Green, FormatSize(totalUncompressed), NC)
+		WriteLogf("%sTiempo total:%s          %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
+		WriteLogf("%sHilos:%s                 %s%d total (distribución adaptativa LPT)%s\n", Blue, NC, Bold, totalCores, NC)
+		if errors > 0 {
+			WriteLogf("%sErrores:%s               %s%d%s\n", Blue, NC, Red, errors, NC)
+		} else {
+			WriteLogf("%s%s✓ Todos los archivos descomprimidos exitosamente%s\n", Green, Bold, NC)
+		}
+		WriteLogf("%s========================================%s\n", Green, NC)
 	}
 
 	return successes, errors
@@ -513,9 +536,30 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 
 	elapsed := time.Since(startTime)
 
-	uncompressedSize := needed
+	var realSize int64
+	for _, o := range outputs {
+		if fi, err := os.Lstat(o); err == nil {
+			if !fi.IsDir() {
+				realSize += fi.Size()
+			}
+		}
+	}
+	if realSize == 0 && len(outputs) == 1 {
+		if fi, err := os.Lstat(outputs[0]); err == nil && fi.IsDir() {
+			realSize, _ = GetDirSize(outputs[0])
+		}
+	}
+
+	uncompressedSize := realSize
+	if uncompressedSize == 0 {
+		uncompressedSize = needed
+	}
 	if uncompressedSize == 0 {
 		uncompressedSize = compressedSize * 4
+	}
+
+	if fp != nil {
+		fp.SetUncompressedSize(uncompressedSize)
 	}
 
 	if !opts.KeepOrig {
@@ -529,18 +573,21 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 			_ = os.Remove(parentDir)
 		}
 	}
-	var report strings.Builder
-	fmt.Fprintf(&report, "\n%s=== Reporte de Descompresión ===%s\n", Green, NC)
-	fmt.Fprintf(&report, "%sArchivo Origen:%s     %s%s%s\n", Blue, NC, Yellow, file, NC)
-	fmt.Fprintf(&report, "%sTamaño Comprimido:%s  %s%s%s\n", Blue, NC, Red, FormatSize(compressedSize), NC)
-	fmt.Fprintf(&report, "%sTamaño Descomprimido:%s %s%s%s\n", Blue, NC, Green, FormatSize(uncompressedSize), NC)
-	fmt.Fprintf(&report, "%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
-	fmt.Fprintf(&report, "%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file, opts.ThreadLimit), NC)
-	if len(parts) > 1 {
-		fmt.Fprintf(&report, "%sPorciones:%s          %s%d / %d partes%s\n", Blue, NC, Bold, len(parts), len(parts), NC)
+
+	if !opts.QuietReport {
+		var report strings.Builder
+		fmt.Fprintf(&report, "\n%s=== Reporte de Descompresión ===%s\n", Green, NC)
+		fmt.Fprintf(&report, "%sArchivo Origen:%s     %s%s%s\n", Blue, NC, Yellow, file, NC)
+		fmt.Fprintf(&report, "%sTamaño Comprimido:%s  %s%s%s\n", Blue, NC, Red, FormatSize(compressedSize), NC)
+		fmt.Fprintf(&report, "%sTamaño Descomprimido:%s %s%s%s\n", Blue, NC, Green, FormatSize(uncompressedSize), NC)
+		fmt.Fprintf(&report, "%sTiempo:%s             %s%v%s\n", Blue, NC, Bold, elapsed.Round(time.Second), NC)
+		fmt.Fprintf(&report, "%sHilos utilizados:%s   %s%d%s\n", Blue, NC, Bold, effectiveThreads(file, opts.ThreadLimit), NC)
+		if len(parts) > 1 {
+			fmt.Fprintf(&report, "%sPorciones:%s          %s%d / %d partes%s\n", Blue, NC, Bold, len(parts), len(parts), NC)
+		}
+		fmt.Fprintf(&report, "%s=============================%s\n", Green, NC)
+		WriteLog(report.String())
 	}
-	fmt.Fprintf(&report, "%s=============================%s\n", Green, NC)
-	WriteLog(report.String())
 
 	if opts.Progress != nil {
 		opts.Progress.FileDone(file)

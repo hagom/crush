@@ -1990,6 +1990,68 @@ func TestDecompressBatchUnifiedReport(t *testing.T) {
 	}
 }
 
+func TestDecompressIsoRenameReportMeasurement(t *testing.T) {
+	tmpDir := t.TempDir()
+	isoFile := filepath.Join(tmpDir, "gameimage")
+	// Must be at least 32769 + 5 bytes with CD001 at 32769
+	data := make([]byte, 40000)
+	copy(data[32769:], []byte("CD001"))
+	if err := os.WriteFile(isoFile, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	bz2File := filepath.Join(tmpDir, "gameimage.bz2")
+	cmd := exec.Command("bzip2", "-c", isoFile)
+	outF, err := os.Create(bz2File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outF
+	if err := cmd.Run(); err != nil {
+		outF.Close()
+		t.Fatal(err)
+	}
+	outF.Close()
+	_ = os.Remove(isoFile)
+
+	outDir := filepath.Join(tmpDir, "out")
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	opts := DecompressOptions{
+		OutputDir: outDir,
+		Force:     true,
+		KeepOrig:  true,
+	}
+	err = decompressFile(bz2File, opts, nil)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if err != nil {
+		t.Fatalf("decompressFile falló: %v", err)
+	}
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	reportStr := buf.String()
+
+	// The file on disk was renamed to gameimage.iso (40000 bytes = 39,1 KiB)
+	expectedSize := FormatSize(int64(len(data)))
+	if !strings.Contains(reportStr, expectedSize) {
+		t.Errorf("Reporte no contiene el tamaño medido del ISO renombrado (%s).\nReporte:\n%s", expectedSize, reportStr)
+	}
+	if _, statErr := os.Stat(filepath.Join(outDir, "gameimage.iso")); statErr != nil {
+		t.Errorf("El archivo no fue renombrado a .iso: %v", statErr)
+	}
+}
+
+
 
 
 

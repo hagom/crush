@@ -694,6 +694,104 @@ func TestEstimateUncompressedSizeRarWithoutHack(t *testing.T) {
 	}
 }
 
+func TestEstimateUncompressedSizeLrzCorrectParse(t *testing.T) {
+	tmpDir := t.TempDir()
+	lrzPath := filepath.Join(tmpDir, "sample.lrz")
+	if err := os.WriteFile(lrzPath, []byte("fake lrz"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		// Mock lrzip -i output where line ends in 100000
+		output := "Summary\n=======\n  Decompressed file size:         100000\n  Compressed file size: 500\n"
+		return exec.Command("echo", output)
+	}
+
+	size := EstimateUncompressedSize(lrzPath)
+	if size != 100000 {
+		t.Errorf("EstimateUncompressedSize para .lrz = %d, want 100000", size)
+	}
+}
+
+func TestEstimateUncompressedSizeZstLarge(t *testing.T) {
+	tmpDir := t.TempDir()
+	zstPath := filepath.Join(tmpDir, "large.zst")
+	if err := os.WriteFile(zstPath, []byte("fake zst"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		// Mock zstd -lv output with exact bytes in parentheses
+		output := "*** Zstandard CLI ***\nDecompressed Size: 1.18 MiB (1234567 B)\nRatio: 1.0\n"
+		return exec.Command("echo", output)
+	}
+
+	size := EstimateUncompressedSize(zstPath)
+	if size != 1234567 {
+		t.Errorf("EstimateUncompressedSize para .zst = %d, want 1234567", size)
+	}
+}
+
+func TestEstimateUncompressedSizeLzipNative(t *testing.T) {
+	tmpDir := t.TempDir()
+	lzPath := filepath.Join(tmpDir, "sample.lz")
+	if err := os.WriteFile(lzPath, []byte("fake lz"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		// Mock lzip -l output
+		output := "  uncompressed     compressed   saved  name\n       88888             66 -120.00%  sample.lz\n"
+		return exec.Command("echo", output)
+	}
+
+	size := EstimateUncompressedSize(lzPath)
+	if size != 88888 {
+		t.Errorf("EstimateUncompressedSize para .lz = %d, want 88888", size)
+	}
+}
+
+func TestEstimateUncompressedSize7zArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	szPath := filepath.Join(tmpDir, "sample.7z")
+	if err := os.WriteFile(szPath, []byte("fake 7z"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	passedP := false
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		for _, a := range args {
+			if a == "-p-" {
+				passedP = true
+			}
+		}
+		output := "Size = 55555\n"
+		return exec.Command("echo", output)
+	}
+
+	size := EstimateUncompressedSize(szPath)
+	if !passedP {
+		t.Errorf("EstimateUncompressedSize no pasó -p- a 7z (riesgo de hang en archivos con contraseña)")
+	}
+	if size != 55555 {
+		t.Errorf("EstimateUncompressedSize para .7z = %d, want 55555", size)
+	}
+}
+
+
+
 func TestColoredMessages(t *testing.T) {
 	outBuf := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}

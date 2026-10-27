@@ -182,10 +182,13 @@ func listSevenZipDetailed(file string, password string) ([]ArchiveMember, error)
 	args := []string{"l", "-slt", "-ba"}
 	if password != "" {
 		args = append(args, "-p"+password)
+	} else {
+		args = append(args, "-p-")
 	}
 	args = append(args, "--", file)
 
 	cmd := execCommand(sevenz, args...)
+	cmd.Stdin = getNullFile()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err

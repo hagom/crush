@@ -538,15 +538,27 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 
 	var realSize int64
 	for _, o := range outputs {
-		if fi, err := os.Lstat(o); err == nil {
+		targetPath := o
+		fi, err := os.Lstat(targetPath)
+		if err != nil && filepath.Ext(targetPath) == "" {
+			if isoFi, isoErr := os.Lstat(targetPath + ".iso"); isoErr == nil {
+				fi = isoFi
+				err = nil
+			}
+		}
+		if err == nil {
 			if !fi.IsDir() {
 				realSize += fi.Size()
 			}
 		}
 	}
 	if realSize == 0 && len(outputs) == 1 {
-		if fi, err := os.Lstat(outputs[0]); err == nil && fi.IsDir() {
-			realSize, _ = GetDirSize(outputs[0])
+		targetPath := outputs[0]
+		if _, err := os.Lstat(targetPath); err != nil && filepath.Ext(targetPath) == "" {
+			targetPath += ".iso"
+		}
+		if fi, err := os.Lstat(targetPath); err == nil && fi.IsDir() {
+			realSize, _ = GetDirSize(targetPath)
 		}
 	}
 

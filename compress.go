@@ -401,14 +401,6 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	}
 
 	canParallel = !singleItem && !opts.Combine
-	if opts.Progress == nil {
-		filesTotal := 1
-		if canParallel {
-			filesTotal = len(filteredFiles)
-		}
-		opts.Progress = NewProgressTracker(totalSize, filesTotal)
-	}
-	pt := opts.Progress
 
 	if canParallel {
 		tasks, err := generateCompressionTasks(filteredFiles, opts)
@@ -439,8 +431,11 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 		if opts.Progress == nil {
 			opts.Progress = NewProgressTracker(totalSize, len(tasks))
+		} else {
+			opts.Progress.total = totalSize
+			opts.Progress.filesTotal = len(tasks)
 		}
-		pt = opts.Progress
+		pt := opts.Progress
 
 		hasMixedFormats := false
 		if len(tasks) > 0 {
@@ -481,6 +476,11 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		outPaths, err = compressParallelTasks(tasks, opts, sizeCache)
 		return outPaths, err
 	}
+
+	if opts.Progress == nil {
+		opts.Progress = NewProgressTracker(totalSize, 1)
+	}
+	pt := opts.Progress
 
 	outPath = calcOutPath()
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {

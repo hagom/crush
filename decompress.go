@@ -40,6 +40,43 @@ func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
 	return decompCmd.Run()
 }
 
+func estimateFileNeeded(file string, archiveSize int64) int64 {
+	var sz int64
+	if s := EstimateUncompressedSize(file); s > 0 {
+		sz = s
+	} else {
+		sz = archiveSize * 3
+	}
+	parts := findSplitParts(file)
+	if len(parts) > 1 && sz < archiveSize {
+		sz = archiveSize * 4
+	}
+	return sz * 110 / 100
+}
+
+// SelectFeasibleWave selecciona un subconjunto de archivos de pending cuyos requerimientos
+// de espacio calculados mediante neededEstimator no superen availBytes.
+// Devuelve los archivos seleccionados para la tanda (wave) y los archivos restantes (remaining).
+func SelectFeasibleWave(pending []string, availBytes int64, neededEstimator func(string) int64) (wave []string, remaining []string) {
+	if len(pending) == 0 {
+		return nil, nil
+	}
+	var currentNeeded int64
+	for _, f := range pending {
+		req := neededEstimator(f)
+		if req <= 0 {
+			req = 1
+		}
+		if currentNeeded+req <= availBytes {
+			wave = append(wave, f)
+			currentNeeded += req
+		} else {
+			remaining = append(remaining, f)
+		}
+	}
+	return wave, remaining
+}
+
 func DoDecompress(files []string, opts DecompressOptions) error {
 	if len(files) == 0 {
 		return fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
@@ -105,61 +142,129 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 	archiveSizes := SortByLPT(allFiles, TotalArchiveSize)
 
-	neededByDir := make(map[string]int64)
+	filesByDir := make(map[string][]string)
 	for _, f := range allFiles {
 		targetDir := ResolveDecompressDir(f, opts.OutputDir)
-		var sz int64
-		if s := EstimateUncompressedSize(f); s > 0 {
-			sz = s
-		} else {
-			sz = archiveSizes[f] * 3
-		}
-		neededByDir[targetDir] += sz
+		filesByDir[targetDir] = append(filesByDir[targetDir], f)
 	}
-	for targetDir, needed := range neededByDir {
-		if needed > 0 {
-			if err := CheckDiskSpace(needed*110/100, targetDir, "descomprimir"); err != nil {
-				return err
+
+	var totalSuccesses, totalErrors int
+	var totalSkipped []string
+
+	for targetDir, dirFiles := range filesByDir {
+		neededEstimator := func(f string) int64 {
+			return estimateFileNeeded(f, archiveSizes[f])
+		}
+
+		var totalNeeded int64
+		var minNeeded int64 = -1
+		for _, f := range dirFiles {
+			req := neededEstimator(f)
+			totalNeeded += req
+			if minNeeded < 0 || req < minNeeded {
+				minNeeded = req
+			}
+		}
+
+		avail := getDiskAvail(targetDir)
+
+		if avail <= 0 || totalNeeded <= avail {
+			// FAST PATH: Capacidad suficiente para todo el lote
+			var readyFiles, deferredFiles []string
+			for _, f := range dirFiles {
+				if FileRequiresInteractivePassword(f, opts.Password) {
+					deferredFiles = append(deferredFiles, f)
+				} else {
+					readyFiles = append(readyFiles, f)
+				}
+			}
+
+			if len(readyFiles) > 0 {
+				if len(deferredFiles) > 0 {
+					WriteLogf("%s[Fase 1/2] Descomprimiendo %d archivo(s) listos en paralelo...%s\n", Bold, len(readyFiles), NC)
+					WriteLogf("  (%d archivo(s) protegidos diferidos para atención posterior)\n\n", len(deferredFiles))
+				}
+				s, e := decompressBatch(readyFiles, archiveSizes, opts)
+				totalSuccesses += s
+				totalErrors += e
+			}
+
+			if len(deferredFiles) > 0 {
+				if len(readyFiles) > 0 {
+					WriteLogf("\n%s──────────────────────────────────────────────────%s\n", Blue, NC)
+					WriteLogf("%s[Fase 2/2] Procesando %d archivo(s) protegidos con contraseña...%s\n\n", Bold, len(deferredFiles), NC)
+				}
+				for _, f := range deferredFiles {
+					defOpts := opts
+					defOpts.Progress = nil
+					s, e := decompressBatch([]string{f}, archiveSizes, defOpts)
+					totalSuccesses += s
+					totalErrors += e
+				}
+			}
+		} else {
+			// Espacio disponible menor al total requerido: evaluar tandas adaptativas
+			if minNeeded > avail {
+				return CheckDiskSpace(minNeeded, targetDir, "descomprimir")
+			}
+
+			WriteLogf("%sEspacio en disco disponible (%s) menor al total requerido (%s).%s\n", Yellow, FormatSize(avail), FormatSize(totalNeeded), NC)
+			WriteLogf("%sActivando descompresión adaptativa por tandas según capacidad...%s\n\n", Yellow, NC)
+
+			remaining := append([]string(nil), dirFiles...)
+			waveNum := 0
+			for len(remaining) > 0 {
+				curAvail := getDiskAvail(targetDir)
+				wave, nextRemaining := SelectFeasibleWave(remaining, curAvail, neededEstimator)
+				if len(wave) == 0 {
+					totalSkipped = append(totalSkipped, remaining...)
+					break
+				}
+				waveNum++
+				var waveNeeded int64
+				for _, wf := range wave {
+					waveNeeded += neededEstimator(wf)
+				}
+
+				WriteLogf("%s[Tanda %d] Espacio libre: %s. Procesando %d archivo(s) (requiere %s)...%s\n",
+					Bold, waveNum, FormatSize(curAvail), len(wave), FormatSize(waveNeeded), NC)
+
+				var waveReady, waveDeferred []string
+				for _, wf := range wave {
+					if FileRequiresInteractivePassword(wf, opts.Password) {
+						waveDeferred = append(waveDeferred, wf)
+					} else {
+						waveReady = append(waveReady, wf)
+					}
+				}
+
+				if len(waveReady) > 0 {
+					s, e := decompressBatch(waveReady, archiveSizes, opts)
+					totalSuccesses += s
+					totalErrors += e
+				}
+
+				if len(waveDeferred) > 0 {
+					for _, wf := range waveDeferred {
+						defOpts := opts
+						defOpts.Progress = nil
+						s, e := decompressBatch([]string{wf}, archiveSizes, defOpts)
+						totalSuccesses += s
+						totalErrors += e
+					}
+				}
+
+				remaining = nextRemaining
 			}
 		}
 	}
 
-	var readyFiles []string
-	var deferredFiles []string
-
-	for _, f := range allFiles {
-		if FileRequiresInteractivePassword(f, opts.Password) {
-			deferredFiles = append(deferredFiles, f)
-		} else {
-			readyFiles = append(readyFiles, f)
-		}
-	}
-
-	var totalSuccesses, totalErrors int
-
-	// Fase 1: Descompresión de archivos listos (sin clave requerida o con clave en registro)
-	if len(readyFiles) > 0 {
-		if len(deferredFiles) > 0 {
-			WriteLogf("%s[Fase 1/2] Descomprimiendo %d archivo(s) listos en paralelo...%s\n", Bold, len(readyFiles), NC)
-			WriteLogf("  (%d archivo(s) protegidos diferidos para atención posterior)\n\n", len(deferredFiles))
-		}
-		s, e := decompressBatch(readyFiles, archiveSizes, opts)
-		totalSuccesses += s
-		totalErrors += e
-	}
-
-	// Fase 2: Descompresión de archivos protegidos que requieren contraseña interactiva
-	if len(deferredFiles) > 0 {
-		if len(readyFiles) > 0 {
-			WriteLogf("\n%s──────────────────────────────────────────────────%s\n", Blue, NC)
-			WriteLogf("%s[Fase 2/2] Procesando %d archivo(s) protegidos con contraseña...%s\n\n", Bold, len(deferredFiles), NC)
-		}
-		for _, f := range deferredFiles {
-			defOpts := opts
-			defOpts.Progress = nil
-			s, e := decompressBatch([]string{f}, archiveSizes, defOpts)
-			totalSuccesses += s
-			totalErrors += e
+	if len(totalSkipped) > 0 {
+		WriteLogf("\n%s⚠ %d archivo(s) no se pudieron descomprimir por espacio insuficiente en disco:%s\n",
+			Yellow, len(totalSkipped), NC)
+		for _, f := range totalSkipped {
+			req := estimateFileNeeded(f, archiveSizes[f])
+			WriteLogf("  • %s (requiere %s)\n", f, FormatSize(req))
 		}
 	}
 
@@ -167,6 +272,12 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 	if totalErrors > 0 {
 		WriteLogf("%sCompletado con %d errores, %d exitosos%s\n", Yellow, totalErrors, totalSuccesses, NC)
 		return fmt.Errorf("%d error(es) durante la descompresión", totalErrors)
+	}
+	if len(totalSkipped) > 0 {
+		if totalSuccesses > 0 {
+			WriteLogf("%sCompletado: %d archivo(s) descomprimidos exitosamente, %d omitido(s) por falta de espacio%s\n", Yellow, totalSuccesses, len(totalSkipped), NC)
+		}
+		return fmt.Errorf("%d archivo(s) omitidos por falta de espacio en disco", len(totalSkipped))
 	}
 	WriteLogf("%s✓ Descompresión completada (%d archivo(s))%s\n", Green, totalSuccesses, NC)
 	return nil
@@ -1101,12 +1212,16 @@ func FindDecompressibleFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-func PromptDecompressAll(r io.Reader, w io.Writer, files []string) (bool, error) {
+func PromptDecompressAll(r io.Reader, w io.Writer, files []string, dir ...string) (bool, error) {
 	if len(files) == 0 {
 		return false, nil
 	}
 
-	fmt.Fprintf(w, "%sArchivos comprimidos detectados en el directorio actual (%d):%s\n", Bold, len(files), NC)
+	dirMsg := "en el directorio actual"
+	if len(dir) > 0 && dir[0] != "" && dir[0] != "." {
+		dirMsg = fmt.Sprintf("en '%s'", dir[0])
+	}
+	fmt.Fprintf(w, "%sArchivos comprimidos detectados %s (%d):%s\n", Bold, dirMsg, len(files), NC)
 	for _, f := range files {
 		sizeStr := ""
 		parts := findSplitParts(f)

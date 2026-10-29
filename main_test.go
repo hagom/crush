@@ -245,6 +245,44 @@ func TestMainDecompressScanConfirm(t *testing.T) {
 	}
 }
 
+func TestMainDecompressScanDirectoryArg(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "crush_bin")
+	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build falló: %v, salida: %s", err, string(out))
+	}
+
+	tmpDir := t.TempDir()
+	txtPath := filepath.Join(tmpDir, "hello.txt")
+	if err := os.WriteFile(txtPath, []byte("contenido de prueba directorio"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tarPath := filepath.Join(tmpDir, "hello.tar")
+	cmdTar := exec.Command("tar", "-cf", tarPath, "-C", tmpDir, "hello.txt")
+	if err := cmdTar.Run(); err != nil {
+		t.Skip("tar no disponible para test")
+	}
+	os.Remove(txtPath)
+
+	// Ejecutar crush -d <directorio> desde otro directorio
+	cmd := exec.Command(binPath, "-d", tmpDir)
+	cmd.Env = append(os.Environ(), "CRUSH_LOCK_FILE="+filepath.Join(tmpDir, "test.lock"))
+	cmd.Stdin = strings.NewReader("s\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("crush -d <dir> confirmado falló: %v, salida: %s", err, string(out))
+	}
+
+	if !strings.Contains(string(out), tmpDir) {
+		t.Errorf("Salida debe mencionar el directorio escaneado, obtenida:\n%s", string(out))
+	}
+
+	// Verificar que hello.txt fue extraído en el directorio
+	if _, err := os.Stat(txtPath); err != nil {
+		t.Errorf("archivo esperado %s no fue extraído tras confirmación: %v, salida: %s", txtPath, err, string(out))
+	}
+}
+
+
 func TestMainColoredWarningsAndErrors(t *testing.T) {
 	binPath := filepath.Join(t.TempDir(), "crush_bin")
 	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {

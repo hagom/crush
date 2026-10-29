@@ -471,6 +471,8 @@ func CalcPct(orig, final int64) string {
 
 // --- Disk space ---
 
+var getDiskAvail = GetAvailBytes
+
 func GetAvailBytes(dir string) int64 {
 	if dir == "" {
 		dir = "."
@@ -517,7 +519,7 @@ func GetAvailBytes(dir string) int64 {
 }
 
 func CheckDiskSpace(needed int64, dir string, op string) error {
-	avail := GetAvailBytes(dir)
+	avail := getDiskAvail(dir)
 	if avail < needed {
 		delta := needed - avail
 		return fmt.Errorf("Espacio insuficiente para %s: libera %s. Necesario: %s, Disponible: %s",

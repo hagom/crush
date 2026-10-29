@@ -146,8 +146,17 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 504 tests nativos pasando con race detector (-race). ~17200 líneas. 0 bugs conocidos.
+- Go: migración completa. 518 tests nativos pasando con race detector (-race). ~17500 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Actualización a Go 1.27 y Flujo CI:
+    - **Go 1.27 en `go.mod` y CI Actions:** Actualización del estándar del lenguaje en `go.mod` y en la matriz de pruebas de `.github/workflows/ci.yml`, aprovechando la semántica de variables de bucle por iteración (seguridad en goroutines concurrentes), optimizaciones del runtime scheduler y Swiss Tables en mapas.
+  - Descompresión Adaptativa por Capacidad y Detección de Directorios:
+    - **Descompresión Adaptativa por Tandas (Capacity-Aware Waves en `decompress.go`):** Erradicación del fallo prematuro por espacio en disco al descomprimir lotes (`crush -d` o `crush -d <dir>`). Cuando el espacio libre disponible en disco es inferior a la suma total de todos los archivos del lote pero suficiente para procesar subconjuntos:
+      - `SelectFeasibleWave` selecciona de forma óptima los archivos cuyos requerimientos de espacio (con margen de seguridad del 10%) caben holgadamente en el almacenamiento libre actual.
+      - Al finalizar cada tanda, con la eliminación automática de los archivos comprimidos originales (`!opts.KeepOrig`, comportamiento por omisión) o el espacio liberado, `getDiskAvail` mide el almacenamiento real en disco en tiempo real.
+      - Se procesan iterativamente las tandas subsiguientes hasta descomprimir todos los archivos posibles.
+      - Si algunos archivos no pueden descomprimirse por falta física de espacio, se reporta con precisión qué archivos concluyeron con éxito y cuáles quedaron pendientes indicando el espacio faltante, en vez de abortar toda la operación.
+    - **Soporte de Argumentos de Directorio en `crush -d <dir>`:** Detección automática al pasar una carpeta como argumento a `crush -d`. Invoca `FindDecompressibleFiles(dir)`, presenta el listado de archivos detectados con sus tamaños y solicita confirmación interactiva mediante `PromptDecompressAll(r, w, files, dir)`, extrayendo de forma idéntica a ejecutar el comando dentro de dicha carpeta.
   - Registro Inteligente y Reutilización Automática de Contraseñas (`passwords.go`):
     - **Reutilización y Caché de Sesión Zero-Flags:** Al descomprimir (`crush -d`), si los archivos están protegidos por contraseña, `crush` prueba automáticamente la última clave válida usada en la sesión y las contraseñas registradas en `~/.config/crush/passwords.txt` (con permisos seguros `0600`). Si ninguna coincide, solicita la contraseña en terminal **una sola vez**, la guarda en el historial y la propaga automáticamente a los demás archivos del lote sin interrumpir al usuario.
     - **Soporte Heterogéneo y Resiliencia:** Capacidad para procesar lotes con claves distintas o mixtas (con/sin clave), verificación rápida (*zero-extraction test* <30ms) y opción de omitir (*skip*) con Enter para no frenar la descompresión de los demás archivos.

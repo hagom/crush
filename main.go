@@ -492,22 +492,35 @@ func main() {
 			}
 		}
 	}
+	targetDecompDir := "."
+	isDecompDirArg := false
+	if len(files) == 1 && *decompressFlag {
+		if st, err := os.Stat(files[0]); err == nil && st.IsDir() {
+			targetDecompDir = files[0]
+			isDecompDirArg = true
+		}
+	}
+
 	opMode := *compressFlag || *decompressFlag || hasA || *listFlag || *readFlag || *testFlag || *verifyFlag
 	if *watchDir != "" {
 		// Modo watcher: los archivos se procesan según se detectan en el directorio
 	} else if len(files) == 0 && stdinIsPipe && *formatStr != "" && (*compressFlag || *decompressFlag) {
 		// Read from stdin pipe
-	} else if len(files) == 0 && *decompressFlag {
-		found, err := FindDecompressibleFiles(".")
+	} else if (len(files) == 0 || isDecompDirArg) && *decompressFlag {
+		found, err := FindDecompressibleFiles(targetDecompDir)
 		if err != nil {
 			WriteError("buscando archivos comprimidos: %v", err)
 			os.Exit(1)
 		}
 		if len(found) == 0 {
-			WriteInfo("No se encontraron archivos comprimidos en el directorio actual.")
+			if isDecompDirArg {
+				WriteInfo("No se encontraron archivos comprimidos en el directorio '%s'.", targetDecompDir)
+			} else {
+				WriteInfo("No se encontraron archivos comprimidos en el directorio actual.")
+			}
 			return
 		}
-		confirmed, err := PromptDecompressAll(os.Stdin, os.Stdout, found)
+		confirmed, err := PromptDecompressAll(os.Stdin, os.Stdout, found, targetDecompDir)
 		if err != nil || !confirmed {
 			if !confirmed {
 				WriteInfo("Operación cancelada.")

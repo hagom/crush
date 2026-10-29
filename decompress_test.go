@@ -2094,6 +2094,195 @@ func TestDecompressFile_ZeroByteLegitimateFile(t *testing.T) {
 	}
 }
 
+func TestSelectFeasibleWave(t *testing.T) {
+	fileNeeds := map[string]int64{
+		"big.tar.gz":   1000,
+		"med.tar.gz":   500,
+		"small.tar.gz": 200,
+	}
+	estimator := func(f string) int64 {
+		return fileNeeds[f]
+	}
+
+	tests := []struct {
+		name          string
+		pending       []string
+		availBytes    int64
+		wantWave      []string
+		wantRemaining []string
+	}{
+		{
+			name:          "todos caben",
+			pending:       []string{"big.tar.gz", "med.tar.gz", "small.tar.gz"},
+			availBytes:    2000,
+			wantWave:      []string{"big.tar.gz", "med.tar.gz", "small.tar.gz"},
+			wantRemaining: nil,
+		},
+		{
+			name:          "solo cabe el primero",
+			pending:       []string{"big.tar.gz", "med.tar.gz", "small.tar.gz"},
+			availBytes:    1100,
+			wantWave:      []string{"big.tar.gz"},
+			wantRemaining: []string{"med.tar.gz", "small.tar.gz"},
+		},
+		{
+			name:          "el primero no cabe pero los chicos si",
+			pending:       []string{"big.tar.gz", "med.tar.gz", "small.tar.gz"},
+			availBytes:    800,
+			wantWave:      []string{"med.tar.gz", "small.tar.gz"},
+			wantRemaining: []string{"big.tar.gz"},
+		},
+		{
+			name:          "ninguno cabe",
+			pending:       []string{"big.tar.gz", "med.tar.gz", "small.tar.gz"},
+			availBytes:    100,
+			wantWave:      nil,
+			wantRemaining: []string{"big.tar.gz", "med.tar.gz", "small.tar.gz"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wave, remaining := SelectFeasibleWave(tc.pending, tc.availBytes, estimator)
+			if len(wave) != len(tc.wantWave) {
+				t.Fatalf("wave len mismatch: got %v, want %v", wave, tc.wantWave)
+			}
+			for i := range wave {
+				if wave[i] != tc.wantWave[i] {
+					t.Errorf("wave[%d] mismatch: got %s, want %s", i, wave[i], tc.wantWave[i])
+				}
+			}
+			if len(remaining) != len(tc.wantRemaining) {
+				t.Fatalf("remaining len mismatch: got %v, want %v", remaining, tc.wantRemaining)
+			}
+			for i := range remaining {
+				if remaining[i] != tc.wantRemaining[i] {
+					t.Errorf("remaining[%d] mismatch: got %s, want %s", i, remaining[i], tc.wantRemaining[i])
+				}
+			}
+		})
+	}
+}
+
+func TestPromptDecompressAll_CustomDir(t *testing.T) {
+	var buf bytes.Buffer
+	in := strings.NewReader("s\n")
+	files := []string{"foo.zip", "bar.tar.gz"}
+	ok, err := PromptDecompressAll(in, &buf, files, "/baul/Descargas")
+	if err != nil || !ok {
+		t.Fatalf("PromptDecompressAll falló: ok=%v, err=%v", ok, err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Archivos comprimidos detectados en '/baul/Descargas' (2):") {
+		t.Errorf("Salida no contiene ruta personalizada esperada, obtenido:\n%s", out)
+	}
+}
+
+func TestDecompress_CapacityAwareWaves_Success(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	f2 := filepath.Join(tmpDir, "file2.txt")
+	os.WriteFile(f1, []byte("contenido del archivo numero uno"), 0644)
+	os.WriteFile(f2, []byte("contenido del archivo numero dos"), 0644)
+
+	gz1 := filepath.Join(tmpDir, "file1.txt.gz")
+	gz2 := filepath.Join(tmpDir, "file2.txt.gz")
+	cmd1 := exec.Command("gzip", "-k", f1)
+	if err := cmd1.Run(); err != nil {
+		t.Skip("gzip no disponible")
+	}
+	cmd2 := exec.Command("gzip", "-k", f2)
+	_ = cmd2.Run()
+
+	os.Remove(f1)
+	os.Remove(f2)
+
+	st1, _ := os.Stat(gz1)
+	req1 := estimateFileNeeded(gz1, st1.Size())
+
+	oldAvail := getDiskAvail
+	defer func() { getDiskAvail = oldAvail }()
+	getDiskAvail = func(dir string) int64 {
+		return req1 * 13 / 10
+	}
+
+	opts := DecompressOptions{
+		OutputDir: tmpDir,
+		KeepOrig:  false,
+		Force:     true,
+	}
+
+	err := DoDecompress([]string{gz1, gz2}, opts)
+	if err != nil {
+		t.Fatalf("DoDecompress falló: %v", err)
+	}
+
+	if _, err := os.Stat(f1); err != nil {
+		t.Errorf("file1.txt no fue extraído: %v", err)
+	}
+	if _, err := os.Stat(f2); err != nil {
+		t.Errorf("file2.txt no fue extraído: %v", err)
+	}
+}
+
+func TestDecompress_CapacityAwareWaves_PartialSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	f2 := filepath.Join(tmpDir, "file2.txt")
+	os.WriteFile(f1, []byte("archivo uno"), 0644)
+	os.WriteFile(f2, []byte("archivo dos con mas contenido para que pese mas"), 0644)
+
+	gz1 := filepath.Join(tmpDir, "file1.txt.gz")
+	gz2 := filepath.Join(tmpDir, "file2.txt.gz")
+	if err := exec.Command("gzip", "-k", f1).Run(); err != nil {
+		t.Skip("gzip no disponible")
+	}
+	_ = exec.Command("gzip", "-k", f2).Run()
+
+	os.Remove(f1)
+	os.Remove(f2)
+
+	st1, _ := os.Stat(gz1)
+	req1 := estimateFileNeeded(gz1, st1.Size())
+
+	oldAvail := getDiskAvail
+	defer func() { getDiskAvail = oldAvail }()
+
+	calls := 0
+	getDiskAvail = func(dir string) int64 {
+		calls++
+		if calls <= 3 {
+			return req1 * 12 / 10
+		}
+		return 5
+	}
+
+	opts := DecompressOptions{
+		OutputDir: tmpDir,
+		KeepOrig:  false,
+		Force:     true,
+	}
+
+	err := DoDecompress([]string{gz1, gz2}, opts)
+	if err == nil {
+		t.Fatalf("DoDecompress debió reportar error de archivos omitidos")
+	}
+	if !strings.Contains(err.Error(), "omitidos por falta de espacio") {
+		t.Errorf("Mensaje de error inesperado: %v", err)
+	}
+
+	if _, err := os.Stat(f1); err != nil {
+		t.Errorf("file1.txt debió extraerse con éxito: %v", err)
+	}
+	if _, err := os.Stat(f2); err == nil {
+		t.Errorf("file2.txt no debió extraerse porque no había espacio")
+	}
+}
+
+
+
 
 
 

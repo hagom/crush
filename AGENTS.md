@@ -146,8 +146,12 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 518 tests nativos pasando con race detector (-race). ~17500 líneas. 0 bugs conocidos.
+- Go: migración completa. 523 tests nativos pasando con race detector (-race). ~17600 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Detección Automática de Entropía Previa (Shannon Entropy):
+    - **Análisis Instantáneo de Redundancia de Cabecera (`CalculateShannonEntropy` / `IsHighEntropyFile` en `format.go`):** Inspección de hasta 64 KiB de cabecera en $<0.05$ ms calculando la entropía en bits por byte ($H = -\sum p_i \log_2 p_i$). Si $H \ge 7.90$ b/B en muestras $\ge 4$ KiB, detecta de forma certera datos incompresibles (archivos ya comprimidos o cifrados) sin importar su extensión.
+    - **Asignación Rápida en `-f auto`:** En modo adaptativo inteligente, si el archivo presenta alta entropía, selecciona automáticamente `lz4` ultrarrápido (o `zstd` como fallback) emitiendo el aviso: `ℹ 'archivo' ya parece estar comprimido; usando compresión rápida (lz4).`
+    - **Advertencia Preventiva en Formatos Forzados:** Si el usuario fuerza un formato pesado (`-f xz`, `-f 7z`, etc.) sobre un archivo incompresible, emite una advertencia preventiva inmediata: `⚠ 'archivo' ya parece estar comprimido o cifrado; la compresión apenas reducirá su tamaño.`, erradicando el desperdicio de CPU y desconcierto del usuario.
   - Actualización a Go 1.27 y Flujo CI:
     - **Go 1.27 en `go.mod` y CI Actions:** Actualización del estándar del lenguaje en `go.mod` y en la matriz de pruebas de `.github/workflows/ci.yml`, aprovechando la semántica de variables de bucle por iteración (seguridad en goroutines concurrentes), optimizaciones del runtime scheduler y Swiss Tables en mapas.
   - Descompresión Adaptativa por Capacidad y Detección de Directorios:

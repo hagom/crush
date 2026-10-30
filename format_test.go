@@ -588,4 +588,110 @@ func TestDetectAutoFormat(t *testing.T) {
 	if f := DetectAutoFormat("no_ext_file_nonexistent"); f != Zst {
 		t.Errorf("DetectAutoFormat(nonexistent) = %v, want Zst", f)
 	}
+
+	// 7. Unknown file without extension - high entropy (pre-compressed or random)
+	randomFile := filepath.Join(tmpDir, "sample_random")
+	rndData := make([]byte, 65536)
+	for i := range rndData {
+		rndData[i] = byte((i * 1103515245 + 12345) & 0xFF) // LCG generator con distribución uniforme
+	}
+	if err := os.WriteFile(randomFile, rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	wantFmt := Lz4
+	if !hasTool("lz4") {
+		wantFmt = Zst
+	}
+	if f := DetectAutoFormat(randomFile); f != wantFmt {
+		t.Errorf("DetectAutoFormat(sample_random) = %v, want %v", f, wantFmt)
+	}
 }
+
+func TestCalculateShannonEntropy(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      []byte
+		wantMin   float64
+		wantMax   float64
+		exactZero bool
+	}{
+		{
+			name:      "datos vacíos",
+			data:      nil,
+			exactZero: true,
+		},
+		{
+			name:      "todos bytes idénticos (ceros)",
+			data:      make([]byte, 1024),
+			exactZero: true,
+		},
+		{
+			name: "uniforme exacto 256 bytes",
+			data: func() []byte {
+				b := make([]byte, 256)
+				for i := 0; i < 256; i++ {
+					b[i] = byte(i)
+				}
+				return b
+			}(),
+			wantMin: 7.9999,
+			wantMax: 8.0001,
+		},
+		{
+			name: "texto plano repetitivo",
+			data: []byte("este es un texto de prueba que se repite una y otra vez para verificar entropia baja"),
+			wantMin: 3.0,
+			wantMax: 4.8,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := CalculateShannonEntropy(tc.data)
+			if tc.exactZero {
+				if h != 0.0 {
+					t.Errorf("esperado 0.0, obtenido %f", h)
+				}
+			} else {
+				if h < tc.wantMin || h > tc.wantMax {
+					t.Errorf("entropía %f fuera de rango [%f, %f]", h, tc.wantMin, tc.wantMax)
+				}
+			}
+		})
+	}
+}
+
+func TestIsHighEntropyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Archivo pequeño (<4096 bytes) -> debe retornar false
+	smallFile := filepath.Join(tmpDir, "small.bin")
+	os.WriteFile(smallFile, []byte{1, 2, 3, 4}, 0644)
+	if IsHighEntropyFile(smallFile) {
+		t.Errorf("archivo pequeño no debe ser detectado como alta entropía")
+	}
+
+	// 2. Archivo de texto plano (64 KiB) -> false
+	txtFile := filepath.Join(tmpDir, "text.txt")
+	txtData := make([]byte, 65536)
+	copy(txtData, "Texto legible y estructurado repetido. ")
+	for i := 38; i < len(txtData); i++ {
+		txtData[i] = txtData[i%38]
+	}
+	os.WriteFile(txtFile, txtData, 0644)
+	if IsHighEntropyFile(txtFile) {
+		t.Errorf("archivo de texto no debe ser detectado como alta entropía")
+	}
+
+	// 3. Archivo de alta entropía (64 KiB uniforme) -> true
+	rndFile := filepath.Join(tmpDir, "random.dat")
+	rndData := make([]byte, 65536)
+	for i := range rndData {
+		rndData[i] = byte((i * 1664525 + 1013904223) & 0xFF)
+	}
+	os.WriteFile(rndFile, rndData, 0644)
+	if !IsHighEntropyFile(rndFile) {
+		t.Errorf("archivo pseudo-aleatorio uniforme debe ser detectado como alta entropía")
+	}
+}
+

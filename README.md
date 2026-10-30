@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/hagom/crush/actions/workflows/ci.yml/badge.svg)](https://github.com/hagom/crush/actions)
 [![Go Version](https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Tests](https://img.shields.io/badge/tests-518%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/hagom/crush)
+[![Tests](https://img.shields.io/badge/tests-523%20passing%20%7C%20race%20detector-brightgreen)](https://github.com/hagom/crush)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Formats](https://img.shields.io/badge/formats-13%20supported-blueviolet)](https://github.com/hagom/crush)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0%20(pure%20Go%20stdlib)-success)](go.mod)
@@ -37,7 +37,8 @@
 - **Escaneo interactivo de directorios:** `crush -d [directorio]` y `crush -c` detectan automáticamente todos los elementos procesables (en la ruta actual o en la carpeta indicada como argumento), muestran sus tamaños individuales y solicitan confirmación interactiva.
 - **Compresión individual y concurrente por defecto:** Cada archivo o carpeta genera su propio comprimido independiente en paralelo, salvo que se use `-C` (`--combine`).
 - **Compresión heterogénea concurrente (`-F` / `--formats`):** Ejecuta simultáneamente múltiples formatos en una sola pasada (`crush -c -F gz,xz,zst archivo.txt`) en una sola cola global de workers sin núcleos ociosos.
-- **Modo adaptativo inteligente (`-f auto`):** Selección heurística del mejor formato según el tipo de archivo (código/texto $\to$ `xz`/`7z`, multimedia $\to$ `zstd`, carpetas $\to$ `7z`/`tar.zst`).
+- **Detección previa de entropía de Shannon:** Analiza en <0.05 ms la redundancia del archivo. Si detecta datos ya comprimidos o cifrados ($H \ge 7.90$ b/B), asigna automáticamente formato ultrarrápido (`lz4`) en `-f auto` o emite advertencia preventiva si se fuerza un formato pesado, evitando desperdicio masivo de CPU y tiempo.
+- **Modo adaptativo inteligente (`-f auto`):** Selección heurística del mejor formato según el tipo de archivo (código/texto $\to$ `xz`/`7z`, multimedia $\to$ `zstd`, carpetas $\to$ `7z`/`tar.zst`, incompresibles $\to$ `lz4`).
 
 ### 🛠️ Inspección, Seguridad & Herramientas Avanzadas
 - **Registro inteligente y auto-reutilización de contraseñas:** Reutiliza automáticamente contraseñas válidas de la sesión y del registro local cifrado (`~/.config/crush/passwords.txt`), pidiendo contraseña una sola vez y propagándola al resto del lote.

@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,16 +184,34 @@ func DetectAutoFormat(path string) Format {
 	}
 	defer f.Close()
 
-	buf := make([]byte, 512)
-	n, err := f.Read(buf)
-	if err != nil || n == 0 {
+	buf := make([]byte, 65536)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return Zst
 	}
-	buf = buf[:n]
+	if n == 0 {
+		return Zst
+	}
+	sample := buf[:n]
+
+	// Si tiene alta entropía (>= 7.90 b/B en muestra >= 4 KiB), son datos pre-comprimidos o cifrados
+	if len(sample) >= 4096 && CalculateShannonEntropy(sample) >= 7.90 {
+		if hasTool("lz4") {
+			return Lz4
+		}
+		if hasTool("zstd") {
+			return Zst
+		}
+		return Gz
+	}
 
 	nullCount := 0
 	controlCount := 0
-	for _, b := range buf {
+	checkLimit := n
+	if checkLimit > 512 {
+		checkLimit = 512
+	}
+	for _, b := range sample[:checkLimit] {
 		if b == 0x00 {
 			nullCount++
 		} else if b < 0x20 && b != '\n' && b != '\r' && b != '\t' {
@@ -199,10 +219,55 @@ func DetectAutoFormat(path string) Format {
 		}
 	}
 
-	if nullCount > 0 || float64(controlCount)/float64(n) > 0.10 {
+	if nullCount > 0 || float64(controlCount)/float64(checkLimit) > 0.10 {
 		return Zst
 	}
 	return Xz
+}
+
+// CalculateShannonEntropy calcula la entropía de Shannon en bits por byte (0.00 a 8.00)
+// sobre un slice de bytes. Devuelve 0.0 si la muestra está vacía.
+func CalculateShannonEntropy(data []byte) float64 {
+	if len(data) == 0 {
+		return 0.0
+	}
+	var counts [256]int
+	for _, b := range data {
+		counts[b]++
+	}
+	total := float64(len(data))
+	var entropy float64
+	for _, count := range counts {
+		if count > 0 {
+			p := float64(count) / total
+			entropy -= p * math.Log2(p)
+		}
+	}
+	return entropy
+}
+
+// IsHighEntropyFile determina si un archivo regular tiene alta entropía
+// (>= 7.90 bits/byte en muestras de al menos 4096 bytes), lo que indica datos ya comprimidos o cifrados.
+func IsHighEntropyFile(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() || fi.Size() < 4096 {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 65536)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false
+	}
+	if n < 4096 {
+		return false
+	}
+	return CalculateShannonEntropy(buf[:n]) >= 7.90
 }
 
 func ParseFormat(s string) (Format, error) {

@@ -1,30 +1,26 @@
 # TODO — Ideas y Mejoras Futuras para crush
 
-Este documento recopila las propuestas de diseño, características avanzadas y optimizaciones pendientes para futuras iteraciones del proyecto que fueron descartadas o pospuestas en la ronda actual.
+Este documento registra el historial de análisis de propuestas técnicas y su estado de resolución para `crush`.
 
 ---
 
 ## 1. Rendimiento y Eficiencia
 
-### Detección Automática de Entropía Previa
-- **Descripción:** Analizar los primeros 64 KiB del archivo de entrada mediante cálculo de entropía de Shannon ($H = -\sum p_i \log_2 p_i$).
-- **Objetivo:** Si los datos ya presentan entropía máxima ($\approx 8.0$ bits/byte), lo que indica datos ya comprimidos (`.mp4`, `.mkv`, `.jpg`, `.xz`, `.zip`) o cifrados, advertir al usuario o seleccionar automáticamente un formato ultrarrápido (`lz4` o `tar`) en lugar de saturar la CPU en algoritmos pesados que no reducirán tamaño.
-- **Motivo de aplazamiento:** Descartado temporalmente para replantear la heurística y evitar falsos positivos en formatos estructurados mixtos.
+### Detección Automática de Entropía Previa (Shannon Entropy)
+- **Estado:** ✅ **IMPLEMENTADA**
+- **Descripción:** Análisis instantáneo de los primeros 64 KiB de cabecera mediante la fórmula de entropía de Shannon ($H = -\sum p_i \log_2 p_i$). Si los datos presentan alta entropía ($\ge 7.90$ bits/byte en muestras $\ge 4$ KiB), detecta que el archivo ya está comprimido o cifrado.
+- **Acción implementada:**
+  - En modo `-f auto`: Asigna automáticamente formato ultrarrápido (`lz4`) emitiendo un aviso limpio: `ℹ 'archivo' ya parece estar comprimido; usando compresión rápida (lz4).`
+  - En formatos pesados manuales (`-f xz`, `-f 7z`, etc.): Emite advertencia preventiva inmediata: `⚠ 'archivo' ya parece estar comprimido o cifrado; la compresión apenas reducirá su tamaño.`
 
 ---
 
-## 2. Seguridad y Fiabilidad
+## 2. Propuestas Evaluadas y Descartadas
 
 ### Registros de Recuperación (*Recovery Records* / Paridad PAR2)
-- **Descripción:** Generación de bloques de paridad tipo Reed-Solomon (mediante utilidades como `par2` o los registros nativos de recuperación de `rar -rr`) para archivos divididos en partes (`-s`) o backups de misión crítica.
-- **Objetivo:** Permitir reconstruir automáticamente archivos corruptos o sectores dañados durante transferencias de red o almacenamiento degradado.
-- **Motivo de aplazamiento:** Dejado de lado temporalmente a petición del usuario.
-
----
-
-## 3. Servicios e Integración
+- **Estado:** ❌ **DESCARTADA**
+- **Motivo:** Rompe el principio de minimalismo (*Ponytail*). La paridad Reed-Solomon añade complejidad matemática innecesaria en la biblioteca estándar sin aportar al objetivo principal de `crush` (compresión/descompresión de alto rendimiento). La detección de integridad ya está cubierta de forma completa y criptográfica mediante SHA-256 (`-hash`, `crush -verify` y `crush -t`).
 
 ### Modo Servidor / Socket Streaming UNIX (`crush serve`)
-- **Descripción:** Iniciar un daemon ligero o escuchar en un UNIX Domain Socket local (`/var/run/crush.sock`) para recibir flujos de compresión/descompresión vía pipes sin sobrecarga de invocación de proceso binario repetitivo.
-- **Objetivo:** Facilitar la integración continua en scripts de automatización y microservicios locales.
-- **Estado:** Pendiente de priorización futura.
+- **Estado:** ❌ **DESCARTADA**
+- **Motivo:** Sobreingeniería clara (YAGNI). La sobrecarga de inicio del binario en Linux es de apenas 2 milisegundos. `crush` ya soporta streaming UNIX directo mediante tuberías estándar (`|`) y FIFOs (`mkfifo`) con aceleración en espacio de kernel `splice(2)` zero-copy y buffers de 1 MiB (`F_SETPIPE_SZ`). Introducir un daemon en segundo plano añadiría complejidad de gestión de procesos sin beneficio real de rendimiento.

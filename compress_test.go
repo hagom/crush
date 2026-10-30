@@ -2309,3 +2309,78 @@ func TestCompressParallelUnifiedReportSizeSavings(t *testing.T) {
 	}
 }
 
+func TestCompress_HighEntropyWarning_ForcedManualFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	binFile := filepath.Join(tmpDir, "sample_data.bin")
+
+	rndData := make([]byte, 65536)
+	for i := range rndData {
+		rndData[i] = byte((i * 1103515245 + 12345) & 0xFF)
+	}
+	if err := os.WriteFile(binFile, rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	opts := CompressOptions{
+		Format:    Xz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+
+	_, _ = DoCompress([]string{binFile}, opts)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	out := buf.String()
+
+	wantMsg := "ya parece estar comprimido o cifrado; la compresión apenas reducirá su tamaño."
+	if !strings.Contains(out, wantMsg) {
+		t.Errorf("Salida no contiene advertencia esperada %q:\n%s", wantMsg, out)
+	}
+}
+
+func TestCompress_HighEntropy_AutoFormatNotice(t *testing.T) {
+	tmpDir := t.TempDir()
+	binFile := filepath.Join(tmpDir, "sample_auto.bin")
+
+	rndData := make([]byte, 65536)
+	for i := range rndData {
+		rndData[i] = byte((i * 1664525 + 1013904223) & 0xFF)
+	}
+	if err := os.WriteFile(binFile, rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	opts := CompressOptions{
+		Format:    Auto,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+
+	_, _ = DoCompress([]string{binFile}, opts)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	out := buf.String()
+
+	wantMsg := "ya parece estar comprimido; usando compresión rápida (lz4)."
+	if !strings.Contains(out, wantMsg) {
+		t.Errorf("Salida no contiene aviso esperado %q:\n%s", wantMsg, out)
+	}
+}
+
+

@@ -81,9 +81,28 @@ func FormatComplexityWeight(f Format) int64 {
 	}
 }
 
+func checkAndWarnHighEntropy(item string, fmtChoice Format, warned map[string]bool) {
+	if warned != nil && warned[item] {
+		return
+	}
+	if !IsHighEntropyFile(item) {
+		return
+	}
+	if warned != nil {
+		warned[item] = true
+	}
+	base := filepath.Base(item)
+	if fmtChoice == Auto {
+		WriteLogf("%sℹ '%s' ya parece estar comprimido; usando compresión rápida (lz4).%s\n", Blue, base, NC)
+	} else if fmtChoice != Tar && fmtChoice != Lz4 {
+		WriteLogf("%s⚠ '%s' ya parece estar comprimido o cifrado; la compresión apenas reducirá su tamaño.%s\n", Yellow, base, NC)
+	}
+}
+
 func generateCompressionTasks(items []string, opts CompressOptions) ([]CompressionTask, error) {
 	var tasks []CompressionTask
 	id := 0
+	warned := make(map[string]bool)
 
 	for _, item := range items {
 		var formatsToUse []Format
@@ -92,7 +111,10 @@ func generateCompressionTasks(items []string, opts CompressOptions) ([]Compressi
 			for _, f := range opts.Formats {
 				targetFmt := f
 				if f == Auto {
+					checkAndWarnHighEntropy(item, Auto, warned)
 					targetFmt = DetectAutoFormat(item)
+				} else {
+					checkAndWarnHighEntropy(item, f, warned)
 				}
 				if !seen[targetFmt] {
 					seen[targetFmt] = true
@@ -102,7 +124,10 @@ func generateCompressionTasks(items []string, opts CompressOptions) ([]Compressi
 		} else {
 			targetFmt := opts.Format
 			if targetFmt == Auto {
+				checkAndWarnHighEntropy(item, Auto, warned)
 				targetFmt = DetectAutoFormat(item)
+			} else {
+				checkAndWarnHighEntropy(item, targetFmt, warned)
 			}
 			formatsToUse = []Format{targetFmt}
 		}
@@ -234,7 +259,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	singleIsDir := false
 	if singleItem {
 		if opts.Format == Auto {
+			checkAndWarnHighEntropy(files[0], Auto, nil)
 			opts.Format = DetectAutoFormat(files[0])
+		} else {
+			checkAndWarnHighEntropy(files[0], opts.Format, nil)
 		}
 		if fi, err := os.Stat(files[0]); err == nil && fi.IsDir() {
 			singleIsDir = true
@@ -383,7 +411,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	singleIsDir = false
 	if singleItem {
 		if opts.Format == Auto {
+			checkAndWarnHighEntropy(filteredFiles[0], Auto, nil)
 			opts.Format = DetectAutoFormat(filteredFiles[0])
+		} else {
+			checkAndWarnHighEntropy(filteredFiles[0], opts.Format, nil)
 		}
 		if fi, err := os.Stat(filteredFiles[0]); err == nil && fi.IsDir() {
 			singleIsDir = true

@@ -672,13 +672,31 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		entries = append(entries, ent)
 	}
 
-	// Ordenar entradas: mayor ahorro potencial primero, luego mayor tamaño
+	// Ordenar entradas: mayor compresibilidad (porcentaje de ahorro) primero,
+	// desempate por mayor volumen de ahorro en bytes, luego mayor tamaño total.
 	sort.Slice(entries, func(i, j int) bool {
+		if math.Abs(entries[i].SavingsPct-entries[j].SavingsPct) >= 0.05 {
+			return entries[i].SavingsPct > entries[j].SavingsPct
+		}
 		if entries[i].SavingsBytes != entries[j].SavingsBytes {
 			return entries[i].SavingsBytes > entries[j].SavingsBytes
 		}
 		return entries[i].TotalSize > entries[j].TotalSize
 	})
+
+	if opts.Verbose {
+		for i := range entries {
+			sort.Slice(entries[i].Files, func(a, b int) bool {
+				if math.Abs(entries[i].Files[a].SavingsPct-entries[i].Files[b].SavingsPct) >= 0.05 {
+					return entries[i].Files[a].SavingsPct > entries[i].Files[b].SavingsPct
+				}
+				if entries[i].Files[a].SavingsBytes != entries[i].Files[b].SavingsBytes {
+					return entries[i].Files[a].SavingsBytes > entries[i].Files[b].SavingsBytes
+				}
+				return entries[i].Files[a].Size > entries[i].Files[b].Size
+			})
+		}
+	}
 
 	summary.SavingsBytes = summary.TotalBytes - summary.EstimatedBytes
 	if summary.SavingsBytes < 0 {

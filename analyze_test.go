@@ -461,5 +461,59 @@ func TestAnalyzeFile_FastPathShortCircuit(t *testing.T) {
 	}
 }
 
+func TestDoAnalyze_SortByCompressibility(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Carpeta con alta compresibilidad (> 80%) pero tamaño modesto (50 KiB, ahorro ~45 KiB)
+	highDir := filepath.Join(tmpDir, "high_comp")
+	os.MkdirAll(highDir, 0755)
+	highData := bytes.Repeat([]byte("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"), 900)
+	os.WriteFile(filepath.Join(highDir, "data.txt"), highData, 0644)
+
+	// 2. Carpeta con compresibilidad media (~40-50%) pero tamaño grande (1 MiB, ahorro ~450 KiB)
+	// (Con ordenamiento por bytes de ahorro, 450 KiB > 50 KiB pondría med_comp primero.
+	// Con ordenamiento por compresibilidad, 99% > 45% pone high_comp primero).
+	medDir := filepath.Join(tmpDir, "med_comp")
+	os.MkdirAll(medDir, 0755)
+	rnd := rand.New(rand.NewSource(42))
+	var medData []byte
+	chunkText := []byte("Lorem ipsum dolor sit amet, consectetur adipiscing elit. ")
+	for i := 0; i < 15000; i++ {
+		medData = append(medData, chunkText...)
+		rndBlock := make([]byte, 50)
+		rnd.Read(rndBlock)
+		medData = append(medData, rndBlock...)
+	}
+	os.WriteFile(filepath.Join(medDir, "data.bin"), medData, 0644)
+
+	// 3. Carpeta incompresible (0% ahorro)
+	nullDir := filepath.Join(tmpDir, "null_comp")
+	os.MkdirAll(nullDir, 0755)
+	nullData := make([]byte, 100*1024)
+	rnd.Read(nullData)
+	os.WriteFile(filepath.Join(nullDir, "random.bin"), nullData, 0644)
+
+	var buf bytes.Buffer
+	err := DoAnalyze([]string{tmpDir}, AnalyzeOptions{}, &buf)
+	if err != nil {
+		t.Fatalf("DoAnalyze error: %v", err)
+	}
+
+	out := buf.String()
+	idxHigh := strings.Index(out, "high_comp/")
+	idxMed := strings.Index(out, "med_comp/")
+	idxNull := strings.Index(out, "null_comp/")
+
+	if idxHigh == -1 || idxMed == -1 || idxNull == -1 {
+		t.Fatalf("salida no contiene las 3 carpetas:\n%s", out)
+	}
+
+	if !(idxHigh < idxMed && idxMed < idxNull) {
+		t.Errorf("orden incorrecto: high_comp (%d) debe ir antes de med_comp (%d) y este antes de null_comp (%d):\n%s",
+			idxHigh, idxMed, idxNull, out)
+	}
+}
+
+
 
 

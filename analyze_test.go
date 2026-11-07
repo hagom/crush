@@ -383,4 +383,29 @@ func TestFormatNumber(t *testing.T) {
 	}
 }
 
+func TestAnalyzeProgressTracker_AccuratePercentageAndETA(t *testing.T) {
+	apt := newAnalyzeProgressTracker(41481)
+	if apt.totalFiles != 41481 {
+		t.Fatalf("totalFiles = %d, want 41481", apt.totalFiles)
+	}
+
+	// 1. Simular 41367 archivos procesados
+	for i := 0; i < 41367; i++ {
+		apt.Incr()
+	}
+
+	done := apt.filesDone.Load()
+	if done != 41367 {
+		t.Fatalf("done = %d, want 41367", done)
+	}
+
+	pct := float64(done) * 100.0 / float64(apt.totalFiles)
+	if pct >= 100.0 {
+		t.Errorf("pct debió ser < 100%% cuando aún faltan archivos, got %f", pct)
+	}
+	if pct < 99.7 || pct > 99.8 {
+		t.Errorf("pct esperado ~99.72%%, got %f", pct)
+	}
+}
+
 

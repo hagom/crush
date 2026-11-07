@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // FileAnalysis almacena las métricas individuales de análisis de un archivo regular.
@@ -387,12 +389,12 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 	resChan := make(chan fileResult, workers*2)
 	var wg sync.WaitGroup
 
-	var pt *ProgressTracker
+	var apt *analyzeProgressTracker
 	if isTerminal() && len(items) > 0 {
 		fmt.Fprintf(os.Stderr, "%s🔍 Analizando compresibilidad en '%s' (%s en %s)...%s\n",
 			Yellow, displayTarget, FormatSize(totalWalkBytes), FormatNumber(len(items))+" archivos", NC)
-		pt = NewProgressTracker(totalWalkBytes, len(items))
-		pt.Start()
+		apt = newAnalyzeProgressTracker(len(items))
+		apt.Start()
 	}
 
 	for i := 0; i < workers; i++ {
@@ -401,9 +403,8 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 			defer wg.Done()
 			for item := range workChan {
 				an, aErr := AnalyzeFile(item.absPath)
-				if pt != nil {
-					pt.Add(item.size)
-					pt.FileDone(item.relPath)
+				if apt != nil {
+					apt.Incr()
 				}
 				resChan <- fileResult{
 					relPath:  item.relPath,
@@ -479,8 +480,8 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		}
 	}
 
-	if pt != nil {
-		pt.Stop()
+	if apt != nil {
+		apt.Stop()
 		fmt.Fprintf(os.Stderr, "\033[1A\r\033[K")
 	}
 
@@ -890,4 +891,99 @@ func probeDeflateRatio(sample []byte) float64 {
 
 	ratio := float64(sink.count) / float64(len(sample))
 	return ratio
+}
+
+type analyzeProgressTracker struct {
+	totalFiles int
+	filesDone  atomic.Int64
+	startTime  time.Time
+	ticker     *time.Ticker
+	done       chan struct{}
+	stopped    chan struct{}
+	isTTY      bool
+}
+
+func newAnalyzeProgressTracker(totalFiles int) *analyzeProgressTracker {
+	return &analyzeProgressTracker{
+		totalFiles: totalFiles,
+		startTime:  time.Now(),
+		done:       make(chan struct{}),
+		stopped:    make(chan struct{}),
+		isTTY:      isTerminal(),
+	}
+}
+
+func (apt *analyzeProgressTracker) Start() {
+	if !apt.isTTY || apt.totalFiles <= 0 {
+		return
+	}
+	io.WriteString(os.Stderr, "\033[?25l")
+	apt.ticker = time.NewTicker(100 * time.Millisecond)
+	go func() {
+		defer close(apt.stopped)
+		for {
+			select {
+			case <-apt.ticker.C:
+				apt.render()
+			case <-apt.done:
+				apt.ticker.Stop()
+				return
+			}
+		}
+	}()
+}
+
+func (apt *analyzeProgressTracker) Incr() {
+	apt.filesDone.Add(1)
+}
+
+func (apt *analyzeProgressTracker) render() {
+	if !apt.isTTY {
+		return
+	}
+	done := apt.filesDone.Load()
+	elapsed := time.Since(apt.startTime)
+
+	pct := 0.0
+	if apt.totalFiles > 0 {
+		pct = float64(done) * 100.0 / float64(apt.totalFiles)
+		if pct > 100.0 {
+			pct = 100.0
+		}
+	}
+
+	var speedStr string
+	if elapsed.Seconds() > 0.1 && done > 0 {
+		rate := float64(done) / elapsed.Seconds()
+		if rate >= 1000 {
+			speedStr = fmt.Sprintf("%.1fk arch/s", rate/1000.0)
+		} else {
+			speedStr = fmt.Sprintf("%d arch/s", int(rate))
+		}
+	} else {
+		speedStr = "iniciando..."
+	}
+
+	var etaStr string
+	if done < int64(apt.totalFiles) {
+		if eta := formatETA(elapsed, done, int64(apt.totalFiles)); eta != "" && eta != "--:--" {
+			if eta == "0s" {
+				eta = "<1s"
+			}
+			etaStr = fmt.Sprintf(" %s restantes", eta)
+		}
+	}
+
+	bar := makeBar(pct, 20)
+	fmt.Fprintf(os.Stderr, "\r[%s] %5.1f%%  %s/%s  %s%s\033[K",
+		bar, pct, FormatNumber(int(done)), FormatNumber(apt.totalFiles), speedStr, etaStr)
+}
+
+func (apt *analyzeProgressTracker) Stop() {
+	if !apt.isTTY || apt.totalFiles <= 0 {
+		return
+	}
+	close(apt.done)
+	<-apt.stopped
+	io.WriteString(os.Stderr, "\r\033[K\033[?25h")
 }

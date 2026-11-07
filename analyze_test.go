@@ -1,0 +1,108 @@
+package main
+
+import (
+	"bytes"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestSampleFile_SmallMediumLarge(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Archivo pequeño (10 KiB) <= 96 KiB
+	smallPath := filepath.Join(tmpDir, "small.bin")
+	smallData := bytes.Repeat([]byte("ABCDEFGHIJ"), 1024) // 10,240 bytes
+	if err := os.WriteFile(smallPath, smallData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, sampleBufferSize)
+	s1, err := sampleFile(smallPath, int64(len(smallData)), buf)
+	if err != nil {
+		t.Fatalf("sampleFile(small) error: %v", err)
+	}
+	if len(s1) != len(smallData) {
+		t.Errorf("sampleFile(small) len = %d, want %d", len(s1), len(smallData))
+	}
+	if !bytes.Equal(s1, smallData) {
+		t.Errorf("sampleFile(small) data mismatch")
+	}
+
+	// 2. Archivo exacto o mediano cercano a 96 KiB (ej: 80 KiB)
+	medPath := filepath.Join(tmpDir, "med.bin")
+	medData := bytes.Repeat([]byte("12345678"), 10240) // 81,920 bytes
+	if err := os.WriteFile(medPath, medData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := sampleFile(medPath, int64(len(medData)), buf)
+	if err != nil {
+		t.Fatalf("sampleFile(med) error: %v", err)
+	}
+	if len(s2) != len(medData) {
+		t.Errorf("sampleFile(med) len = %d, want %d", len(s2), len(medData))
+	}
+
+	// 3. Archivo grande (500 KiB) > 96 KiB (debe tomar 3 fragmentos de 32 KiB)
+	largePath := filepath.Join(tmpDir, "large.bin")
+	largeData := make([]byte, 500*1024)
+	for i := range largeData {
+		largeData[i] = byte(i % 251)
+	}
+	if err := os.WriteFile(largePath, largeData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s3, err := sampleFile(largePath, int64(len(largeData)), buf)
+	if err != nil {
+		t.Fatalf("sampleFile(large) error: %v", err)
+	}
+	if len(s3) != sampleBufferSize {
+		t.Fatalf("sampleFile(large) len = %d, want %d", len(s3), sampleBufferSize)
+	}
+
+	// Verificar los 3 fragmentos de 32 KiB
+	chunkSize := sampleChunkSize
+	// Fragmento 1: inicio (0..32768)
+	if !bytes.Equal(s3[:chunkSize], largeData[:chunkSize]) {
+		t.Errorf("fragmento inicial no coincide")
+	}
+	// Fragmento 2: centro
+	midOffset := (int64(len(largeData)) - int64(chunkSize)) / 2
+	if !bytes.Equal(s3[chunkSize:chunkSize*2], largeData[midOffset:midOffset+int64(chunkSize)]) {
+		t.Errorf("fragmento central no coincide")
+	}
+	// Fragmento 3: final
+	endOffset := int64(len(largeData)) - int64(chunkSize)
+	if !bytes.Equal(s3[chunkSize*2:chunkSize*3], largeData[endOffset:]) {
+		t.Errorf("fragmento final no coincide")
+	}
+}
+
+func TestProbeDeflateRatio(t *testing.T) {
+	// 1. Datos vacíos -> 1.0 (incompresible por definición)
+	if r := probeDeflateRatio(nil); r != 1.0 {
+		t.Errorf("probeDeflateRatio(nil) = %f, want 1.0", r)
+	}
+
+	// 2. Todos ceros repetidos (altamente compresible)
+	zeros := make([]byte, 65536)
+	if r := probeDeflateRatio(zeros); r > 0.05 {
+		t.Errorf("probeDeflateRatio(zeros) = %f, want <= 0.05", r)
+	}
+
+	// 3. Texto plano legible
+	text := bytes.Repeat([]byte("package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hola mundo\")\n}\n"), 300)
+	if r := probeDeflateRatio(text); r > 0.40 {
+		t.Errorf("probeDeflateRatio(text) = %f, want <= 0.40", r)
+	}
+
+	// 4. Datos pseudo-aleatorios uniformes (debe dar >= 0.98)
+	rnd := rand.New(rand.NewSource(12345))
+	randomData := make([]byte, 65536)
+	rnd.Read(randomData)
+	if r := probeDeflateRatio(randomData); r < 0.98 {
+		t.Errorf("probeDeflateRatio(randomData) = %f, want >= 0.98", r)
+	}
+}

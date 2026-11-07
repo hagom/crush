@@ -119,7 +119,7 @@ crush/
 ├── compress.go      # DoCompress, compressItems, tar-pipe, -hash, -p, -sparse, -clean
 ├── decompress.go    # DoDecompress, splitWriter, -p, -filter
 ├── passwords.go     # PasswordManager, registro ~/.config/crush/passwords.txt y auto-reutilización
-├── analyze.go       # DoAnalyze, AnalyzeFile, sampleFile, probeDeflateRatio, renderAnalyzeReport (-analyze)
+├── analyze.go       # DoAnalyze, AnalyzeFile, sampleFile, probeDeflateRatio, renderAnalyzeReport (--analyze)
 ├── archive_list.go  # Lector polimórfico de miembros de archivo sin extracción a disco
 ├── tree.go          # Generador de vista en árbol jerárquica (-tree)
 ├── find.go          # Motor de búsqueda por patrón glob en comprimidos (-find)
@@ -149,7 +149,7 @@ crush/
 
 - Go: migración completa. 532 tests nativos pasando con race detector (-race). ~18500 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
-  - Analizador Recursivo de Compresibilidad y Ahorro (`-analyze` / `analyze.go`):
+  - Analizador Recursivo de Compresibilidad y Ahorro (`--analyze` / `analyze.go`):
     - **Muestreo estratificado de 3 puntos (`sampleFile`):** Lectura ultra-eficiente de hasta 96 KiB (inicio, centro y final) evitando lecturas completas de archivos gigantes con pooling de búferes (`sync.Pool`).
     - **Micro-sonda en memoria DEFLATE (`probeDeflateRatio`):** Medición instantánea del ratio real en RAM utilizando `compress/flate` con `countingSink`, sin crear archivos temporales ni invocar subprocesos pesados.
     - **Clasificación y recomendación inteligente de formato:** `xz`/`7z` para texto/código (Alta), `zst`/`gz` para binarios estructurados (Media), y `omitir` para alta entropía ($H \ge 7.90$) o formatos multimedia/precomprimidos ($H \ge 7.20$).

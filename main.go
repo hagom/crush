@@ -351,7 +351,7 @@ func main() {
 			v    bool
 			name string
 		}{
-			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"}, {*analyzeFlag, "-analyze"},
+			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"}, {*analyzeFlag, "--analyze"},
 		} {
 			if f.v {
 				conflictFlags = append(conflictFlags, f.name)
@@ -379,7 +379,7 @@ func main() {
 	if installModeCount > 0 {
 		for _, m := range []bool{hasC, hasD, hasA, hasL, *testFlag, *verifyFlag, hasR, *benchFlag, *watchDir != "", *analyzeFlag} {
 			if m {
-				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -a, -l, -t, -verify, -r, --bench, -watch o -analyze")
+				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -a, -l, -t, -verify, -r, --bench, -watch o --analyze")
 				os.Exit(1)
 			}
 		}
@@ -395,7 +395,7 @@ func main() {
 			v    bool
 			name string
 		}{
-			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"}, {*analyzeFlag, "-analyze"},
+			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"}, {*analyzeFlag, "--analyze"},
 		} {
 			if m.v {
 				WriteError("--bench no se puede combinar con %s", m.name)
@@ -506,7 +506,7 @@ func main() {
 	if *analyzeFlag {
 		otherModes := *compressFlag || *decompressFlag || hasA || *listFlag || *readFlag || *testFlag || *verifyFlag || *benchFlag || *watchDir != "" || *treeFlag || *findFlag != "" || *diffFlag || hasConvert
 		if otherModes {
-			WriteError("-analyze no puede combinarse con otros modos de operación")
+			WriteError("--analyze no puede combinarse con otros modos de operación")
 			os.Exit(1)
 		}
 	}
@@ -1255,7 +1255,7 @@ func printHelp() {
 	w(Yellow, "  crush -verify archivo...                               # verificar integridad y checksum SHA-256 si existe .sha256\n")
 	w(Yellow, "  crush -r archivo...                                    # leer contenido de archivo comprimido a stdout\n")
 	w(Yellow, "  crush -convert -f FORMATO [opciones] archivo...        # transcodificar/convertir directamente a otro formato\n")
-	w(Yellow, "  crush -analyze [opciones] [directorio...]              # analizar compresibilidad y estimar ahorro de espacio\n")
+	w(Yellow, "  crush --analyze [opciones] [directorio...]             # analizar compresibilidad y estimar ahorro de espacio\n")
 	w(Yellow, "  crush --install                                        # instalar binario crush en /usr/local/bin\n")
 	w(Yellow, "  crush --install-deps                                   # instalar solo herramientas faltantes del sistema\n")
 	w(Yellow, "  crush --uninstall                                      # desinstalar binario crush del sistema\n")
@@ -1281,8 +1281,8 @@ func printHelp() {
 	fmt.Print("                   Leer contenido de archivo comprimido a stdout\n")
 	w(Yellow, "  -convert, -recompress")
 	fmt.Print(" Transcodificar directamente archivo comprimido a otro formato\n")
-	w(Yellow, "  -analyze")
-	fmt.Print("              Analizar recursivamente compresibilidad y estimar ahorro de espacio\n")
+	w(Yellow, "  --analyze")
+	fmt.Print("             Analizar recursivamente compresibilidad y estimar ahorro de espacio\n")
 	w(Yellow, "  --bench")
 	fmt.Print("              Medir velocidad y ratio de compresión por formato\n")
 	w(Yellow, "  --bench-size N")
@@ -1404,8 +1404,8 @@ func printHelp() {
 	w(Yellow, "  crush -diff release_v1.zip release_v2.zip               # comparar cambios y diferencias entre dos comprimidos\n")
 	w(Yellow, "  crush -r archivo.txt.gz | grep error                   # leer y filtrar contenido comprimido a stdout\n")
 	w(Yellow, "  crush -convert -f zst archivo.tar.gz                   # transcodificar directamente de tar.gz a tar.zst\n")
-	w(Yellow, "  crush -analyze                                         # analizar compresibilidad del directorio actual\n")
-	w(Yellow, "  crush -analyze -clean -v /datos                        # analizar directorio con exclusión de temporales y vista detallada\n")
+	w(Yellow, "  crush --analyze                                        # analizar compresibilidad del directorio actual\n")
+	w(Yellow, "  crush --analyze -clean -v /datos                       # analizar directorio con exclusión de temporales y vista detallada\n")
 	w(Yellow, "  crush --bench                                          # benchmark comparativo de todos los formatos (10 MB)\n")
 	w(Yellow, "  crush --bench-size 50 archivo.iso                      # benchmark con dataset de 50 MB o archivo propio\n")
 	w(Yellow, "  crush -h                                               # mostrar esta ayuda completa con opciones y ejemplos\n")
@@ -1447,7 +1447,7 @@ _crush_completions() {
     local formats="gz xz bz2 bz3 zst lz lrz zip 7z rar lz4 br tar"
     local split_formats="gz xz bz2 bz3 zst lz lz4 br"
     local split_sizes="10 50 100 500 1000"
-    local short="-c -d -l -t -r -h -v -k -n -f -F -o -s -force -quick -opts -exclude -hash -verify -p -password -analyze"
+    local short="-c -d -l -t -r -h -v -k -n -f -F -o -s -force -quick -opts -exclude -hash -verify -p -password"
     local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --formats --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version --hash --verify --password --analyze"
 
     local has_split=0

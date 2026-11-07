@@ -722,7 +722,7 @@ func TestHelpEveryOptionHasDescriptionAndExample(t *testing.T) {
 		"-c", "-d", "-a", "-watch", "-l", "-t", "-verify", "-r", "--bench", "--bench-size",
 		"-h", "-f", "-F", "-o", "-n", "-k", "-v", "-force", "-quick", "-s",
 		"-hash", "-p", "-opts", "-i", "-C", "-exclude", "-clean", "-sparse", "-filter", "-tree", "-find", "-diff", "-notify", "-convert",
-		"-analyze",
+		"--analyze",
 		"--install", "--install-deps", "--uninstall", "--completion", "--version",
 	}
 
@@ -776,11 +776,11 @@ func TestMainAnalyzeCLI(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.WriteFile(filepath.Join(tmpDir, "test.txt"), bytes.Repeat([]byte("linea de texto repetida\n"), 100), 0644)
 
-	// 1. Ejecución exitosa de crush -analyze <dir>
-	cmd := exec.Command(binPath, "-analyze", tmpDir)
+	// 1. Ejecución exitosa de crush --analyze <dir> (y retrocompatibilidad con -analyze)
+	cmd := exec.Command(binPath, "--analyze", tmpDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("crush -analyze falló: %v\n%s", err, out)
+		t.Fatalf("crush --analyze falló: %v\n%s", err, out)
 	}
 	outStr := string(out)
 	if !strings.Contains(outStr, "=== Informe de Compresibilidad:") {
@@ -790,11 +790,16 @@ func TestMainAnalyzeCLI(t *testing.T) {
 		t.Errorf("salida debió listar test.txt, obtenida:\n%s", outStr)
 	}
 
-	// 2. Exclusión mutua de modos: crush -analyze -c
-	cmdConflict := exec.Command(binPath, "-analyze", "-c", tmpDir)
+	cmdLegacy := exec.Command(binPath, "-analyze", tmpDir)
+	if outLegacy, errLegacy := cmdLegacy.CombinedOutput(); errLegacy != nil {
+		t.Fatalf("crush -analyze legacy falló: %v\n%s", errLegacy, outLegacy)
+	}
+
+	// 2. Exclusión mutua de modos: crush --analyze -c
+	cmdConflict := exec.Command(binPath, "--analyze", "-c", tmpDir)
 	outConflict, errConflict := cmdConflict.CombinedOutput()
 	if errConflict == nil {
-		t.Fatalf("crush -analyze -c debió fallar por conflicto de modo, salida:\n%s", outConflict)
+		t.Fatalf("crush --analyze -c debió fallar por conflicto de modo, salida:\n%s", outConflict)
 	}
 	if !strings.Contains(string(outConflict), "no se pueden combinar") && !strings.Contains(string(outConflict), "no puede combinarse") {
 		t.Errorf("mensaje de error esperado por conflicto no encontrado:\n%s", outConflict)

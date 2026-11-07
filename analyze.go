@@ -240,7 +240,13 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 
 	if !fi.IsDir() {
 		// Análisis de un solo archivo
+		if isTerminal() {
+			fmt.Fprintf(os.Stderr, "%s🔍 Analizando '%s'...%s\r", Yellow, target, NC)
+		}
 		analysis, err := AnalyzeFile(target)
+		if isTerminal() {
+			fmt.Fprintf(os.Stderr, "\r\033[K")
+		}
 		if err != nil {
 			return fmt.Errorf("analizando %s: %w", target, err)
 		}
@@ -284,8 +290,13 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 	}
 
 	var items []walkItem
+	var totalWalkBytes int64
 	dirCount := 0
 	unreadableCount := 0
+
+	if isTerminal() {
+		fmt.Fprintf(os.Stderr, "%s🔍 Escaneando archivos en '%s'...%s\r", Yellow, target, NC)
+	}
 
 	err = filepath.WalkDir(target, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -336,8 +347,13 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 			relPath: rel,
 			size:    info.Size(),
 		})
+		totalWalkBytes += info.Size()
 		return nil
 	})
+
+	if isTerminal() {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
+	}
 
 	if err != nil {
 		return fmt.Errorf("recorriendo %s: %w", target, err)
@@ -365,12 +381,24 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 	resChan := make(chan fileResult, workers*2)
 	var wg sync.WaitGroup
 
+	var pt *ProgressTracker
+	if isTerminal() && len(items) > 0 {
+		fmt.Fprintf(os.Stderr, "%s🔍 Analizando compresibilidad en '%s' (%s en %s)...%s\n",
+			Yellow, target, FormatSize(totalWalkBytes), FormatNumber(len(items))+" archivos", NC)
+		pt = NewProgressTracker(totalWalkBytes, len(items))
+		pt.Start()
+	}
+
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for item := range workChan {
 				an, aErr := AnalyzeFile(item.absPath)
+				if pt != nil {
+					pt.Add(item.size)
+					pt.FileDone(item.relPath)
+				}
 				resChan <- fileResult{
 					relPath:  item.relPath,
 					analysis: an,
@@ -443,6 +471,11 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		if opts.Verbose {
 			g.files = append(g.files, an)
 		}
+	}
+
+	if pt != nil {
+		pt.Stop()
+		fmt.Fprintf(os.Stderr, "\033[1A\r\033[K")
 	}
 
 	// Construcción de entradas y resumen

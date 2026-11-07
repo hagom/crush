@@ -722,6 +722,7 @@ func TestHelpEveryOptionHasDescriptionAndExample(t *testing.T) {
 		"-c", "-d", "-a", "-watch", "-l", "-t", "-verify", "-r", "--bench", "--bench-size",
 		"-h", "-f", "-F", "-o", "-n", "-k", "-v", "-force", "-quick", "-s",
 		"-hash", "-p", "-opts", "-i", "-C", "-exclude", "-clean", "-sparse", "-filter", "-tree", "-find", "-diff", "-notify", "-convert",
+		"-analyze",
 		"--install", "--install-deps", "--uninstall", "--completion", "--version",
 	}
 
@@ -763,4 +764,41 @@ func TestCLIAutoFormat(t *testing.T) {
 		t.Errorf("ParseFormatList(auto,xz) = %v, want [Auto, Xz]", multiList)
 	}
 }
+
+func TestMainAnalyzeCLI(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "crush_bin")
+	cmdBuild := exec.Command("go", "build", "-o", binPath, ".")
+	cmdBuild.Dir = "."
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("go build falló: %v\n%s", err, out)
+	}
+
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "test.txt"), bytes.Repeat([]byte("linea de texto repetida\n"), 100), 0644)
+
+	// 1. Ejecución exitosa de crush -analyze <dir>
+	cmd := exec.Command(binPath, "-analyze", tmpDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("crush -analyze falló: %v\n%s", err, out)
+	}
+	outStr := string(out)
+	if !strings.Contains(outStr, "=== Informe de Compresibilidad:") {
+		t.Errorf("salida esperada contenía informe, obtenida:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "test.txt") {
+		t.Errorf("salida debió listar test.txt, obtenida:\n%s", outStr)
+	}
+
+	// 2. Exclusión mutua de modos: crush -analyze -c
+	cmdConflict := exec.Command(binPath, "-analyze", "-c", tmpDir)
+	outConflict, errConflict := cmdConflict.CombinedOutput()
+	if errConflict == nil {
+		t.Fatalf("crush -analyze -c debió fallar por conflicto de modo, salida:\n%s", outConflict)
+	}
+	if !strings.Contains(string(outConflict), "no se pueden combinar") && !strings.Contains(string(outConflict), "no puede combinarse") {
+		t.Errorf("mensaje de error esperado por conflicto no encontrado:\n%s", outConflict)
+	}
+}
+
 

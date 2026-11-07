@@ -83,6 +83,7 @@ type lockScope struct {
 	Find        bool
 	Diff        bool
 	Convert     bool
+	Analyze     bool
 	StdinStream bool
 }
 

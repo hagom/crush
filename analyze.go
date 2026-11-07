@@ -233,22 +233,28 @@ func isPathExcluded(path string, isDir bool, excludes []string) bool {
 
 func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io.Writer) error {
 	target = filepath.Clean(target)
+	displayTarget := target
+	if target == "." || target == "" {
+		if abs, err := filepath.Abs(target); err == nil {
+			displayTarget = abs
+		}
+	}
 	fi, err := os.Stat(target)
 	if err != nil {
-		return fmt.Errorf("accediendo a %s: %w", target, err)
+		return fmt.Errorf("accediendo a %s: %w", displayTarget, err)
 	}
 
 	if !fi.IsDir() {
 		// Análisis de un solo archivo
 		if isTerminal() {
-			fmt.Fprintf(os.Stderr, "%s🔍 Analizando '%s'...%s\r", Yellow, target, NC)
+			fmt.Fprintf(os.Stderr, "%s🔍 Analizando '%s'...%s\r", Yellow, displayTarget, NC)
 		}
 		analysis, err := AnalyzeFile(target)
 		if isTerminal() {
 			fmt.Fprintf(os.Stderr, "\r\033[K")
 		}
 		if err != nil {
-			return fmt.Errorf("analizando %s: %w", target, err)
+			return fmt.Errorf("analizando %s: %w", displayTarget, err)
 		}
 		entry := EntryReport{
 			Name:            filepath.Base(target),
@@ -278,7 +284,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		} else {
 			summary.IncompressibleBytes = analysis.Size
 		}
-		renderAnalyzeReport(target, []EntryReport{entry}, summary, opts, out)
+		renderAnalyzeReport(displayTarget, []EntryReport{entry}, summary, opts, out)
 		return nil
 	}
 
@@ -295,7 +301,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 	unreadableCount := 0
 
 	if isTerminal() {
-		fmt.Fprintf(os.Stderr, "%s🔍 Escaneando archivos en '%s'...%s\r", Yellow, target, NC)
+		fmt.Fprintf(os.Stderr, "%s🔍 Escaneando archivos en '%s'...%s\r", Yellow, displayTarget, NC)
 	}
 
 	err = filepath.WalkDir(target, func(path string, d os.DirEntry, err error) error {
@@ -384,7 +390,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 	var pt *ProgressTracker
 	if isTerminal() && len(items) > 0 {
 		fmt.Fprintf(os.Stderr, "%s🔍 Analizando compresibilidad en '%s' (%s en %s)...%s\n",
-			Yellow, target, FormatSize(totalWalkBytes), FormatNumber(len(items))+" archivos", NC)
+			Yellow, displayTarget, FormatSize(totalWalkBytes), FormatNumber(len(items))+" archivos", NC)
 		pt = NewProgressTracker(totalWalkBytes, len(items))
 		pt.Start()
 	}
@@ -599,7 +605,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		summary.SavingsPct = (float64(summary.SavingsBytes) / float64(summary.TotalBytes)) * 100.0
 	}
 
-	renderAnalyzeReport(target, entries, summary, opts, out)
+	renderAnalyzeReport(displayTarget, entries, summary, opts, out)
 	return nil
 }
 

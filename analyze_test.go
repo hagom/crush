@@ -408,4 +408,58 @@ func TestAnalyzeProgressTracker_AccuratePercentageAndETA(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFile_FastPathShortCircuit(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Archivo multimedia grande (1 MiB) con datos de alta entropía
+	mp4Path := filepath.Join(tmpDir, "movie.mp4")
+	rnd := rand.New(rand.NewSource(1234))
+	rndData := make([]byte, 1024*1024)
+	rnd.Read(rndData)
+	if err := os.WriteFile(mp4Path, rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Archivo compresible grande (1 MiB) de texto repetitivo
+	txtPath := filepath.Join(tmpDir, "dump.sql")
+	txtData := bytes.Repeat([]byte("INSERT INTO table VALUES (1, 'test', 'sample string data');\n"), 17000)
+	if err := os.WriteFile(txtPath, txtData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Probar AnalyzeFile en mp4: debe disparar fast-path (solo leer sampleChunkSize = 32 KiB)
+	resMp4, err := AnalyzeFile(mp4Path)
+	if err != nil {
+		t.Fatalf("AnalyzeFile(mp4) error: %v", err)
+	}
+	if resMp4.Compressible {
+		t.Errorf("movie.mp4 debe ser incompresible")
+	}
+	if resMp4.SampleBytes != int64(sampleChunkSize) {
+		t.Errorf("movie.mp4 SampleBytes = %d, want fast-path %d (solo cabecera)", resMp4.SampleBytes, sampleChunkSize)
+	}
+
+	// Probar analyzeFileWithSize directamente
+	resMp4Direct, err := analyzeFileWithSize(mp4Path, int64(len(rndData)))
+	if err != nil {
+		t.Fatalf("analyzeFileWithSize(mp4) error: %v", err)
+	}
+	if resMp4Direct.SampleBytes != int64(sampleChunkSize) {
+		t.Errorf("analyzeFileWithSize(mp4) SampleBytes = %d, want %d", resMp4Direct.SampleBytes, sampleChunkSize)
+	}
+
+	// Probar dump.sql: al ser compresible, debe leer la muestra completa de 3 fragmentos (96 KiB)
+	resTxt, err := analyzeFileWithSize(txtPath, int64(len(txtData)))
+	if err != nil {
+		t.Fatalf("analyzeFileWithSize(txt) error: %v", err)
+	}
+	if !resTxt.Compressible {
+		t.Errorf("dump.sql debe ser compresible")
+	}
+	if resTxt.SampleBytes != int64(sampleBufferSize) {
+		t.Errorf("dump.sql SampleBytes = %d, want %d (muestra estratificada completa)", resTxt.SampleBytes, sampleBufferSize)
+	}
+}
+
+
 

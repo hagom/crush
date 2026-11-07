@@ -35,8 +35,11 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 	if err != nil {
 		return FileAnalysis{}, err
 	}
-	size := fi.Size()
+	return analyzeFileWithSize(path, fi.Size())
+}
 
+// analyzeFileWithSize analiza un archivo reutilizando un tamaño ya conocido para evitar llamadas os.Stat adicionales.
+func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
 	res := FileAnalysis{
 		Path:          path,
 		Size:          size,
@@ -60,27 +63,87 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 		return res, nil
 	}
 
-	bufPtr := sampleBufferPool.Get().(*[]byte)
-	defer sampleBufferPool.Put(bufPtr)
-
-	sample, err := sampleFile(path, size, *bufPtr)
+	f, err := os.Open(path)
 	if err != nil {
 		return FileAnalysis{}, err
 	}
-	res.SampleBytes = int64(len(sample))
+	defer f.Close()
 
-	entropy := CalculateShannonEntropy(sample)
-	res.Entropy = entropy
+	bufPtr := sampleBufferPool.Get().(*[]byte)
+	defer sampleBufferPool.Put(bufPtr)
+
+	targetBuf := *bufPtr
+	if len(targetBuf) < sampleBufferSize {
+		targetBuf = make([]byte, sampleBufferSize)
+	}
 
 	ext := strings.ToLower(filepath.Ext(path))
 
-	// Detección de incompresibles por entropía o contenedor ya comprimido
-	if (len(sample) >= 4096 && entropy >= 7.90) || (mediaOrCompressedExts[ext] && entropy >= 7.20) {
-		res.Compressible = false
-		res.CompLevel = "Nula"
-		res.RecommendedFmt = "omitir"
-		res.ProbeRatio = 1.0
-		return res, nil
+	var sample []byte
+	var entropy float64
+
+	if size <= int64(sampleBufferSize) {
+		// Archivo pequeño (<= 96 KiB): lectura secuencial completa en una sola llamada
+		n, err := io.ReadFull(f, targetBuf[:size])
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return FileAnalysis{}, err
+		}
+		sample = targetBuf[:n]
+		res.SampleBytes = int64(n)
+		entropy = CalculateShannonEntropy(sample)
+		res.Entropy = entropy
+
+		if (len(sample) >= 4096 && entropy >= 7.90) || (mediaOrCompressedExts[ext] && entropy >= 7.20) {
+			res.Compressible = false
+			res.CompLevel = "Nula"
+			res.RecommendedFmt = "omitir"
+			res.ProbeRatio = 1.0
+			return res, nil
+		}
+	} else {
+		// Archivo mayor a 96 KiB: lectura inicial de cabecera (32 KiB)
+		n1, err := f.ReadAt(targetBuf[:sampleChunkSize], 0)
+		if err != nil && err != io.EOF {
+			return FileAnalysis{}, err
+		}
+		if n1 == 0 {
+			res.Compressible = false
+			res.CompLevel = "Nula"
+			res.RecommendedFmt = "omitir"
+			return res, nil
+		}
+
+		h1 := CalculateShannonEntropy(targetBuf[:n1])
+
+		// Fast-path: Si la cabecera ya es incompresible (entropía máxima o archivo pre-comprimido/multimedia),
+		// evitamos los seeks a la mitad y al final del disco y la micro-sonda DEFLATE.
+		if (n1 >= 4096 && h1 >= 7.85) || (mediaOrCompressedExts[ext] && h1 >= 7.20) {
+			res.SampleBytes = int64(n1)
+			res.Entropy = h1
+			res.Compressible = false
+			res.CompLevel = "Nula"
+			res.RecommendedFmt = "omitir"
+			res.ProbeRatio = 1.0
+			return res, nil
+		}
+
+		// Cabecera compresible: completar el muestreo estratificado con fragmentos de mitad y final
+		fullSample, err := readRemainingChunks(f, size, targetBuf, n1)
+		if err != nil {
+			return FileAnalysis{}, err
+		}
+		sample = fullSample
+		res.SampleBytes = int64(len(sample))
+		entropy = CalculateShannonEntropy(sample)
+		res.Entropy = entropy
+
+		if (len(sample) >= 4096 && entropy >= 7.90) || (mediaOrCompressedExts[ext] && entropy >= 7.20) {
+			res.Compressible = false
+			res.CompLevel = "Nula"
+			res.RecommendedFmt = "omitir"
+			res.ProbeRatio = 1.0
+			return res, nil
+		}
 	}
 
 	probeRatio := probeDeflateRatio(sample)
@@ -255,7 +318,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		if isTerminal() {
 			fmt.Fprintf(os.Stderr, "%s🔍 Analizando '%s'...%s\r", Yellow, displayTarget, NC)
 		}
-		analysis, err := AnalyzeFile(target)
+		analysis, err := analyzeFileWithSize(target, fi.Size())
 		if isTerminal() {
 			fmt.Fprintf(os.Stderr, "\r\033[K")
 		}
@@ -406,7 +469,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		go func() {
 			defer wg.Done()
 			for item := range workChan {
-				an, aErr := AnalyzeFile(item.absPath)
+				an, aErr := analyzeFileWithSize(item.absPath, item.size)
 				if apt != nil {
 					apt.Incr()
 					apt.AddBytes(an.SampleBytes)
@@ -442,6 +505,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		estimatedSize      int64
 		entropySum         float64
 		fileCount          int
+		topAnalysis        FileAnalysis
 		files              []FileAnalysis
 	}
 
@@ -469,6 +533,10 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 				name:  gName,
 			}
 			groups[topKey] = g
+		}
+
+		if !isSubDir {
+			g.topAnalysis = an
 		}
 
 		g.totalSize += an.Size
@@ -515,21 +583,15 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 
 		if !g.isDir {
 			// Archivo de primer nivel
-			if len(g.files) > 0 {
-				an := g.files[0]
-				ent.EstimatedSize = an.EstimatedSize
-				ent.SavingsBytes = an.SavingsBytes
-				ent.SavingsPct = an.SavingsPct
-				ent.CompLevel = an.CompLevel
-				ent.RecommendedFmt = an.RecommendedFmt
-			} else {
-				an, _ := AnalyzeFile(ent.RelPath)
-				ent.EstimatedSize = an.EstimatedSize
-				ent.SavingsBytes = an.SavingsBytes
-				ent.SavingsPct = an.SavingsPct
-				ent.CompLevel = an.CompLevel
-				ent.RecommendedFmt = an.RecommendedFmt
+			an := g.topAnalysis
+			if an.Size == 0 && len(g.files) > 0 {
+				an = g.files[0]
 			}
+			ent.EstimatedSize = an.EstimatedSize
+			ent.SavingsBytes = an.SavingsBytes
+			ent.SavingsPct = an.SavingsPct
+			ent.CompLevel = an.CompLevel
+			ent.RecommendedFmt = an.RecommendedFmt
 		} else {
 			// Subdirectorio
 			ent.EstimatedSize = g.estimatedSize
@@ -815,43 +877,9 @@ var flateWriterPool = sync.Pool{
 	},
 }
 
-// sampleFile toma una muestra estratificada de hasta 96 KiB de un archivo.
-// Si el tamaño es <= 96 KiB, lee el archivo completo.
-// Si el tamaño es > 96 KiB, lee 3 fragmentos de 32 KiB: inicio, mitad y fin.
-func sampleFile(path string, size int64, buf []byte) ([]byte, error) {
-	if size <= 0 {
-		return nil, nil
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	if size <= int64(sampleBufferSize) {
-		targetBuf := buf
-		if len(targetBuf) < int(size) {
-			targetBuf = make([]byte, size)
-		}
-		n, err := io.ReadFull(f, targetBuf[:size])
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-			return nil, err
-		}
-		return targetBuf[:n], nil
-	}
-
-	// Archivo mayor a 96 KiB: 3 fragmentos de 32 KiB
-	targetBuf := buf
-	if len(targetBuf) < sampleBufferSize {
-		targetBuf = make([]byte, sampleBufferSize)
-	}
-
-	// 1. Inicio: offset 0
-	n1, err := f.ReadAt(targetBuf[:sampleChunkSize], 0)
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
+// readRemainingChunks lee los fragmentos de la mitad y final para completar los 96 KiB
+// cuando el primer fragmento ya fue leído en targetBuf[:n1].
+func readRemainingChunks(f *os.File, size int64, targetBuf []byte, n1 int) ([]byte, error) {
 	if n1 < sampleChunkSize {
 		return targetBuf[:n1], nil
 	}
@@ -885,6 +913,48 @@ func sampleFile(path string, size int64, buf []byte) ([]byte, error) {
 	}
 
 	return targetBuf[:total], nil
+}
+
+// readSampleChunks lee los 3 fragmentos de 32 KiB (inicio, mitad y fin) sobre un archivo abierto.
+func readSampleChunks(f *os.File, size int64, targetBuf []byte) ([]byte, error) {
+	n1, err := f.ReadAt(targetBuf[:sampleChunkSize], 0)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return readRemainingChunks(f, size, targetBuf, n1)
+}
+
+// sampleFile toma una muestra estratificada de hasta 96 KiB de un archivo.
+// Si el tamaño es <= 96 KiB, lee el archivo completo.
+// Si el tamaño es > 96 KiB, lee 3 fragmentos de 32 KiB: inicio, mitad y fin.
+func sampleFile(path string, size int64, buf []byte) ([]byte, error) {
+	if size <= 0 {
+		return nil, nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	if size <= int64(sampleBufferSize) {
+		targetBuf := buf
+		if len(targetBuf) < int(size) {
+			targetBuf = make([]byte, size)
+		}
+		n, err := io.ReadFull(f, targetBuf[:size])
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, err
+		}
+		return targetBuf[:n], nil
+	}
+
+	targetBuf := buf
+	if len(targetBuf) < sampleBufferSize {
+		targetBuf = make([]byte, sampleBufferSize)
+	}
+	return readSampleChunks(f, size, targetBuf)
 }
 
 // probeDeflateRatio pasa una muestra por DEFLATE en memoria y devuelve el ratio

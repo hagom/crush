@@ -434,19 +434,16 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		return fmt.Errorf("recorriendo %s: %w", target, err)
 	}
 
-	// Análisis concurrente de los archivos recolectados mediante pool acotado de workers
+	// Análisis concurrente de los archivos recolectados mediante pool acotado de workers.
+	// En --analyze se procesan micro-muestras de 32 KiB; mantener hasta 32 workers permite
+	// que la cola NCQ del almacenamiento (tanto SSD/NVMe como HDD SATA con queue_depth=32)
+	// despache decenas de miles de archivos a máxima velocidad.
 	workers := NCPU()
-	if IsRotational(target) {
-		if workers > 2 {
-			workers = 2
-		}
-	} else {
-		if workers > 32 {
-			workers = 32
-		}
-	}
 	if workers < 1 {
 		workers = 1
+	}
+	if workers > 32 {
+		workers = 32
 	}
 	if workers > len(items) && len(items) > 0 {
 		workers = len(items)

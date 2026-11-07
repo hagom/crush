@@ -611,6 +611,7 @@ func main() {
 			WriteError("%v", err)
 			os.Exit(1)
 		}
+		NotifyTaskComplete("crush", "Análisis de compresibilidad completado", time.Since(appStartTime), *notifyFlag)
 		return
 	}
 

@@ -323,4 +323,64 @@ func TestDoAnalyze_SingleFileTarget(t *testing.T) {
 	}
 }
 
+func TestDoAnalyze_MixedFolderDominantIncompressible(t *testing.T) {
+	tmpDir := t.TempDir()
+	mixedDir := filepath.Join(tmpDir, "heavy_media")
+	os.MkdirAll(mixedDir, 0755)
+
+	// Incompresible dominante: 3 MiB pseudo-aleatorio
+	rnd := rand.New(rand.NewSource(777))
+	rndData := make([]byte, 3*1024*1024)
+	rnd.Read(rndData)
+	if err := os.WriteFile(filepath.Join(mixedDir, "video.mp4"), rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compresible útil: 350 KiB de texto (ahorro ~280 KiB, que es < 10% del total pero > 256 KiB)
+	txtData := bytes.Repeat([]byte("CRUSH REPORT ENTROPY LOG TEST SAMPLE LINE 12345\n"), 7500)
+	if err := os.WriteFile(filepath.Join(mixedDir, "raw.log"), txtData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	opts := AnalyzeOptions{}
+	if err := DoAnalyze([]string{tmpDir}, opts, &buf); err != nil {
+		t.Fatalf("DoAnalyze error: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "heavy_media/") {
+		t.Errorf("salida no contiene heavy_media/:\n%s", out)
+	}
+	if !strings.Contains(out, "selectivo*") {
+		t.Errorf("heavy_media/ debió clasificarse como selectivo* pese a ratio total bajo:\n%s", out)
+	}
+	if !strings.Contains(out, "Notas sobre carpetas mixtas") {
+		t.Errorf("debió generar nota sobre carpeta mixta:\n%s", out)
+	}
+}
+
+func TestFormatNumber(t *testing.T) {
+	cases := []struct {
+		input int
+		want  string
+	}{
+		{0, "0"},
+		{9, "9"},
+		{999, "999"},
+		{1000, "1,000"},
+		{12345, "12,345"},
+		{123456, "123,456"},
+		{1234567, "1,234,567"},
+		{10000000, "10,000,000"},
+	}
+
+	for _, tc := range cases {
+		got := FormatNumber(tc.input)
+		if got != tc.want {
+			t.Errorf("FormatNumber(%d) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
 

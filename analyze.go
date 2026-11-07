@@ -232,6 +232,7 @@ func isPathExcluded(path string, isDir bool, excludes []string) bool {
 }
 
 func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io.Writer) error {
+	target = filepath.Clean(target)
 	fi, err := os.Stat(target)
 	if err != nil {
 		return fmt.Errorf("accediendo a %s: %w", target, err)
@@ -342,13 +343,16 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		return fmt.Errorf("recorriendo %s: %w", target, err)
 	}
 
-	// Análisis concurrente de los archivos recolectados
+	// Análisis concurrente de los archivos recolectados mediante pool acotado de workers
 	workers := NCPU()
 	if workers < 1 {
 		workers = 1
 	}
 	if workers > 32 {
 		workers = 32
+	}
+	if workers > len(items) && len(items) > 0 {
+		workers = len(items)
 	}
 
 	type fileResult struct {
@@ -357,28 +361,36 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		err      error
 	}
 
-	resChan := make(chan fileResult, len(items))
-	sem := make(chan struct{}, workers)
+	workChan := make(chan walkItem, workers*2)
+	resChan := make(chan fileResult, workers*2)
 	var wg sync.WaitGroup
 
-	for _, it := range items {
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func(item walkItem) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			an, aErr := AnalyzeFile(item.absPath)
-			resChan <- fileResult{
-				relPath:  item.relPath,
-				analysis: an,
-				err:      aErr,
+			for item := range workChan {
+				an, aErr := AnalyzeFile(item.absPath)
+				resChan <- fileResult{
+					relPath:  item.relPath,
+					analysis: an,
+					err:      aErr,
+				}
 			}
-		}(it)
+		}()
 	}
 
-	wg.Wait()
-	close(resChan)
+	go func() {
+		wg.Wait()
+		close(resChan)
+	}()
+
+	go func() {
+		for _, it := range items {
+			workChan <- it
+		}
+		close(workChan)
+	}()
 
 	// Agrupación por entrada de primer nivel bajo target
 	type groupData struct {
@@ -491,13 +503,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 				g.compressibleSize >= (256*1024) &&
 				g.incompressibleSize >= (256*1024)
 
-			if ent.SavingsPct < 5.0 || g.compressibleSize == 0 {
-				ent.CompLevel = "Nula"
-				ent.RecommendedFmt = "omitir"
-				ent.EstimatedSize = g.totalSize
-				ent.SavingsBytes = 0
-				ent.SavingsPct = 0
-			} else if isMixed {
+			if isMixed && ent.SavingsBytes >= (256*1024) {
 				ent.IsMixed = true
 				ent.CompLevel = "Parcial"
 				ent.RecommendedFmt = "selectivo*"
@@ -505,6 +511,12 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 				note := fmt.Sprintf("%s: %s compresibles (ahorro estimado %s) y %s ya comprimidos que conviene omitir.",
 					g.name, FormatSize(g.compressibleSize), FormatSize(ent.SavingsBytes), FormatSize(g.incompressibleSize))
 				summary.MixedNotes = append(summary.MixedNotes, note)
+			} else if ent.SavingsPct < 5.0 || g.compressibleSize == 0 {
+				ent.CompLevel = "Nula"
+				ent.RecommendedFmt = "omitir"
+				ent.EstimatedSize = g.totalSize
+				ent.SavingsBytes = 0
+				ent.SavingsPct = 0
 			} else {
 				if ent.SavingsPct >= 55.0 {
 					ent.CompLevel = "Alta"
@@ -778,23 +790,43 @@ func sampleFile(path string, size int64, buf []byte) ([]byte, error) {
 	}
 
 	// 1. Inicio: offset 0
-	if _, err := f.ReadAt(targetBuf[:sampleChunkSize], 0); err != nil && err != io.EOF {
+	n1, err := f.ReadAt(targetBuf[:sampleChunkSize], 0)
+	if err != nil && err != io.EOF {
 		return nil, err
+	}
+	if n1 < sampleChunkSize {
+		return targetBuf[:n1], nil
 	}
 
 	// 2. Mitad
 	midOffset := (size - int64(sampleChunkSize)) / 2
-	if _, err := f.ReadAt(targetBuf[sampleChunkSize:sampleChunkSize*2], midOffset); err != nil && err != io.EOF {
+	n2, err := f.ReadAt(targetBuf[sampleChunkSize:sampleChunkSize*2], midOffset)
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
 
 	// 3. Final
 	endOffset := size - int64(sampleChunkSize)
-	if _, err := f.ReadAt(targetBuf[sampleChunkSize*2:sampleBufferSize], endOffset); err != nil && err != io.EOF {
+	n3, err := f.ReadAt(targetBuf[sampleChunkSize*2:sampleBufferSize], endOffset)
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
 
-	return targetBuf[:sampleBufferSize], nil
+	total := sampleChunkSize
+	if n2 > 0 {
+		if n2 < sampleChunkSize {
+			copy(targetBuf[total:], targetBuf[sampleChunkSize:sampleChunkSize+n2])
+		}
+		total += n2
+	}
+	if n3 > 0 {
+		if n3 < sampleChunkSize || total < sampleChunkSize*2 {
+			copy(targetBuf[total:], targetBuf[sampleChunkSize*2:sampleChunkSize*2+n3])
+		}
+		total += n3
+	}
+
+	return targetBuf[:total], nil
 }
 
 // probeDeflateRatio pasa una muestra por DEFLATE en memoria y devuelve el ratio

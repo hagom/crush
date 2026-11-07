@@ -106,3 +106,89 @@ func TestProbeDeflateRatio(t *testing.T) {
 		t.Errorf("probeDeflateRatio(randomData) = %f, want >= 0.98", r)
 	}
 }
+
+func TestAnalyzeFile_Classification(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Archivo de texto plano (100 KiB)
+	txtPath := filepath.Join(tmpDir, "sample.txt")
+	txtData := bytes.Repeat([]byte("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Aliquam id massa sed nulla.\n"), 1200)
+	if err := os.WriteFile(txtPath, txtData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	resTxt, err := AnalyzeFile(txtPath)
+	if err != nil {
+		t.Fatalf("AnalyzeFile(txt) error: %v", err)
+	}
+	if !resTxt.Compressible {
+		t.Errorf("sample.txt debió clasificarse como compresible")
+	}
+	if resTxt.RecommendedFmt != "xz" && resTxt.RecommendedFmt != "7z" {
+		t.Errorf("sample.txt formato recomendado: got %s, want xz o 7z", resTxt.RecommendedFmt)
+	}
+	if resTxt.SavingsBytes <= 0 || resTxt.SavingsPct < 60.0 {
+		t.Errorf("sample.txt ahorro esperado > 60%%, got %.2f%% (%d bytes)", resTxt.SavingsPct, resTxt.SavingsBytes)
+	}
+
+	// 2. Archivo incompresible / pseudo-aleatorio (64 KiB)
+	rndPath := filepath.Join(tmpDir, "sample.bin")
+	rnd := rand.New(rand.NewSource(9999))
+	rndData := make([]byte, 65536)
+	rnd.Read(rndData)
+	if err := os.WriteFile(rndPath, rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	resRnd, err := AnalyzeFile(rndPath)
+	if err != nil {
+		t.Fatalf("AnalyzeFile(rnd) error: %v", err)
+	}
+	if resRnd.Compressible {
+		t.Errorf("sample.bin no debe ser compresible (entropía alta)")
+	}
+	if resRnd.RecommendedFmt != "omitir" {
+		t.Errorf("sample.bin formato recomendado: got %s, want omitir", resRnd.RecommendedFmt)
+	}
+	if resRnd.SavingsBytes != 0 || resRnd.SavingsPct != 0.0 {
+		t.Errorf("sample.bin ahorro debe ser 0, got %d (%.2f%%)", resRnd.SavingsBytes, resRnd.SavingsPct)
+	}
+
+	// 3. Archivo pre-comprimido por extensión (.mp4 con datos aleatorios)
+	mp4Path := filepath.Join(tmpDir, "video.mp4")
+	if err := os.WriteFile(mp4Path, rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	resMp4, err := AnalyzeFile(mp4Path)
+	if err != nil {
+		t.Fatalf("AnalyzeFile(mp4) error: %v", err)
+	}
+	if resMp4.Compressible || resMp4.RecommendedFmt != "omitir" {
+		t.Errorf("video.mp4 debe ser incompresible con recomendación omitir, got %v (%s)", resMp4.Compressible, resMp4.RecommendedFmt)
+	}
+
+	// 4. Archivo vacío (0 bytes)
+	emptyPath := filepath.Join(tmpDir, "empty.txt")
+	if err := os.WriteFile(emptyPath, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	resEmpty, err := AnalyzeFile(emptyPath)
+	if err != nil {
+		t.Fatalf("AnalyzeFile(empty) error: %v", err)
+	}
+	if resEmpty.Compressible || resEmpty.RecommendedFmt != "omitir" {
+		t.Errorf("empty.txt debe ser omitir, got %v (%s)", resEmpty.Compressible, resEmpty.RecommendedFmt)
+	}
+
+	// 5. Archivo diminuto (< 512 bytes)
+	tinyPath := filepath.Join(tmpDir, "tiny.txt")
+	if err := os.WriteFile(tinyPath, []byte("hola mundo corto"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resTiny, err := AnalyzeFile(tinyPath)
+	if err != nil {
+		t.Fatalf("AnalyzeFile(tiny) error: %v", err)
+	}
+	if resTiny.Compressible || resTiny.RecommendedFmt != "omitir" {
+		t.Errorf("tiny.txt debe ser omitir, got %v (%s)", resTiny.Compressible, resTiny.RecommendedFmt)
+	}
+}
+

@@ -41,6 +41,7 @@
 - **Modo adaptativo inteligente (`-f auto`):** Selección heurística del mejor formato según el tipo de archivo (código/texto $\to$ `xz`/`7z`, multimedia $\to$ `zstd`, carpetas $\to$ `7z`/`tar.zst`, incompresibles $\to$ `lz4`).
 
 ### 🛠️ Inspección, Seguridad & Herramientas Avanzadas
+- **Analizador recursivo de compresibilidad y ahorro (`-analyze`):** Escanea directorios y subdirectorios de forma recursiva calculando la entropía de Shannon ($H$) y una micro-sonda DEFLATE en memoria para determinar con exactitud qué elementos son realmente compresibles, qué formato es el recomendado (`xz`, `7z`, `zst`), alertar sobre carpetas mixtas (`selectivo*`) y emitir un informe ejecutivo con el ahorro estimado en bytes y porcentaje sin comprimir nada en disco.
 - **Registro inteligente y auto-reutilización de contraseñas:** Reutiliza automáticamente contraseñas válidas de la sesión y del registro local cifrado (`~/.config/crush/passwords.txt`), pidiendo contraseña una sola vez y propagándola al resto del lote.
 - **Cola diferida de archivos protegidos:** Al descomprimir lotes heterogéneos, procesa de inmediato los archivos sin contraseña o conocidos en paralelo (Fase 1/2) y difiere los protegidos para atención ordenada al final (Fase 2/2).
 - **Transcodificación directa (`-convert` / `-recompress`):** Convierte entre formatos por streaming directo (`descompresor | compresor`) sin archivos intermedios en disco.
@@ -180,6 +181,10 @@ crush -verify paquete.tar.xz
 
 # Streaming a stdout para tuberías UNIX
 crush -r dump.sql.gz | mysql -u root base_datos
+
+# Analizar recursivamente compresibilidad y estimar ahorro sin comprimir
+crush -analyze
+crush -analyze -clean -v /datos/proyecto
 ```
 
 ---
@@ -188,6 +193,7 @@ crush -r dump.sql.gz | mysql -u root base_datos
 
 ```text
 Modos Principales:
+  crush -analyze [opciones] [dir...]      Analizar compresibilidad y estimar ahorro de espacio
   crush -c [opciones] [archivos...]       Comprimir elementos
   crush -d [opciones] [directorio|archivos] Descomprimir elementos
   crush -convert -f FORMATO archivos...    Transcodificar entre formatos

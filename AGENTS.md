@@ -119,6 +119,7 @@ crush/
 ├── compress.go      # DoCompress, compressItems, tar-pipe, -hash, -p, -sparse, -clean
 ├── decompress.go    # DoDecompress, splitWriter, -p, -filter
 ├── passwords.go     # PasswordManager, registro ~/.config/crush/passwords.txt y auto-reutilización
+├── analyze.go       # DoAnalyze, AnalyzeFile, sampleFile, probeDeflateRatio, renderAnalyzeReport (-analyze)
 ├── archive_list.go  # Lector polimórfico de miembros de archivo sin extracción a disco
 ├── tree.go          # Generador de vista en árbol jerárquica (-tree)
 ├── find.go          # Motor de búsqueda por patrón glob en comprimidos (-find)
@@ -146,8 +147,15 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 523 tests nativos pasando con race detector (-race). ~17600 líneas. 0 bugs conocidos.
+- Go: migración completa. 532 tests nativos pasando con race detector (-race). ~18500 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Analizador Recursivo de Compresibilidad y Ahorro (`-analyze` / `analyze.go`):
+    - **Muestreo estratificado de 3 puntos (`sampleFile`):** Lectura ultra-eficiente de hasta 96 KiB (inicio, centro y final) evitando lecturas completas de archivos gigantes con pooling de búferes (`sync.Pool`).
+    - **Micro-sonda en memoria DEFLATE (`probeDeflateRatio`):** Medición instantánea del ratio real en RAM utilizando `compress/flate` con `countingSink`, sin crear archivos temporales ni invocar subprocesos pesados.
+    - **Clasificación y recomendación inteligente de formato:** `xz`/`7z` para texto/código (Alta), `zst`/`gz` para binarios estructurados (Media), y `omitir` para alta entropía ($H \ge 7.90$) o formatos multimedia/precomprimidos ($H \ge 7.20$).
+    - **Detección de carpetas mixtas (`selectivo*`):** Identificación de directorios que combinan contenido altamente compresible con grandes volúmenes incompresibles, emitiendo notas detalladas de ahorro selectivo.
+    - **Reporte tabular ejecutivo:** Visualización limpia por elemento de primer nivel con tipo (FILE/DIR), tamaño actual, entropía ponderada en b/B, nivel de compresibilidad con símbolos ANSI (`✓ Alta`, `✓ Media`, `◐ Parcial`, `✗ Nula`), formato sugerido, tamaño estimado resultante y ahorro estimado (-bytes y porcentaje), con resumen global de archivos analizados, datos ya comprimidos a omitir y potencial real de compresión.
+    - **Integración con `-clean`, `-exclude` y `-notify`:** Filtrado de temporales/VCS y alertas de escritorio al finalizar análisis de gran envergadura.
   - Detección Automática de Entropía Previa (Shannon Entropy):
     - **Análisis Instantáneo de Redundancia de Cabecera (`CalculateShannonEntropy` / `IsHighEntropyFile` en `format.go`):** Inspección de hasta 64 KiB de cabecera en $<0.05$ ms calculando la entropía en bits por byte ($H = -\sum p_i \log_2 p_i$). Si $H \ge 7.90$ b/B en muestras $\ge 4$ KiB, detecta de forma certera datos incompresibles (archivos ya comprimidos o cifrados) sin importar su extensión.
     - **Asignación Rápida en `-f auto`:** En modo adaptativo inteligente, si el archivo presenta alta entropía, selecciona automáticamente `lz4` ultrarrápido (o `zstd` como fallback) emitiendo el aviso: `ℹ 'archivo' ya parece estar comprimido; usando compresión rápida (lz4).`

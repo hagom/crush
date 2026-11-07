@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -191,4 +192,135 @@ func TestAnalyzeFile_Classification(t *testing.T) {
 		t.Errorf("tiny.txt debe ser omitir, got %v (%s)", resTiny.Compressible, resTiny.RecommendedFmt)
 	}
 }
+
+func TestDoAnalyze_DirectoryAggregation(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. subcarpeta compresible (código / texto)
+	srcDir := filepath.Join(tmpDir, "src")
+	os.MkdirAll(srcDir, 0755)
+	txtData := bytes.Repeat([]byte("SELECT * FROM users WHERE active = 1 AND role = 'admin';\n"), 800) // ~48 KiB
+	os.WriteFile(filepath.Join(srcDir, "query.sql"), txtData, 0644)
+	os.WriteFile(filepath.Join(srcDir, "app.go"), bytes.Repeat([]byte("package main\nfunc Run() {}\n"), 1000), 0644)
+
+	// 2. subcarpeta incompresible (videos / binarios aleatorios)
+	mediaDir := filepath.Join(tmpDir, "media")
+	os.MkdirAll(mediaDir, 0755)
+	rnd := rand.New(rand.NewSource(4321))
+	rndData := make([]byte, 65536)
+	rnd.Read(rndData)
+	os.WriteFile(filepath.Join(mediaDir, "clip.mp4"), rndData, 0644)
+
+	// 3. subcarpeta mixta (mezcla archivos compresibles e incompresibles >= 1 MiB)
+	mixedDir := filepath.Join(tmpDir, "mixed")
+	os.MkdirAll(mixedDir, 0755)
+	// archivo incompresible de 1.1 MiB
+	bigRnd := make([]byte, 1153434)
+	rnd.Read(bigRnd)
+	os.WriteFile(filepath.Join(mixedDir, "backup.zip"), bigRnd, 0644)
+	// archivo compresible de 1.2 MiB
+	bigTxt := bytes.Repeat([]byte("LOG LINE [INFO] user authenticated successfully from 192.168.1.1\n"), 19000)
+	os.WriteFile(filepath.Join(mixedDir, "server.log"), bigTxt, 0644)
+
+	// 4. archivos sueltos en raíz
+	os.WriteFile(filepath.Join(tmpDir, "top.txt"), txtData, 0644)
+	os.WriteFile(filepath.Join(tmpDir, "top.mp4"), rndData, 0644)
+
+	var buf bytes.Buffer
+	opts := AnalyzeOptions{}
+	err := DoAnalyze([]string{tmpDir}, opts, &buf)
+	if err != nil {
+		t.Fatalf("DoAnalyze error: %v", err)
+	}
+
+	out := buf.String()
+
+	// Verificar encabezado y secciones
+	if !strings.Contains(out, "=== Informe de Compresibilidad:") {
+		t.Errorf("salida no contiene título principal:\n%s", out)
+	}
+	if !strings.Contains(out, "=== Resumen del Estudio ===") {
+		t.Errorf("salida no contiene resumen final:\n%s", out)
+	}
+
+	// Verificar presencia de elementos de primer nivel
+	for _, expected := range []string{"src/", "media/", "mixed/", "top.txt", "top.mp4"} {
+		if !strings.Contains(out, expected) {
+			t.Errorf("salida no contiene elemento esperado %q:\n%s", expected, out)
+		}
+	}
+
+	// Verificar que mixed/ haya sido detectada como carpeta mixta
+	if !strings.Contains(out, "selectivo*") && !strings.Contains(out, "selectivo") {
+		t.Errorf("mixed/ debió recomendarse como selectivo*:\n%s", out)
+	}
+	if !strings.Contains(out, "Notas sobre carpetas mixtas") {
+		t.Errorf("debió incluirse sección de notas de carpetas mixtas:\n%s", out)
+	}
+}
+
+func TestDoAnalyze_FiltersAndClean(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	gitDir := filepath.Join(tmpDir, ".git")
+	os.MkdirAll(gitDir, 0755)
+	os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0644)
+
+	nodeDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nodeDir, 0755)
+	os.WriteFile(filepath.Join(nodeDir, "index.js"), []byte("console.log(1)\n"), 0644)
+
+	docDir := filepath.Join(tmpDir, "docs")
+	os.MkdirAll(docDir, 0755)
+	os.WriteFile(filepath.Join(docDir, "readme.txt"), bytes.Repeat([]byte("documentacion general\n"), 100), 0644)
+	os.WriteFile(filepath.Join(docDir, "debug.log"), bytes.Repeat([]byte("log error line\n"), 100), 0644)
+
+	var buf bytes.Buffer
+	opts := AnalyzeOptions{
+		Clean:   true,
+		Exclude: []string{"*.log"},
+	}
+
+	err := DoAnalyze([]string{tmpDir}, opts, &buf)
+	if err != nil {
+		t.Fatalf("DoAnalyze error: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, ".git") {
+		t.Errorf("-clean no excluyó .git:\n%s", out)
+	}
+	if strings.Contains(out, "node_modules") {
+		t.Errorf("-clean no excluyó node_modules:\n%s", out)
+	}
+	if strings.Contains(out, "debug.log") {
+		t.Errorf("-exclude no excluyó *.log:\n%s", out)
+	}
+	if !strings.Contains(out, "docs/") {
+		t.Errorf("docs/ debió aparecer en el reporte:\n%s", out)
+	}
+}
+
+func TestDoAnalyze_SingleFileTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "single_dump.sql")
+	sqlData := bytes.Repeat([]byte("CREATE TABLE example (id INT PRIMARY KEY, name VARCHAR(255));\n"), 500)
+	os.WriteFile(filePath, sqlData, 0644)
+
+	var buf bytes.Buffer
+	opts := AnalyzeOptions{}
+	err := DoAnalyze([]string{filePath}, opts, &buf)
+	if err != nil {
+		t.Fatalf("DoAnalyze(singleFile) error: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "single_dump.sql") {
+		t.Errorf("informe de archivo individual no contiene el nombre del archivo:\n%s", out)
+	}
+	if !strings.Contains(out, "=== Resumen del Estudio ===") {
+		t.Errorf("informe de archivo individual no contiene resumen:\n%s", out)
+	}
+}
+
 

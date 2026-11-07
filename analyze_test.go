@@ -251,11 +251,11 @@ func TestDoAnalyze_DirectoryAggregation(t *testing.T) {
 	}
 
 	// Verificar que mixed/ haya sido detectada como carpeta mixta
-	if !strings.Contains(out, "selectivo*") && !strings.Contains(out, "selectivo") {
-		t.Errorf("mixed/ debió recomendarse como selectivo*:\n%s", out)
-	}
 	if !strings.Contains(out, "Notas sobre carpetas mixtas") {
 		t.Errorf("debió incluirse sección de notas de carpetas mixtas:\n%s", out)
+	}
+	if strings.Contains(out, "Entropía") {
+		t.Errorf("la tabla no debe contener la columna Entropía:\n%s", out)
 	}
 }
 

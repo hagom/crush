@@ -18,6 +18,7 @@ import (
 type FileAnalysis struct {
 	Path           string  // Ruta del archivo
 	Size           int64   // Tamaño real en bytes
+	SampleBytes    int64   // Bytes reales leídos de la unidad de almacenamiento durante el muestreo
 	Entropy        float64 // Entropía de Shannon (0.00 a 8.00 b/B)
 	ProbeRatio     float64 // Ratio de la micro-sonda DEFLATE
 	Compressible   bool    // ¿Es razonablemente compresible?
@@ -47,6 +48,7 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 		res.CompLevel = "Nula"
 		res.RecommendedFmt = "omitir"
 		res.EstimatedSize = 0
+		res.SampleBytes = 0
 		return res, nil
 	}
 
@@ -54,6 +56,7 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 		res.Compressible = false
 		res.CompLevel = "Nula"
 		res.RecommendedFmt = "omitir"
+		res.SampleBytes = size
 		return res, nil
 	}
 
@@ -64,6 +67,7 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 	if err != nil {
 		return FileAnalysis{}, err
 	}
+	res.SampleBytes = int64(len(sample))
 
 	entropy := CalculateShannonEntropy(sample)
 	res.Entropy = entropy
@@ -405,6 +409,7 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 				an, aErr := AnalyzeFile(item.absPath)
 				if apt != nil {
 					apt.Incr()
+					apt.AddBytes(an.SampleBytes)
 				}
 				resChan <- fileResult{
 					relPath:  item.relPath,
@@ -546,10 +551,26 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 			if isMixed && ent.SavingsBytes >= (256*1024) {
 				ent.IsMixed = true
 				ent.CompLevel = "Parcial"
-				ent.RecommendedFmt = "selectivo*"
 				ent.MixedCompSavings = ent.SavingsBytes
-				note := fmt.Sprintf("%s: %s compresibles (ahorro estimado %s) y %s ya comprimidos que conviene omitir.",
-					g.name, FormatSize(g.compressibleSize), FormatSize(ent.SavingsBytes), FormatSize(g.incompressibleSize))
+				if ent.SavingsPct >= 40.0 {
+					if hasTool(sevenzBin()) {
+						ent.RecommendedFmt = "7z"
+					} else if hasTool("xz") {
+						ent.RecommendedFmt = "tar.xz"
+					} else {
+						ent.RecommendedFmt = "tar.zst"
+					}
+				} else {
+					if hasTool("zstd") {
+						ent.RecommendedFmt = "tar.zst"
+					} else if hasTool(sevenzBin()) {
+						ent.RecommendedFmt = "7z"
+					} else {
+						ent.RecommendedFmt = "tar.gz"
+					}
+				}
+				note := fmt.Sprintf("%s: %s compresibles (ahorro estimado %s con %s selectivo*) y %s ya comprimidos que conviene omitir.",
+					g.name, FormatSize(g.compressibleSize), FormatSize(ent.SavingsBytes), ent.RecommendedFmt, FormatSize(g.incompressibleSize))
 				summary.MixedNotes = append(summary.MixedNotes, note)
 			} else if ent.SavingsPct < 5.0 || g.compressibleSize == 0 {
 				ent.CompLevel = "Nula"
@@ -618,9 +639,9 @@ func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSu
 		return
 	}
 
-	fmt.Fprintf(out, "  %-30s %-5s %14s %10s %-12s %-13s %14s %18s\n",
-		"Elemento", "Tipo", "Tamaño Actual", "Entropía", "Compresible", "Formato Rec.", "Tamaño Est.", "Ahorro Est.")
-	fmt.Fprintf(out, "  %s\n", strings.Repeat("─", 116))
+	fmt.Fprintf(out, "  %-30s %-5s %14s %-12s %-13s %14s %18s\n",
+		"Elemento", "Tipo", "Tamaño Actual", "Compresible", "Formato Rec.", "Tamaño Est.", "Ahorro Est.")
+	fmt.Fprintf(out, "  %s\n", strings.Repeat("─", 108))
 
 	for _, e := range entries {
 		typeStr := "FILE"
@@ -633,11 +654,6 @@ func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSu
 			nameDisplay = nameDisplay[:25] + "..."
 		}
 
-		entropyStr := fmt.Sprintf("%.2f b/B", e.WeightedEntropy)
-		if e.TotalSize == 0 {
-			entropyStr = "-     "
-		}
-
 		var compSymbol string
 		switch e.CompLevel {
 		case "Alta":
@@ -645,7 +661,11 @@ func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSu
 		case "Media":
 			compSymbol = fmt.Sprintf("%s✓ Media%s  ", Blue, NC)
 		case "Parcial":
-			compSymbol = fmt.Sprintf("%s◐ Parcial%s", Yellow, NC)
+			if e.IsMixed {
+				compSymbol = fmt.Sprintf("%s◐ Parcial*%s", Yellow, NC)
+			} else {
+				compSymbol = fmt.Sprintf("%s◐ Parcial%s ", Yellow, NC)
+			}
 		default:
 			compSymbol = fmt.Sprintf("%s✗ Nula%s   ", Red, NC)
 		}
@@ -657,11 +677,10 @@ func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSu
 			savingsStr = fmt.Sprintf(" 0 B ( 0.0%%)")
 		}
 
-		fmt.Fprintf(out, "  %-30s %-5s %14s %10s %-21s %-13s %14s %18s\n",
+		fmt.Fprintf(out, "  %-30s %-5s %14s %-21s %-13s %14s %18s\n",
 			nameDisplay,
 			typeStr,
 			FormatSize(e.TotalSize),
-			entropyStr,
 			compSymbol,
 			e.RecommendedFmt,
 			FormatSize(e.EstimatedSize),
@@ -680,11 +699,10 @@ func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSu
 				} else {
 					fSavings = " 0 B ( 0.0%)"
 				}
-				fmt.Fprintf(out, "    %-28s %-5s %14s %10s %-12s %-13s %14s %18s\n",
+				fmt.Fprintf(out, "    %-28s %-5s %14s %-12s %-13s %14s %18s\n",
 					fName,
 					"file",
 					FormatSize(f.Size),
-					fmt.Sprintf("%.2f b/B", f.Entropy),
 					f.CompLevel,
 					f.RecommendedFmt,
 					FormatSize(f.EstimatedSize),
@@ -896,6 +914,7 @@ func probeDeflateRatio(sample []byte) float64 {
 type analyzeProgressTracker struct {
 	totalFiles int
 	filesDone  atomic.Int64
+	bytesRead  atomic.Int64
 	startTime  time.Time
 	ticker     *time.Ticker
 	done       chan struct{}
@@ -937,11 +956,16 @@ func (apt *analyzeProgressTracker) Incr() {
 	apt.filesDone.Add(1)
 }
 
+func (apt *analyzeProgressTracker) AddBytes(n int64) {
+	apt.bytesRead.Add(n)
+}
+
 func (apt *analyzeProgressTracker) render() {
 	if !apt.isTTY {
 		return
 	}
 	done := apt.filesDone.Load()
+	bytesRead := apt.bytesRead.Load()
 	elapsed := time.Since(apt.startTime)
 
 	pct := 0.0
@@ -953,13 +977,9 @@ func (apt *analyzeProgressTracker) render() {
 	}
 
 	var speedStr string
-	if elapsed.Seconds() > 0.1 && done > 0 {
-		rate := float64(done) / elapsed.Seconds()
-		if rate >= 1000 {
-			speedStr = fmt.Sprintf("%.1fk arch/s", rate/1000.0)
-		} else {
-			speedStr = fmt.Sprintf("%d arch/s", int(rate))
-		}
+	if elapsed.Seconds() > 0.1 && bytesRead > 0 {
+		speed := float64(bytesRead) / elapsed.Seconds()
+		speedStr = fmt.Sprintf("%s/s", FormatSize(int64(speed)))
 	} else {
 		speedStr = "iniciando..."
 	}

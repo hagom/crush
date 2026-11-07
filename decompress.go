@@ -362,7 +362,18 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 		}
 
 		maxWorkers := opts.Parallel
-		if !allMono && maxWorkers > 8 {
+		isRot := false
+		if opts.OutputDir != "" {
+			isRot = IsRotational(opts.OutputDir)
+		} else if len(files) > 0 {
+			isRot = IsRotational(files[0])
+		}
+
+		if isRot {
+			if maxWorkers > 2 {
+				maxWorkers = 2
+			}
+		} else if !allMono && maxWorkers > 8 {
 			maxWorkers = 8
 		}
 		if len(files) < maxWorkers {

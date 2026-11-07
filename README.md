@@ -249,6 +249,7 @@ crush/
 ├── test_cmd.go      # Motor de verificación de integridad y hashes SHA-256
 ├── util.go          # Métodos atómicos, cálculo LPT, GetDiskAvail, memoria y buffers
 ├── util_linux.go    # Zero-copy splice(2) y optimización F_SETPIPE_SZ (1 MiB)
+├── hardware_linux.go # Detección inteligente de hardware (NVMe/SSD vs HDD mecánico)
 ├── lock_unix.go     # Instancia única con exclusión mutua flock(2)
 ├── pkgmgr.go        # Gestor desatendido multiplataforma de dependencias de sistema
 └── *_test.go        # Suite con 518+ tests unitarios y de integración (-race)

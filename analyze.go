@@ -436,11 +436,17 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 
 	// Análisis concurrente de los archivos recolectados mediante pool acotado de workers
 	workers := NCPU()
+	if IsRotational(target) {
+		if workers > 2 {
+			workers = 2
+		}
+	} else {
+		if workers > 32 {
+			workers = 32
+		}
+	}
 	if workers < 1 {
 		workers = 1
-	}
-	if workers > 32 {
-		workers = 32
 	}
 	if workers > len(items) && len(items) > 0 {
 		workers = len(items)

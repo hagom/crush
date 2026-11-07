@@ -1018,7 +1018,19 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 			break
 		}
 	}
-	if anyMultiThreaded && maxWorkers > 8 {
+	isRot := false
+	if len(tasks) > 0 {
+		isRot = IsRotational(tasks[0].File)
+	}
+	if !isRot && opts.OutputDir != "" {
+		isRot = IsRotational(opts.OutputDir)
+	}
+
+	if isRot {
+		if maxWorkers > 2 {
+			maxWorkers = 2
+		}
+	} else if anyMultiThreaded && maxWorkers > 8 {
 		maxWorkers = 8
 	}
 	if len(tasks) < maxWorkers {

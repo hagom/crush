@@ -13,9 +13,17 @@ Este documento registra el historial de análisis de propuestas técnicas y su e
   - En modo `-f auto`: Asigna automáticamente formato ultrarrápido (`lz4`) emitiendo un aviso limpio: `ℹ 'archivo' ya parece estar comprimido; usando compresión rápida (lz4).`
   - En formatos pesados manuales (`-f xz`, `-f 7z`, etc.): Emite advertencia preventiva inmediata: `⚠ 'archivo' ya parece estar comprimido o cifrado; la compresión apenas reducirá su tamaño.`
 
+### Listado Human-Readable y Elegante de Archivos (`crush -l`)
+- **Estado:** ✅ **IMPLEMENTADA**
+- **Descripción:** Estandarización y formateo visual de la salida de `crush -l`. Elimina los banners y volcados crudos de herramientas subyacentes (`7z l`, `unzip`, `tar`), sustituyéndolos por una tabla estructurada con permisos (`-rw-r--r--`, `drwxr-xr-x`), tamaños métricos dinámicos (`FormatSize`), fecha y hora de modificación, carpetas coloreadas y resumen de archivos, carpetas, tamaño sin comprimir y ratio de compresión/ahorro.
+
 ---
 
 ## 2. Propuestas Evaluadas y Descartadas
+
+### Extracción Quirúrgica de Miembros a Stdout (`crush --cat`)
+- **Estado:** ❌ **DESCARTADA**
+- **Motivo:** Principio de minimalismo y pragmatismo CLI (*Ponytail* / YAGNI). La extracción quirúrgica a `stdout` sobre archivos masivos o contenedores complejos resulta redundante y propensa a cuellos de botella frente a las opciones existentes: `crush -r` para flujos directos y `crush -d -filter` para extracción selectiva limpia.
 
 ### Registros de Recuperación (*Recovery Records* / Paridad PAR2)
 - **Estado:** ❌ **DESCARTADA**

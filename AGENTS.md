@@ -120,6 +120,7 @@ crush/
 ├── decompress.go    # DoDecompress, splitWriter, -p, -filter
 ├── passwords.go     # PasswordManager, registro ~/.config/crush/passwords.txt y auto-reutilización
 ├── analyze.go       # DoAnalyze, AnalyzeFile, sampleFile, probeDeflateRatio, renderAnalyzeReport (--analyze)
+├── list.go          # DoList, RenderListTable, formato visual elegante human-readable (-l)
 ├── archive_list.go  # Lector polimórfico de miembros de archivo sin extracción a disco
 ├── tree.go          # Generador de vista en árbol jerárquica (-tree)
 ├── find.go          # Motor de búsqueda por patrón glob en comprimidos (-find)
@@ -151,6 +152,10 @@ crush/
 
 - Go: migración completa. 532 tests nativos pasando con race detector (-race). ~18500 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Salida Tabular Human-Readable para Listado de Contenido (`crush -l` / `list.go`):
+    - **Visualización Limpia sin Banners:** Reemplazo de los volcados crudos de subprocesos (`7z l`, `unzip -l`, `tar -tf`) por una tabla estructurada con permisos (`-rw-r--r--`, `drwxr-xr-x`), tamaños métricos dinámicos (`FormatSize`), fecha y hora de modificación y coloreado de directorios.
+    - **Resumen Estadístico Consolidado:** Pie con conteo de archivos, carpetas, total de bytes sin comprimir y ratio/ahorro porcentual de compresión.
+    - **Optimización de Lectura de Metadatos (2 ms):** Consulta de cabeceras instantánea con verificación perezosa de contraseñas, eliminando bloqueos e invocaciones innecesarias a disco.
   - Analizador Recursivo de Compresibilidad y Ahorro (`--analyze` / `analyze.go`):
     - **Muestreo estratificado de 3 puntos (`sampleFile`):** Lectura ultra-eficiente de hasta 96 KiB (inicio, centro y final) evitando lecturas completas de archivos gigantes con pooling de búferes (`sync.Pool`).
     - **Micro-sonda en memoria DEFLATE (`probeDeflateRatio`):** Medición instantánea del ratio real en RAM utilizando `compress/flate` con `countingSink`, sin crear archivos temporales ni invocar subprocesos pesados.

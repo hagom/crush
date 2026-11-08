@@ -150,8 +150,13 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 571 tests nativos pasando con race detector (-race). ~18600 líneas. 0 bugs conocidos.
+- Go: migración completa. 577 tests nativos pasando con race detector (-race). ~19000 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Modo Reanudación de Lotes Interrumpidos (`--resume` / `compress.go`, `decompress.go`, `main.go`):
+    - **Reanudación Minimalista y Resiliente (Unix Way):** Capacidad de reanudar lotes masivos de compresión y descompresión ante interrupciones (Ctrl+C, reinicio, falta de espacio) sin generar archivos de estado intermedios ni ensuciar los directorios del usuario.
+    - **Validación de Integridad en Compresión (`crush -c --resume`):** Si el archivo comprimido destino ya existe, se comprueba su validez física (`testArchiveIntegrity`). Si el archivo está completo, se omite (`ℹ [reanudado]`); si quedó truncado o corrupto por un corte de proceso, se detecta, elimina y recomprime limpiamente (`⚠ [reanudando]`).
+    - **Verificación de Miembros en Descompresión (`crush -d --resume`):** `isArchiveFullyExtracted` coteja la existencia y tamaños de los miembros del archivo (`ListArchiveMembers`) en el directorio de salida. Los archivos completamente extraídos se omiten instantáneamente (`ℹ [reanudado]`), mientras que extracciones truncadas o pendientes se reanudan sobrescribiendo los fragmentos incompletos sin arrojar errores de colisión de archivos.
+    - **Short-Circuit Inmediato:** Si todos los archivos del lote ya estaban completados, se emite `✓ Todos los archivos ya estaban completados. Nada que reanudar.` sin consumir CPU ni I/O.
   - Portabilidad Multi-Entorno y Tests Desacoplados del Host:
     - **Neutralidad de Hardware y Rutas en Tests:** Erradicación de suposiciones de máquina local en tests (`TestIsRotational_LiveHost`, `TestAdaptive7zDict`, `TestPromptDecompressAll_CustomDir`), eliminando rutas absolutas del desarrollador original (`/baul`, `/home/hagom`) y asunciones rígidas sobre la memoria RAM del sistema ($\ge 8$ GB) o la tecnología de disco (HDD vs NVMe). Ahora las pruebas verifican comportamiento observable e invariantes lógicas bajo mocks explícitos o rutas efímeras portables (`t.TempDir()`).
     - **Protección del Harness de Tests contra Elevación Involuntaria:** `InstallMissingDeps` ahora detecta automáticamente la ejecución bajo `go test` para evitar invocar gestores de paquetes o procesos elevados con `sudo` en las máquinas de los desarrolladores si una herramienta externa está ausente.

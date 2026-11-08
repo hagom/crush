@@ -2283,6 +2283,144 @@ func TestDecompress_CapacityAwareWaves_PartialSkipped(t *testing.T) {
 	}
 }
 
+func TestDecompressResume_AllCompleted(t *testing.T) {
+	tmpDir := t.TempDir()
+	origFile := filepath.Join(tmpDir, "sample.txt")
+	content := []byte("texto de prueba para descompresion con resume")
+	if err := os.WriteFile(origFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Comprimir para obtener un archivo .gz
+	gzFile := filepath.Join(tmpDir, "sample.txt.gz")
+	_, err := DoCompress([]string{origFile}, CompressOptions{Format: Gz, OutputDir: tmpDir, KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoCompress falló: %v", err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	os.MkdirAll(outDir, 0755)
+
+	// Primera descompresión
+	dOpts := DecompressOptions{
+		OutputDir: outDir,
+		KeepOrig:  true,
+	}
+	if err := DoDecompress([]string{gzFile}, dOpts); err != nil {
+		t.Fatalf("Primera descompresión falló: %v", err)
+	}
+
+	extractedFile := filepath.Join(outDir, "sample.txt")
+	fi, err := os.Stat(extractedFile)
+	if err != nil {
+		t.Fatalf("Archivo extraído no existe: %v", err)
+	}
+	modTime := fi.ModTime()
+
+	// Segunda descompresión con Resume: debe omitir y no modificar el archivo
+	resumeOpts := dOpts
+	resumeOpts.Resume = true
+	if err := DoDecompress([]string{gzFile}, resumeOpts); err != nil {
+		t.Fatalf("DoDecompress con Resume falló: %v", err)
+	}
+
+	fiAfter, err := os.Stat(extractedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fiAfter.ModTime().Equal(modTime) {
+		t.Errorf("sample.txt fue reescrito a pesar de Resume: antes=%v, después=%v", modTime, fiAfter.ModTime())
+	}
+}
+
+func TestDecompressResume_Incomplete(t *testing.T) {
+	tmpDir := t.TempDir()
+	origFile := filepath.Join(tmpDir, "data.txt")
+	content := []byte("contenido completo de datos importantes que se interrumpio")
+	if err := os.WriteFile(origFile, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gzFile := filepath.Join(tmpDir, "data.txt.gz")
+	_, err := DoCompress([]string{origFile}, CompressOptions{Format: Gz, OutputDir: tmpDir, KeepOrig: true})
+	if err != nil {
+		t.Fatalf("DoCompress falló: %v", err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	os.MkdirAll(outDir, 0755)
+
+	// Simular archivo destino incompleto/truncado (solo 5 bytes)
+	extractedFile := filepath.Join(outDir, "data.txt")
+	if err := os.WriteFile(extractedFile, []byte("conte"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sin Resume, debe fallar porque ya existe
+	noResumeOpts := DecompressOptions{
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Resume:    false,
+		Force:     false,
+	}
+	if err := DoDecompress([]string{gzFile}, noResumeOpts); err == nil {
+		t.Errorf("Sin resume debió fallar por colisión de archivo existente")
+	}
+
+	// Con Resume, debe reanudar/sobrescribir el archivo incompleto y completarlo
+	resumeOpts := DecompressOptions{
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Resume:    true,
+	}
+	if err := DoDecompress([]string{gzFile}, resumeOpts); err != nil {
+		t.Fatalf("DoDecompress con Resume falló en archivo incompleto: %v", err)
+	}
+
+	resData, err := os.ReadFile(extractedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resData) != string(content) {
+		t.Errorf("Contenido extraído no coincide: esperado=%q, obtenido=%q", string(content), string(resData))
+	}
+}
+
+func TestDecompressResume_TarGzContainer(t *testing.T) {
+	tmpDir := t.TempDir()
+	d1 := filepath.Join(tmpDir, "folder")
+	os.MkdirAll(d1, 0755)
+	os.WriteFile(filepath.Join(d1, "f1.txt"), []byte("archivo uno dentro de tar"), 0644)
+	os.WriteFile(filepath.Join(d1, "f2.txt"), []byte("archivo dos dentro de tar"), 0644)
+
+	// Comprimir carpeta
+	tarGzFile := filepath.Join(tmpDir, "folder.tar.gz")
+	cmd := exec.Command("tar", "-czf", tarGzFile, "-C", tmpDir, "folder")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tmpDir, "out")
+	os.MkdirAll(outDir, 0755)
+
+	// Primera descompresión completa
+	dOpts := DecompressOptions{
+		OutputDir: outDir,
+		KeepOrig:  true,
+	}
+	if err := DoDecompress([]string{tarGzFile}, dOpts); err != nil {
+		t.Fatalf("DoDecompress falló: %v", err)
+	}
+
+	// Segunda descompresión con Resume: debe omitir folder.tar.gz
+	resumeOpts := dOpts
+	resumeOpts.Resume = true
+	if err := DoDecompress([]string{tarGzFile}, resumeOpts); err != nil {
+		t.Fatalf("DoDecompress con Resume falló: %v", err)
+	}
+}
+
+
 
 
 

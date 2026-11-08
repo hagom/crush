@@ -17,6 +17,14 @@ Este documento registra el historial de análisis de propuestas técnicas y su e
 - **Estado:** ✅ **IMPLEMENTADA**
 - **Descripción:** Estandarización y formateo visual de la salida de `crush -l`. Elimina los banners y volcados crudos de herramientas subyacentes (`7z l`, `unzip`, `tar`), sustituyéndolos por una tabla estructurada con permisos (`-rw-r--r--`, `drwxr-xr-x`), tamaños métricos dinámicos (`FormatSize`), fecha y hora de modificación, carpetas coloreadas y resumen de archivos, carpetas, tamaño sin comprimir y ratio de compresión/ahorro.
 
+### Modo Reanudación de Lotes Interrumpidos (`--resume`)
+- **Estado:** ✅ **IMPLEMENTADA**
+- **Descripción:** Mecanismo resiliente y minimalista (*Ponytail*) para reanudar operaciones interrumpidas en lotes de compresión (`crush -c --resume`) y descompresión (`crush -d --resume`) sin archivos de estado intermedios ni metadatos ocultos.
+- **Acción implementada:**
+  - **En compresión:** Comprueba si el archivo comprimido destino ya existe y verifica su integridad real (`testArchiveIntegrity`). Si el archivo está completo e íntegro, lo omite con aviso `ℹ [reanudado]`. Si el archivo existe pero quedó truncado o corrupto por una interrupción previa, lo elimina y recomprime limpiamente con aviso `⚠ [reanudando]`.
+  - **En descompresión:** Comprueba el estado de extracción consultando el directorio destino contra los miembros y tamaños reales del archivo (`ListArchiveMembers`). Si todos los archivos ya existen y coinciden en tamaño, omite el archivo con aviso `ℹ [reanudado]`. Si la extracción quedó incompleta, reanuda permitiendo sobrescribir las partes truncas y finalizando la extracción sin arrojar errores de colisión.
+  - Si todos los elementos del lote ya estaban concluidos, emite de inmediato: `✓ Todos los archivos ya estaban completados. Nada que reanudar.` sin consumir CPU ni I/O.
+
 ---
 
 ## 2. Propuestas Evaluadas y Descartadas

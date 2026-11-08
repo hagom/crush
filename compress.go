@@ -38,6 +38,7 @@ type CompressOptions struct {
 	Sparse          bool
 	NoSparse        bool
 	Clean           bool
+	Resume          bool
 }
 
 var DefaultCleanExcludes = []string{
@@ -66,6 +67,7 @@ type CompressionTask struct {
 	Size      int64
 	ThreadCap int
 	OutPath   string
+	Skipped   bool
 }
 
 func FormatComplexityWeight(f Format) int64 {
@@ -158,11 +160,31 @@ func generateCompressionTasks(items []string, opts CompressOptions) ([]Compressi
 				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
 			}
 			ext := ExtForItem(fmtChoice, isDir)
-			outPath := GetUniqueName(filepath.Join(targetDir, baseName), ext)
 			fileOpts := opts
 			fileOpts.Format = fmtChoice
-			outPath = splitOutPath(outPath, fileOpts)
-			task.OutPath = outPath
+
+			var outPath string
+			if opts.Resume {
+				canonicalPath := splitOutPath(filepath.Join(targetDir, baseName+"."+ext), fileOpts)
+				if _, err := os.Stat(canonicalPath); err == nil {
+					status, testErr := testArchiveIntegrity(canonicalPath, TestOptions{Quick: true, Password: opts.Password})
+					if testErr == nil && status == "OK" {
+						task.OutPath = canonicalPath
+						task.Skipped = true
+						WriteLogf("%sℹ [reanudado] '%s' ya existe y es válido; omitiendo compresión.%s\n", Blue, canonicalPath, NC)
+					} else {
+						_ = os.RemoveAll(canonicalPath)
+						WriteLogf("%s⚠ [reanudando] '%s' existe pero está incompleto o corrupto; recomprimiendo.%s\n", Yellow, canonicalPath, NC)
+						task.OutPath = canonicalPath
+					}
+				} else {
+					task.OutPath = canonicalPath
+				}
+			} else {
+				outPath = GetUniqueName(filepath.Join(targetDir, baseName), ext)
+				outPath = splitOutPath(outPath, fileOpts)
+				task.OutPath = outPath
+			}
 
 			cap := MaxEffectiveThreads(fmtChoice, itemSize)
 			cap = MemorySafeMaxThreads(fmtChoice, cap)
@@ -306,12 +328,18 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 			if opts.SplitSize > 0 {
 				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
 			}
+			if opts.Resume {
+				return filepath.Join(targetDir, baseName+"."+ext)
+			}
 			return GetUniqueName(filepath.Join(targetDir, baseName), ext)
 		}
 		baseName := "crush_" + time.Now().Format("20060102_150405")
 		targetDir := opts.OutputDir
 		if opts.SplitSize > 0 {
 			targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
+		}
+		if opts.Resume {
+			return filepath.Join(targetDir, baseName+"."+ext)
 		}
 		return GetUniqueName(filepath.Join(targetDir, baseName), ext)
 	}
@@ -518,6 +546,20 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, fmt.Errorf("no se pudo crear directorio de salida %s: %w", filepath.Dir(outPath), err)
 	}
 
+	opts.TotalSize = totalSize
+	realOut := splitOutPath(outPath, opts)
+	if opts.Resume {
+		if _, err := os.Stat(realOut); err == nil {
+			status, testErr := testArchiveIntegrity(realOut, TestOptions{Quick: true, Password: opts.Password})
+			if testErr == nil && status == "OK" {
+				WriteLogf("%sℹ [reanudado] '%s' ya existe y es válido; omitiendo compresión.%s\n", Blue, realOut, NC)
+				return []string{realOut}, nil
+			}
+			_ = os.RemoveAll(realOut)
+			WriteLogf("%s⚠ [reanudando] '%s' existe pero está incompleto o corrupto; recomprimiendo.%s\n", Yellow, realOut, NC)
+		}
+	}
+
 	startTime := time.Now()
 
 	WriteLogf("%sComprimiendo %d archivo(s)...%s\n", Bold, len(filteredFiles), NC)
@@ -532,8 +574,6 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	pt.Start()
 	defer pt.Stop()
 
-	opts.TotalSize = totalSize
-	realOut := splitOutPath(outPath, opts)
 	_, preExistErr := os.Stat(realOut)
 	if singleItem {
 		err = compressSingleFile(filteredFiles[0], outPath, opts, nil, totalSize)
@@ -967,6 +1007,22 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 		return nil, nil
 	}
 
+	allSkipped := true
+	for _, t := range tasks {
+		if !t.Skipped {
+			allSkipped = false
+			break
+		}
+	}
+	if allSkipped {
+		var outPaths []string
+		for _, t := range tasks {
+			outPaths = append(outPaths, t.OutPath)
+		}
+		WriteLogf("%s✓ Todos los archivos ya estaban completados. Nada que reanudar.%s\n", Green, NC)
+		return outPaths, nil
+	}
+
 	var sizeCache map[string]int64
 	if len(precalcSizes) > 0 && precalcSizes[0] != nil {
 		sizeCache = precalcSizes[0]
@@ -1104,6 +1160,13 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 		fp := fps[i]
 		go func(t CompressionTask, fp *FileProgress, idx int) {
 			defer wg.Done()
+			if t.Skipped {
+				fp.SetStatus("done")
+				mu.Lock()
+				outFiles = append(outFiles, t.OutPath)
+				mu.Unlock()
+				return
+			}
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			fp.SetStatus("active")

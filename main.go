@@ -262,6 +262,7 @@ func main() {
 	convertFlag := flag.Bool("convert", false, "Transcodificar/convertir directamente archivo comprimido a otro formato")
 	recompressFlag := flag.Bool("recompress", false, "Alias de -convert")
 	analyzeFlag := flag.Bool("analyze", false, "Analizar recursivamente compresibilidad y estimar ahorro de espacio")
+	resumeFlag := flag.Bool("resume", false, "Reanudar lotes interrumpidos omitiendo archivos ya procesados e íntegros")
 
 	flag.Parse()
 
@@ -401,6 +402,18 @@ func main() {
 				WriteError("--bench no se puede combinar con %s", m.name)
 				os.Exit(1)
 			}
+		}
+	}
+
+	// Validations for --resume
+	if *resumeFlag {
+		if !hasC && !hasD {
+			WriteError("--resume requiere especificar -c (comprimir) o -d (descomprimir)")
+			os.Exit(1)
+		}
+		if hasA || hasL || hasR || *treeFlag || *findFlag != "" || *diffFlag || hasConvert || *analyzeFlag || *benchFlag {
+			WriteError("--resume solo es compatible con compresión (-c) o descompresión (-d)")
+			os.Exit(1)
 		}
 	}
 
@@ -910,6 +923,7 @@ func main() {
 			Sparse:          sparseEnabled,
 			NoSparse:        !sparseEnabled,
 			Clean:           *cleanFlag,
+			Resume:          *resumeFlag,
 		}
 		var outPaths []string
 		var err error
@@ -989,6 +1003,7 @@ func main() {
 			Parallel:  parallel,
 			Password:  cliPassword,
 			Filter:    *filterFlag,
+			Resume:    *resumeFlag,
 		}
 		if stdinIsPipe && *formatStr != "" && len(files) == 0 {
 			f, err := ParseFormat(*formatStr)
@@ -1311,6 +1326,8 @@ func printHelp() {
 	fmt.Print("                   Modo verbose (mostrar comandos ejecutados)\n")
 	w(Yellow, "  -force")
 	fmt.Print("               Sobrescribir archivos existentes sin confirmación\n")
+	w(Yellow, "  --resume")
+	fmt.Print("             Reanudar lotes interrumpidos omitiendo archivos ya procesados e íntegros\n")
 	w(Yellow, "  -quick")
 	fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
 	w(Yellow, "  -s N")
@@ -1446,7 +1463,7 @@ _crush_completions() {
     local split_formats="gz xz bz2 bz3 zst lz lz4 br"
     local split_sizes="10 50 100 500 1000"
     local short="-c -d -l -t -r -h -v -k -n -f -F -o -s -force -quick -opts -exclude -hash -verify -p -password"
-    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --formats --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version --hash --verify --password --analyze"
+    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --formats --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version --hash --verify --password --analyze --resume"
 
     local has_split=0
     local w
@@ -1547,6 +1564,7 @@ _crush() {
         {-F,--formats}'[Comprimir en múltiples formatos separados por coma]:formatos:' \
         {-o,--output}'[Directorio de salida]:directorio:_files -/' \
         '--force[Sobrescribir existentes]' \
+        '--resume[Reanudar lotes interrumpidos omitiendo archivos completos]' \
         '--quick[Verificación rápida]' \
         {-v,--verbose}'[Modo verbose]' \
         {-k,--keep}'[Conservar originales]' \
@@ -1612,6 +1630,7 @@ complete -c crush -n "not __crush_has_split" -s f -l format -d "Formato de compr
 complete -c crush -s F -l formats -d "Comprimir en múltiples formatos separados por coma" -xa "(__crush_formats)"
 complete -c crush -s o -d "Directorio de salida" -xa "(__fish_complete_directories)"
 complete -c crush -s force -l force -d "Sobrescribir existentes"
+complete -c crush -l resume -d "Reanudar lotes interrumpidos"
 complete -c crush -s quick -l quick -d "Verificación rápida"
 complete -c crush -s v -d "Modo verbose"
 complete -c crush -s k -d "Conservar originales"

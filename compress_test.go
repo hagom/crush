@@ -2407,4 +2407,201 @@ func TestCompress_HighEntropy_AutoFormatNotice(t *testing.T) {
 	}
 }
 
+func TestCompressResume_AllCompleted(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	f2 := filepath.Join(tmpDir, "file2.txt")
+	if err := os.WriteFile(f1, []byte("contenido de archivo uno"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("contenido de archivo dos"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+
+	// Primera ejecución: comprime f1 y f2
+	outPaths, err := DoCompress([]string{f1, f2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress falló: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("Esperados 2 archivos comprimidos, obtenidos %d", len(outPaths))
+	}
+
+	gz1 := filepath.Join(tmpDir, "file1.txt.gz")
+	fi1, err := os.Stat(gz1)
+	if err != nil {
+		t.Fatalf("file1.txt.gz no existe: %v", err)
+	}
+	modTime1 := fi1.ModTime()
+
+	// Segunda ejecución con Resume: debe omitir ambos archivos
+	resumeOpts := opts
+	resumeOpts.Resume = true
+	resumeOutPaths, err := DoCompress([]string{f1, f2}, resumeOpts)
+	if err != nil {
+		t.Fatalf("DoCompress con Resume falló: %v", err)
+	}
+	if len(resumeOutPaths) != 2 {
+		t.Fatalf("Esperados 2 archivos en retorno con Resume, obtenidos %d", len(resumeOutPaths))
+	}
+
+	fi1After, err := os.Stat(gz1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi1After.ModTime().Equal(modTime1) {
+		t.Errorf("file1.txt.gz fue modificado a pesar de Resume: antes=%v, después=%v", modTime1, fi1After.ModTime())
+	}
+
+	// Verificar que NO se crearon archivos con sufijo duplicado
+	if _, err := os.Stat(filepath.Join(tmpDir, "file1.txt_1.gz")); err == nil {
+		t.Errorf("Se creó archivo duplicado file1.txt_1.gz con Resume activado")
+	}
+}
+
+func TestCompressResume_CorruptedOrTruncated(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	f2 := filepath.Join(tmpDir, "file2.txt")
+	if err := os.WriteFile(f1, []byte("contenido del archivo uno completo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("contenido del archivo dos completo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Comprimir f1 válidamente
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+	}
+	_, err := DoCompress([]string{f1}, opts)
+	if err != nil {
+		t.Fatalf("Error preparando f1 comprimido: %v", err)
+	}
+
+	// Simular f2.txt.gz truncado/corrupto (4 bytes de basura como si se interrumpió la escritura)
+	gz2 := filepath.Join(tmpDir, "file2.txt.gz")
+	if err := os.WriteFile(gz2, []byte("CRSH"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ejecutar con Resume
+	resumeOpts := opts
+	resumeOpts.Resume = true
+	outPaths, err := DoCompress([]string{f1, f2}, resumeOpts)
+	if err != nil {
+		t.Fatalf("DoCompress con Resume falló: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("Esperados 2 archivos de salida, obtenidos %d", len(outPaths))
+	}
+
+	// f2.txt.gz debe haberse detectado corrupto, eliminado y recomprimido limpiamente
+	status, testErr := testArchiveIntegrity(gz2, TestOptions{Quick: true})
+	if testErr != nil || status != "OK" {
+		t.Errorf("file2.txt.gz no quedó íntegro tras recomprimir: status=%s, err=%v", status, testErr)
+	}
+
+	// No debe haberse creado file2_1.txt.gz
+	if _, err := os.Stat(filepath.Join(tmpDir, "file2_1.txt.gz")); err == nil {
+		t.Errorf("Se creó file2_1.txt.gz en lugar de recomprimir sobre file2.txt.gz")
+	}
+}
+
+func TestCompressResume_WithoutResume(t *testing.T) {
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "file1.txt")
+	if err := os.WriteFile(f1, []byte("contenido de archivo uno"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: tmpDir,
+		KeepOrig:  true,
+		Resume:    false,
+	}
+
+	// Primera compresión
+	_, err := DoCompress([]string{f1}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Segunda compresión SIN resume: debe crear _1
+	outPaths, err := DoCompress([]string{f1}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outPaths) != 1 {
+		t.Fatalf("Esperado 1 archivo, obtenidos %d", len(outPaths))
+	}
+	expectedDup := filepath.Join(tmpDir, "file1.txt_1.gz")
+	if _, err := os.Stat(expectedDup); err != nil {
+		t.Errorf("Sin resume debió crear %s, pero no existe: %v", expectedDup, err)
+	}
+}
+
+func TestCompressResume_DirectoriesTarGz(t *testing.T) {
+	tmpDir := t.TempDir()
+	d1 := filepath.Join(tmpDir, "DirA")
+	d2 := filepath.Join(tmpDir, "DirB")
+	os.MkdirAll(d1, 0755)
+	os.MkdirAll(d2, 0755)
+	os.WriteFile(filepath.Join(d1, "test.txt"), []byte("contenido A"), 0644)
+	os.WriteFile(filepath.Join(d2, "test.txt"), []byte("contenido B"), 0644)
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:    Gz,
+		OutputDir: outDir,
+		KeepOrig:  true,
+		Parallel:  2,
+	}
+
+	// Primera compresión
+	outPaths, err := DoCompress([]string{d1, d2}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress falló: %v", err)
+	}
+	if len(outPaths) != 2 {
+		t.Fatalf("Esperados 2 archivos .tar.gz, obtenidos %d", len(outPaths))
+	}
+
+	tarGz1 := filepath.Join(outDir, "DirA.tar.gz")
+	fi1, err := os.Stat(tarGz1)
+	if err != nil {
+		t.Fatalf("DirA.tar.gz no existe: %v", err)
+	}
+	modTime1 := fi1.ModTime()
+
+	// Segunda compresión con Resume: debe omitir ambos
+	resumeOpts := opts
+	resumeOpts.Resume = true
+	resPaths, err := DoCompress([]string{d1, d2}, resumeOpts)
+	if err != nil {
+		t.Fatalf("DoCompress con Resume falló: %v", err)
+	}
+	if len(resPaths) != 2 {
+		t.Fatalf("Esperados 2 archivos retornados con Resume, obtenidos %d", len(resPaths))
+	}
+
+	fi1After, err := os.Stat(tarGz1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi1After.ModTime().Equal(modTime1) {
+		t.Errorf("DirA.tar.gz fue reescrito a pesar de Resume")
+	}
+}
+
+
 

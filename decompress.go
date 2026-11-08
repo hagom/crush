@@ -26,6 +26,7 @@ type DecompressOptions struct {
 	Password    string
 	Filter      string
 	QuietReport bool
+	Resume      bool
 }
 
 func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
@@ -128,6 +129,23 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 		}
 	}
 	allFiles = uniqueFiles
+
+	if opts.Resume {
+		var pendingFiles []string
+		for _, f := range allFiles {
+			targetDir := ResolveDecompressDir(f, opts.OutputDir)
+			if isArchiveFullyExtracted(f, targetDir, opts.Password) {
+				WriteLogf("%sℹ [reanudado] '%s' ya está completamente descomprimido; omitiendo.%s\n", Blue, f, NC)
+			} else {
+				pendingFiles = append(pendingFiles, f)
+			}
+		}
+		if len(pendingFiles) == 0 {
+			WriteLogf("%s✓ Todos los archivos ya estaban descomprimidos. Nada que reanudar.%s\n", Green, NC)
+			return nil
+		}
+		allFiles = pendingFiles
+	}
 
 	WriteLogf("%sPreparando descompresión de %d archivo(s)...%s\n", Bold, len(allFiles), NC)
 
@@ -484,6 +502,27 @@ func listArchiveOutputs(file string, dir string, info FormatInfo, passwords ...s
 		paths = append(paths, m.Path)
 	}
 	return resolveOutputs(paths, dir)
+}
+
+func isArchiveFullyExtracted(file string, dir string, password string) bool {
+	members, err := ListArchiveMembers(file, password)
+	if err != nil || len(members) == 0 {
+		return false
+	}
+	for _, m := range members {
+		if m.IsDir {
+			continue
+		}
+		destPath := filepath.Join(dir, m.Path)
+		fi, err := os.Stat(destPath)
+		if err != nil || fi.IsDir() {
+			return false
+		}
+		if m.Size > 0 && fi.Size() != m.Size {
+			return false
+		}
+	}
+	return true
 }
 
 func listTarMembers(file string) ([]string, bool) {
@@ -908,7 +947,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			if opts.Password != "" {
 				args = append(args, "-p"+opts.Password)
 			}
-			if opts.Force {
+			if opts.Force || opts.Resume {
 				args = append(args, "-aoa")
 			} else {
 				args = append(args, "-aos")
@@ -928,7 +967,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		if opts.Password != "" {
 			args = append(args, "-P", opts.Password)
 		}
-		if opts.Force {
+		if opts.Force || opts.Resume {
 			args = append(args, "-o")
 		} else {
 			args = append(args, "-n")
@@ -948,7 +987,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
 		}
-		if opts.Force {
+		if opts.Force || opts.Resume {
 			args = append(args, "-aoa")
 		} else {
 			args = append(args, "-aos")
@@ -971,7 +1010,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		} else {
 			args = append(args, "-p-")
 		}
-		if opts.Force {
+		if opts.Force || opts.Resume {
 			args = append(args, "-o+")
 		} else {
 			args = append(args, "-o-")
@@ -999,7 +1038,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 	case strings.HasSuffix(ext, ".lrz"):
 		outputPath := filepath.Join(dir, strings.TrimSuffix(filepath.Base(file), ".lrz"))
-		if !opts.Force {
+		if !opts.Force && !opts.Resume {
 			if _, err := os.Stat(outputPath); err == nil {
 				return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", outputPath)
 			}
@@ -1036,7 +1075,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 	default:
 		outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
-		if !opts.Force {
+		if !opts.Force && !opts.Resume {
 			if _, err := os.Stat(outputPath); err == nil {
 				return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", outputPath)
 			}

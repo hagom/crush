@@ -659,16 +659,14 @@ func main() {
 
 	// Handle -l (list)
 	if *listFlag {
+		if len(files) == 0 {
+			WriteError("debe especificar al menos un archivo comprimido para listar\nUso: crush -l ARCHIVO...")
+			os.Exit(1)
+		}
 		for _, f := range files {
-			file, err := os.Open(f)
-			if err != nil {
-				WriteError("abriendo %s: %v", f, err)
-				continue
-			}
-			if err := ListCompressed(file); err != nil {
+			if err := DoList(f, cliPassword, os.Stdout); err != nil {
 				WriteError("listando %s: %v", f, err)
 			}
-			file.Close()
 		}
 		return
 	}

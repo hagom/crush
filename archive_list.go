@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type ArchiveMember struct {
-	Path  string
-	Size  int64
-	IsDir bool
+	Path     string
+	Size     int64
+	Modified time.Time
+	Mode     os.FileMode
+	IsDir    bool
 }
 
 // ListArchiveMembers returns a list of members in the given archive.
@@ -24,12 +27,6 @@ func ListArchiveMembers(file string, password string) ([]ArchiveMember, error) {
 	info, err := DetectFormat(file)
 	if err != nil {
 		return nil, fmt.Errorf("detectando formato de %s: %w", file, err)
-	}
-
-	if password == "" && info.IsContainer() {
-		if p, err := GetPasswordManager().ResolvePassword(file, info.Format, ""); err == nil && p != "" {
-			password = p
-		}
 	}
 
 	lower := strings.ToLower(file)
@@ -41,9 +38,11 @@ func ListArchiveMembers(file string, password string) ([]ArchiveMember, error) {
 			var members []ArchiveMember
 			for _, f := range r.File {
 				members = append(members, ArchiveMember{
-					Path:  f.Name,
-					Size:  int64(f.UncompressedSize64),
-					IsDir: f.FileInfo().IsDir() || strings.HasSuffix(f.Name, "/"),
+					Path:     f.Name,
+					Size:     int64(f.UncompressedSize64),
+					Modified: f.Modified,
+					Mode:     f.Mode(),
+					IsDir:    f.FileInfo().IsDir() || strings.HasSuffix(f.Name, "/"),
 				})
 			}
 			return members, nil
@@ -166,9 +165,11 @@ func listFromTarReader(tr *tar.Reader) ([]ArchiveMember, error) {
 		}
 		isDir := hdr.Typeflag == tar.TypeDir || strings.HasSuffix(hdr.Name, "/")
 		members = append(members, ArchiveMember{
-			Path:  hdr.Name,
-			Size:  hdr.Size,
-			IsDir: isDir,
+			Path:     hdr.Name,
+			Size:     hdr.Size,
+			Modified: hdr.ModTime,
+			Mode:     hdr.FileInfo().Mode(),
+			IsDir:    isDir,
 		})
 	}
 	return members, nil
@@ -200,6 +201,8 @@ func listSevenZipDetailed(file string, password string) ([]ArchiveMember, error)
 	var members []ArchiveMember
 	var currentPath string
 	var currentSize int64
+	var currentModified time.Time
+	var currentMode os.FileMode
 	var currentIsDir bool
 
 	sc := bufio.NewScanner(stdout)
@@ -208,12 +211,16 @@ func listSevenZipDetailed(file string, password string) ([]ArchiveMember, error)
 		if line == "" {
 			if currentPath != "" {
 				members = append(members, ArchiveMember{
-					Path:  currentPath,
-					Size:  currentSize,
-					IsDir: currentIsDir,
+					Path:     currentPath,
+					Size:     currentSize,
+					Modified: currentModified,
+					Mode:     currentMode,
+					IsDir:    currentIsDir,
 				})
 				currentPath = ""
 				currentSize = 0
+				currentModified = time.Time{}
+				currentMode = 0
 				currentIsDir = false
 			}
 			continue
@@ -223,20 +230,37 @@ func listSevenZipDetailed(file string, password string) ([]ArchiveMember, error)
 		} else if strings.HasPrefix(line, "Size = ") {
 			s, _ := strconv.ParseInt(strings.TrimPrefix(line, "Size = "), 10, 64)
 			currentSize = s
+		} else if strings.HasPrefix(line, "Modified = ") {
+			modStr := strings.TrimPrefix(line, "Modified = ")
+			if t, err := time.ParseInLocation("2006-01-02 15:04:05", modStr, time.Local); err == nil {
+				currentModified = t
+			}
 		} else if strings.HasPrefix(line, "Folder = ") {
 			currentIsDir = strings.TrimPrefix(line, "Folder = ") == "+"
+		} else if strings.HasPrefix(line, "Attributes = ") {
+			attrs := strings.TrimPrefix(line, "Attributes = ")
+			if strings.Contains(attrs, "D") {
+				currentIsDir = true
+			}
 		}
 	}
 	if currentPath != "" {
 		members = append(members, ArchiveMember{
-			Path:  currentPath,
-			Size:  currentSize,
-			IsDir: currentIsDir,
+			Path:     currentPath,
+			Size:     currentSize,
+			Modified: currentModified,
+			Mode:     currentMode,
+			IsDir:    currentIsDir,
 		})
 	}
 	_ = cmd.Wait()
 
 	if len(members) == 0 {
+		if password == "" {
+			if resolved, err := GetPasswordManager().ResolvePassword(file, SevenZ, ""); err == nil && resolved != "" {
+				return listSevenZipDetailed(file, resolved)
+			}
+		}
 		return nil, fmt.Errorf("no se encontraron miembros en %s", file)
 	}
 	return members, nil

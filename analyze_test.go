@@ -514,6 +514,46 @@ func TestDoAnalyze_SortByCompressibility(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFile_HeaderContamination_IncompressibleBody(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "video_container.mkv")
+
+	// 1. Cabecera (32 KiB): texto repetitivo y ceros con baja entropía
+	head := bytes.Repeat([]byte("EBML\x00\x00\x00\x01TrackEntry\x00\x00\x00VideoCodec\x00\x00\x00\x00"), 1024)
+
+	// 2. Cuerpo (2 MiB): datos pseudoaleatorios incompresibles con alta entropía (H > 7.95)
+	rnd := rand.New(rand.NewSource(12345))
+	body := make([]byte, 2*1024*1024)
+	rnd.Read(body)
+
+	// 3. Pie (32 KiB): índices / cues con ceros
+	tail := bytes.Repeat([]byte("CuesEntry\x00\x00\x00\x00CueTime\x00\x00\x00\x00CueTrack\x00\x00"), 1024)
+
+	var data []byte
+	data = append(data, head...)
+	data = append(data, body...)
+	data = append(data, tail...)
+
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	analysis, err := AnalyzeFile(filePath)
+	if err != nil {
+		t.Fatalf("AnalyzeFile error: %v", err)
+	}
+
+	if analysis.CompLevel != "Nula" {
+		t.Errorf("CompLevel = %q, want %q", analysis.CompLevel, "Nula")
+	}
+	if analysis.RecommendedFmt != "omitir" {
+		t.Errorf("RecommendedFmt = %q, want %q", analysis.RecommendedFmt, "omitir")
+	}
+	if analysis.SavingsPct > 5.0 {
+		t.Errorf("SavingsPct = %.2f%%, want <= 5.0%%", analysis.SavingsPct)
+	}
+}
+
 
 
 

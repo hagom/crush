@@ -81,6 +81,7 @@ func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
 
 	var sample []byte
 	var entropy float64
+	var probeRatio float64
 
 	if size <= int64(sampleBufferSize) {
 		// Archivo pequeño (<= 96 KiB): lectura secuencial completa en una sola llamada
@@ -128,16 +129,70 @@ func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
 		}
 
 		// Cabecera compresible: completar el muestreo estratificado con fragmentos de mitad y final
-		fullSample, err := readRemainingChunks(f, size, targetBuf, n1)
+		fullSample, n2, n3, err := readRemainingChunks(f, size, targetBuf, n1)
 		if err != nil {
 			return FileAnalysis{}, err
 		}
 		sample = fullSample
-		res.SampleBytes = int64(len(sample))
-		entropy = CalculateShannonEntropy(sample)
-		res.Entropy = entropy
 
-		if (len(sample) >= 4096 && entropy >= 7.90) || (mediaOrCompressedExts[ext] && entropy >= 7.20) {
+		chunkHead := fullSample[:n1]
+		var chunkMid, chunkTail []byte
+		if n2 > 0 && len(fullSample) >= n1+n2 {
+			chunkMid = fullSample[n1 : n1+n2]
+		}
+		if n3 > 0 && len(fullSample) >= n1+n2+n3 {
+			chunkTail = fullSample[n1+n2 : n1+n2+n3]
+		}
+
+		// Puerta del cuerpo dominante: en archivos grandes (>= 192 KiB), si el cuerpo central
+		// es de alta entropía (ruido/video/cifrado), el archivo es incompresible con independencia
+		// de cuántos metadatos o ceros contenga la cabecera.
+		if len(chunkMid) >= 4096 && size >= int64(sampleBufferSize*2) {
+			hMid := CalculateShannonEntropy(chunkMid)
+			if hMid >= 7.85 || (mediaOrCompressedExts[ext] && hMid >= 7.20) {
+				res.SampleBytes = int64(len(sample))
+				res.Entropy = hMid
+				res.Compressible = false
+				res.CompLevel = "Nula"
+				res.RecommendedFmt = "omitir"
+				res.ProbeRatio = 1.0
+				return res, nil
+			}
+		}
+
+		// Extrapolación ponderada por volumen real
+		ratioHead := probeDeflateRatio(chunkHead)
+		ratioMid := probeDeflateRatio(chunkMid)
+		ratioTail := ratioMid
+		if len(chunkTail) > 0 {
+			ratioTail = probeDeflateRatio(chunkTail)
+		}
+
+		hHead := h1
+		hMid := CalculateShannonEntropy(chunkMid)
+		hTail := hMid
+		if len(chunkTail) > 0 {
+			hTail = CalculateShannonEntropy(chunkTail)
+		}
+
+		wHead := int64(len(chunkHead) * 2)
+		wTail := int64(len(chunkTail) * 2)
+		if wHead+wTail > size {
+			wHead = size / 2
+			wTail = size - wHead
+		}
+		wBody := size - wHead - wTail
+		if wBody < 0 {
+			wBody = 0
+		}
+
+		probeRatio = (float64(wHead)*ratioHead + float64(wBody)*ratioMid + float64(wTail)*ratioTail) / float64(size)
+		entropy = (float64(wHead)*hHead + float64(wBody)*hMid + float64(wTail)*hTail) / float64(size)
+		res.SampleBytes = int64(len(sample))
+		res.Entropy = entropy
+		res.ProbeRatio = probeRatio
+
+		if (size >= 4096 && entropy >= 7.90) || (mediaOrCompressedExts[ext] && entropy >= 7.20) {
 			res.Compressible = false
 			res.CompLevel = "Nula"
 			res.RecommendedFmt = "omitir"
@@ -146,8 +201,10 @@ func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
 		}
 	}
 
-	probeRatio := probeDeflateRatio(sample)
-	res.ProbeRatio = probeRatio
+	if size <= int64(sampleBufferSize) {
+		probeRatio = probeDeflateRatio(sample)
+		res.ProbeRatio = probeRatio
+	}
 
 	if probeRatio >= 0.96 {
 		res.Compressible = false
@@ -900,23 +957,23 @@ var flateWriterPool = sync.Pool{
 
 // readRemainingChunks lee los fragmentos de la mitad y final para completar los 96 KiB
 // cuando el primer fragmento ya fue leído en targetBuf[:n1].
-func readRemainingChunks(f *os.File, size int64, targetBuf []byte, n1 int) ([]byte, error) {
+func readRemainingChunks(f *os.File, size int64, targetBuf []byte, n1 int) ([]byte, int, int, error) {
 	if n1 < sampleChunkSize {
-		return targetBuf[:n1], nil
+		return targetBuf[:n1], 0, 0, nil
 	}
 
 	// 2. Mitad
 	midOffset := (size - int64(sampleChunkSize)) / 2
 	n2, err := f.ReadAt(targetBuf[sampleChunkSize:sampleChunkSize*2], midOffset)
 	if err != nil && err != io.EOF {
-		return nil, err
+		return nil, 0, 0, err
 	}
 
 	// 3. Final
 	endOffset := size - int64(sampleChunkSize)
 	n3, err := f.ReadAt(targetBuf[sampleChunkSize*2:sampleBufferSize], endOffset)
 	if err != nil && err != io.EOF {
-		return nil, err
+		return nil, 0, 0, err
 	}
 
 	total := sampleChunkSize
@@ -933,7 +990,7 @@ func readRemainingChunks(f *os.File, size int64, targetBuf []byte, n1 int) ([]by
 		total += n3
 	}
 
-	return targetBuf[:total], nil
+	return targetBuf[:total], n2, n3, nil
 }
 
 // readSampleChunks lee los 3 fragmentos de 32 KiB (inicio, mitad y fin) sobre un archivo abierto.
@@ -942,7 +999,8 @@ func readSampleChunks(f *os.File, size int64, targetBuf []byte) ([]byte, error) 
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
-	return readRemainingChunks(f, size, targetBuf, n1)
+	sample, _, _, err := readRemainingChunks(f, size, targetBuf, n1)
+	return sample, err
 }
 
 // sampleFile toma una muestra estratificada de hasta 96 KiB de un archivo.

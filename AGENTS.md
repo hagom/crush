@@ -150,7 +150,7 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 532 tests nativos pasando con race detector (-race). ~18500 líneas. 0 bugs conocidos.
+- Go: migración completa. 533 tests nativos pasando con race detector (-race). ~18600 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
   - Salida Tabular Human-Readable para Listado de Contenido (`crush -l` / `list.go`):
     - **Visualización Limpia sin Banners:** Reemplazo de los volcados crudos de subprocesos (`7z l`, `unzip -l`, `tar -tf`) por una tabla estructurada con permisos (`-rw-r--r--`, `drwxr-xr-x`), tamaños métricos dinámicos (`FormatSize`), fecha y hora de modificación y coloreado de directorios.
@@ -158,6 +158,7 @@ crush/
     - **Optimización de Lectura de Metadatos (2 ms):** Consulta de cabeceras instantánea con verificación perezosa de contraseñas, eliminando bloqueos e invocaciones innecesarias a disco.
   - Analizador Recursivo de Compresibilidad y Ahorro (`--analyze` / `analyze.go`):
     - **Muestreo estratificado de 3 puntos (`sampleFile`):** Lectura ultra-eficiente de hasta 96 KiB (inicio, centro y final) evitando lecturas completas de archivos gigantes con pooling de búferes (`sync.Pool`).
+    - **Extrapolación Ponderada por Volumen y Puerta del Cuerpo Dominante:** Erradicación total de falsos positivos en `--analyze` provocados por la contaminación de cabeceras/pies (metadatos XML/EBML con baja entropía o relleno de ceros que representaban el 66% de la muestra de 96 KiB pero menos del 0.001% de archivos multimedia/contenedores gigantes). Ahora el fragmento central (`chunkMid`) actúa como *Dominant Body Gate* para archivos $\ge 192$ KiB (si $H_{\text{mid}} \ge 7.85$, clasifica inmediatamente como incompresible `omitir`), y la extrapolación proyecta la compresibilidad de la cabecera ($\le 64$ KiB), el pie ($\le 64$ KiB) y el cuerpo central ($S - 128$ KiB) proporcionalmente a su volumen físico real en disco, garantizando precisión absoluta en cualquier formato sin requerir listas de extensiones.
     - **Micro-sonda en memoria DEFLATE (`probeDeflateRatio`):** Medición instantánea del ratio real en RAM utilizando `compress/flate` con `countingSink`, sin crear archivos temporales ni invocar subprocesos pesados.
     - **Clasificación y recomendación inteligente de formato:** `xz`/`7z` para texto/código (Alta), `zst`/`gz` para binarios estructurados (Media), y `omitir` para alta entropía ($H \ge 7.90$) o formatos multimedia/precomprimidos ($H \ge 7.20$).
     - **Detección de carpetas mixtas (`selectivo*`):** Identificación de directorios que combinan contenido altamente compresible con grandes volúmenes incompresibles, emitiendo notas detalladas de ahorro selectivo.

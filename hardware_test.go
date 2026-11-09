@@ -102,8 +102,10 @@ func TestIsRotational_LiveHost(t *testing.T) {
 		t.Errorf("IsRotational(/home) = true, want false (NVMe SSD)")
 	}
 
-	// /baul está en /dev/sda1 -> debe ser true
-	if isRot := IsRotational("/baul"); !isRot {
-		t.Errorf("IsRotational(/baul) = false, want true (HDD mecánico sda1)")
+	// /baul está en /dev/sda1 -> debe ser true si existe y está montado en el host
+	if _, err := os.Stat("/baul"); err == nil {
+		if isRot := IsRotational("/baul"); !isRot {
+			t.Errorf("IsRotational(/baul) = false, want true (HDD mecánico sda1)")
+		}
 	}
 }

@@ -150,8 +150,12 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 533 tests nativos pasando con race detector (-race). ~18600 líneas. 0 bugs conocidos.
+- Go: migración completa. 571 tests nativos pasando con race detector (-race). ~18600 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Portabilidad Multi-Entorno y Tests Desacoplados del Host:
+    - **Neutralidad de Hardware y Rutas en Tests:** Erradicación de suposiciones de máquina local en tests (`TestIsRotational_LiveHost`, `TestAdaptive7zDict`, `TestPromptDecompressAll_CustomDir`), eliminando rutas absolutas del desarrollador original (`/baul`, `/home/hagom`) y asunciones rígidas sobre la memoria RAM del sistema ($\ge 8$ GB) o la tecnología de disco (HDD vs NVMe). Ahora las pruebas verifican comportamiento observable e invariantes lógicas bajo mocks explícitos o rutas efímeras portables (`t.TempDir()`).
+    - **Protección del Harness de Tests contra Elevación Involuntaria:** `InstallMissingDeps` ahora detecta automáticamente la ejecución bajo `go test` para evitar invocar gestores de paquetes o procesos elevados con `sudo` en las máquinas de los desarrolladores si una herramienta externa está ausente.
+    - **Saneamiento del Repositorio:** Eliminación del seguimiento de artefactos de caché local (`graphify-out/`) y adición a `.gitignore`.
   - Salida Tabular Human-Readable para Listado de Contenido (`crush -l` / `list.go`):
     - **Visualización Limpia sin Banners:** Reemplazo de los volcados crudos de subprocesos (`7z l`, `unzip -l`, `tar -tf`) por una tabla estructurada con permisos (`-rw-r--r--`, `drwxr-xr-x`), tamaños métricos dinámicos (`FormatSize`), fecha y hora de modificación y coloreado de directorios.
     - **Resumen Estadístico Consolidado:** Pie con conteo de archivos, carpetas, total de bytes sin comprimir y ratio/ahorro porcentual de compresión.

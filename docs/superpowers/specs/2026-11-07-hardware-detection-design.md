@@ -30,7 +30,7 @@ En sistemas de archivos como **btrfs** (o ZFS, overlayfs o montajes loop), `sysc
 ### Solución Robusta y Ligera (Zero-Deps, 100% Go stdlib):
 1. **Resolución de Punto de Montaje (`/proc/self/mountinfo`):**
    - Se lee `/proc/self/mountinfo` (o `/proc/mounts`) para encontrar la entrada con el prefijo de ruta de montaje más largo que contenga `path`.
-   - Se extrae la ruta del dispositivo fuente (ej: `/dev/sda1` para `/baul`, `/dev/nvme0n1p3` para `/home`).
+   - Se extrae la ruta del dispositivo fuente (ej: `/dev/sda1` para `/mnt/storage`, `/dev/nvme0n1p3` para `/home`).
 2. **Consulta a Sysfs (`/sys/class/block`):**
    - Para cualquier dispositivo o partición (`devName = filepath.Base(devicePath)`):
      - Si existe `/sys/class/block/<devName>/queue/rotational`, se lee (disco entero).

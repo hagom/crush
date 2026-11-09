@@ -2,3 +2,4 @@ crush
 *.log
 .codegraph/
 .worktrees/
+graphify-out/

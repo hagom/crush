@@ -65,7 +65,7 @@ func TestIsRotationalLinux_Mocks(t *testing.T) {
 31 35 0:27 / /run rw,nosuid,nodev,noexec,relatime shared:5 - tmpfs tmpfs rw,size=9646572k,mode=755,inode64
 35 1 259:2 / / rw,noatime shared:1 - btrfs /dev/nvme0n1p2 rw,ssd
 62 35 0:50 / /home rw,noatime shared:115 - btrfs /dev/nvme0n1p3 rw,ssd,discard=async
-179 35 0:48 / /baul rw,noatime shared:352 - btrfs /dev/sda1 rw,space_cache=v2
+179 35 0:48 / /mnt/storage rw,noatime shared:352 - btrfs /dev/sda1 rw,space_cache=v2
 200 35 8:16 / /media/hdd rw,relatime shared:400 - ext4 /dev/sdb rw
 `
 	if err := os.WriteFile(mountinfoPath, []byte(mountinfoContent), 0644); err != nil {
@@ -79,7 +79,7 @@ func TestIsRotationalLinux_Mocks(t *testing.T) {
 		scenario string
 	}{
 		{"/home/user/documentos/test.txt", false, "NVMe subvolumen btrfs (/home)"},
-		{"/baul/aplicaciones/crush", true, "HDD mecánico subvolumen btrfs (/baul)"},
+		{"/mnt/storage/data/archive.tar", true, "HDD mecánico subvolumen btrfs (/mnt/storage)"},
 		{"/media/hdd/backups/dump.tar", true, "HDD mecánico ext4 (/media/hdd)"},
 		{"/run/user/1000/app.sock", false, "tmpfs en memoria RAM (/run)"},
 		{"/unknown/mount/path", false, "Ruta en raíz sin dispositivo sysfs conocido"},
@@ -96,16 +96,21 @@ func TestIsRotationalLinux_Mocks(t *testing.T) {
 }
 
 func TestIsRotational_LiveHost(t *testing.T) {
-	// Verificar en el host Linux real
-	// /home está en /dev/nvme0n1p3 -> debe ser false
-	if isRot := IsRotational("/home"); isRot {
-		t.Errorf("IsRotational(/home) = true, want false (NVMe SSD)")
+	// Verificar que IsRotational se ejecute de forma robusta y consistente en el host real
+	pathsToTest := []string{
+		t.TempDir(),
+		os.TempDir(),
+		"/",
+		filepath.Join(t.TempDir(), "sub", "nonexistent"),
 	}
 
-	// /baul está en /dev/sda1 -> debe ser true si existe y está montado en el host
-	if _, err := os.Stat("/baul"); err == nil {
-		if isRot := IsRotational("/baul"); !isRot {
-			t.Errorf("IsRotational(/baul) = false, want true (HDD mecánico sda1)")
+	for _, p := range pathsToTest {
+		// Primera llamada (resolución en vivo)
+		r1 := IsRotational(p)
+		// Segunda llamada (consulta en caché)
+		r2 := IsRotational(p)
+		if r1 != r2 {
+			t.Errorf("IsRotational(%q) resultado inconsistente entre llamadas: %v vs %v", p, r1, r2)
 		}
 	}
 }

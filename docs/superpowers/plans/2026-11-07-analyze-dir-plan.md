@@ -41,7 +41,7 @@
   - Implementar lectura de 3 puntos (inicio, centro y fin) con `ReadAt`.
   - Implementar sonda DEFLATE en memoria con `flate.Writer` hacia un contador atómico.
 - [ ] **1.3 Verificar que las pruebas pasen:**
-  - `cd /baul/aplicaciones/crush/.worktrees/feat-analyze-dir && go test -v -run "TestSampleFile|TestProbeDeflateRatio" ./...`
+  - `go test -v -run "TestSampleFile|TestProbeDeflateRatio" ./...`
 - [ ] **1.4 Commit:** `test: add sampling and deflate probe tests` y `feat: implement sampleFile and probeDeflateRatio`.
 
 ---
@@ -58,7 +58,7 @@
   - Usar `sampleFile`, `CalculateShannonEntropy` y `probeDeflateRatio`.
   - Mapear reglas de formatos y ratios calibrados.
 - [ ] **2.3 Verificar pruebas:**
-  - `cd /baul/aplicaciones/crush/.worktrees/feat-analyze-dir && go test -v -run TestAnalyzeFile ./...`
+  - `go test -v -run TestAnalyzeFile ./...`
 - [ ] **2.4 Commit:** `feat(analyze): implement file compressibility classification`.
 
 ---
@@ -78,7 +78,7 @@
   - Agrupación por entrada de primer nivel y cálculo de ponderaciones.
   - Renderizado tabular alineado con tabla de notas para carpetas mixtas y resumen final.
 - [ ] **3.3 Verificar pruebas:**
-  - `cd /baul/aplicaciones/crush/.worktrees/feat-analyze-dir && go test -v -run TestDoAnalyze ./...`
+  - `go test -v -run TestDoAnalyze ./...`
 - [ ] **3.4 Commit:** `feat(analyze): implement directory aggregation and report rendering`.
 
 ---
@@ -95,7 +95,7 @@
   - `TestMainAnalyzeCLI`: ejecutar binario compilado con `-analyze` sobre directorio temporal.
   - Asegurar que `TestHelpEveryCommandLineHasExplanation` y `TestHelpEveryOptionHasDescriptionAndExample` pasen en verde.
 - [ ] **4.4 Verificar todas las pruebas de `main`:**
-  - `cd /baul/aplicaciones/crush/.worktrees/feat-analyze-dir && go test -v -run "TestHelp|TestMainAnalyze" ./...`
+  - `go test -v -run "TestHelp|TestMainAnalyze" ./...`
 - [ ] **4.5 Commit:** `feat(cli): integrate -analyze flag and help examples`.
 
 ---

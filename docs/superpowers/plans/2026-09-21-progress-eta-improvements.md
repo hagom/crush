@@ -444,7 +444,7 @@ go vet ./...
 - [ ] **Step 2: Mergear a main y eliminar worktree**
 
 ```bash
-cd /baul/aplicaciones/crush
+cd /path/to/crush
 git merge feat/progress-eta-improvements --no-edit
 git worktree remove ../crush-progress-eta
 git branch -d feat/progress-eta-improvements

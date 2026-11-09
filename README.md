@@ -147,7 +147,7 @@ crush -c -f zst -s 50 iso_gigante.raw
 crush -d
 
 # Descompresión interactiva de una carpeta específica (con gestión adaptativa de espacio)
-crush -d /baul/Descargas
+crush -d ~/Descargas
 
 # Descomprimir archivos específicos en paralelo
 crush -d juego.part01.rar

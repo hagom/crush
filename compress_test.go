@@ -269,6 +269,10 @@ func TestSplitUnsupportedFormatsDisabled(t *testing.T) {
 	}
 }
 func TestCheckCompressTools(t *testing.T) {
+	origAutoInstall := autoInstallDeps
+	autoInstallDeps = func(tools []string, mgr *PkgManager) []string { return tools }
+	defer func() { autoInstallDeps = origAutoInstall }()
+
 	if err := CheckCompressTools(Gz); err != nil {
 		t.Fatalf("gz no debería fallar: %v", err)
 	}
@@ -283,6 +287,10 @@ func TestCheckCompressTools(t *testing.T) {
 }
 
 func TestCompressMissingToolNoOutput(t *testing.T) {
+	origAutoInstall := autoInstallDeps
+	autoInstallDeps = func(tools []string, mgr *PkgManager) []string { return tools }
+	defer func() { autoInstallDeps = origAutoInstall }()
+
 	if hasTool("brotli") {
 		t.Skip("brotli instalado; no se puede probar la ausencia de herramienta")
 	}
@@ -1797,7 +1805,13 @@ func TestDoCompressMixedFilesAndDirectoriesIndependent(t *testing.T) {
 }
 
 func TestAdaptive7zDict(t *testing.T) {
-	tests := []struct {
+	origMem := getMemLimit
+	defer func() { getMemLimit = origMem }()
+
+	// Probar con memoria suficiente (>= 8GB)
+	getMemLimit = func() int { return 16384 }
+
+	testsHighMem := []struct {
 		name     string
 		fileSize int64
 		threads  int
@@ -1828,14 +1842,14 @@ func TestAdaptive7zDict(t *testing.T) {
 			want:     "-md=128m",
 		},
 		{
-			name:     "zero or unknown size defaults to 256m or clamped",
+			name:     "zero or unknown size defaults to 256m on high mem",
 			fileSize: 0,
 			threads:  1,
 			want:     "-md=256m",
 		},
 	}
 
-	for _, tt := range tests {
+	for _, tt := range testsHighMem {
 		t.Run(tt.name, func(t *testing.T) {
 			got := adaptive7zDict(tt.fileSize, tt.threads)
 			if got != tt.want {
@@ -1843,6 +1857,16 @@ func TestAdaptive7zDict(t *testing.T) {
 			}
 		})
 	}
+
+	// Probar con memoria baja (< 8GB)
+	getMemLimit = func() int { return 4096 }
+	t.Run("zero or unknown size clamped to 128m on low mem", func(t *testing.T) {
+		got := adaptive7zDict(0, 1)
+		want := "-md=128m"
+		if got != want {
+			t.Errorf("adaptive7zDict(0, 1) con baja memoria = %s, want %s", got, want)
+		}
+	})
 }
 
 func TestGetDirSize(t *testing.T) {

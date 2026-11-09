@@ -2168,12 +2168,14 @@ func TestPromptDecompressAll_CustomDir(t *testing.T) {
 	var buf bytes.Buffer
 	in := strings.NewReader("s\n")
 	files := []string{"foo.zip", "bar.tar.gz"}
-	ok, err := PromptDecompressAll(in, &buf, files, "/baul/Descargas")
+	targetDir := filepath.Join(t.TempDir(), "descargas")
+	ok, err := PromptDecompressAll(in, &buf, files, targetDir)
 	if err != nil || !ok {
 		t.Fatalf("PromptDecompressAll falló: ok=%v, err=%v", ok, err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "Archivos comprimidos detectados en '/baul/Descargas' (2):") {
+	expected := "Archivos comprimidos detectados en '" + targetDir + "' (2):"
+	if !strings.Contains(out, expected) {
 		t.Errorf("Salida no contiene ruta personalizada esperada, obtenido:\n%s", out)
 	}
 }

@@ -1761,6 +1761,106 @@ func TestFileProgress_UncompressedSizeMethods(t *testing.T) {
 	}
 }
 
+func TestParseCutoffTime_Table(t *testing.T) {
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.Local)
+
+	tmpDir := t.TempDir()
+	refFile := filepath.Join(tmpDir, "ref.txt")
+	refTime := time.Date(2026, 10, 15, 8, 30, 0, 0, time.Local)
+	if err := os.WriteFile(refFile, []byte("ref"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(refFile, refTime, refTime); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		newerStr   string
+		newerThan  string
+		wantTime   time.Time
+		wantErrSub string
+	}{
+		{
+			name:     "ambos vacíos",
+			wantTime: time.Time{},
+		},
+		{
+			name:       "ambos definidos (conflicto)",
+			newerStr:   "24h",
+			newerThan:  refFile,
+			wantErrSub: "mutuamente excluyentes",
+		},
+		{
+			name:     "duración en horas",
+			newerStr: "24h",
+			wantTime: now.Add(-24 * time.Hour),
+		},
+		{
+			name:     "duración en días",
+			newerStr: "7d",
+			wantTime: now.Add(-7 * 24 * time.Hour),
+		},
+		{
+			name:     "duración en minutos",
+			newerStr: "30m",
+			wantTime: now.Add(-30 * time.Minute),
+		},
+		{
+			name:     "fecha YYYY-MM-DD",
+			newerStr: "2026-11-01",
+			wantTime: time.Date(2026, 11, 1, 0, 0, 0, 0, time.Local),
+		},
+		{
+			name:     "fecha YYYY-MM-DD HH:MM:SS",
+			newerStr: "2026-11-01 15:30:45",
+			wantTime: time.Date(2026, 11, 1, 15, 30, 45, 0, time.Local),
+		},
+		{
+			name:     "fecha YYYY/MM/DD",
+			newerStr: "2026/11/01",
+			wantTime: time.Date(2026, 11, 1, 0, 0, 0, 0, time.Local),
+		},
+		{
+			name:      "archivo de referencia existente",
+			newerThan: refFile,
+			wantTime:  refTime,
+		},
+		{
+			name:       "archivo de referencia inexistente",
+			newerThan:  filepath.Join(tmpDir, "no_existe.txt"),
+			wantErrSub: "no encontrado",
+		},
+		{
+			name:       "formato inválido",
+			newerStr:   "fecha-invalida",
+			wantErrSub: "formato de fecha o duración inválido",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseCutoffTime(tt.newerStr, tt.newerThan, now)
+			if tt.wantErrSub != "" {
+				if err == nil {
+					t.Fatalf("se esperaba error con %q pero fue nil", tt.wantErrSub)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Errorf("error %q no contiene subcadena esperada %q", err.Error(), tt.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("error inesperado: %v", err)
+			}
+			if !got.Equal(tt.wantTime) {
+				t.Errorf("ParseCutoffTime() = %v, want %v", got, tt.wantTime)
+			}
+		})
+	}
+}
+
+
 
 
 

@@ -39,6 +39,7 @@ type CompressOptions struct {
 	NoSparse        bool
 	Clean           bool
 	Resume          bool
+	CutoffTime      time.Time
 }
 
 var DefaultCleanExcludes = []string{
@@ -101,12 +102,87 @@ func checkAndWarnHighEntropy(item string, fmtChoice Format, warned map[string]bo
 	}
 }
 
+func hasNewerFiles(item string, cutoff time.Time, exclude []string) bool {
+	if cutoff.IsZero() {
+		return true
+	}
+	fi, err := os.Stat(item)
+	if err != nil {
+		return false
+	}
+	if !fi.IsDir() {
+		return fi.ModTime().After(cutoff)
+	}
+
+	found := false
+	_ = filepath.Walk(item, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		for _, pat := range exclude {
+			if matched, _ := filepath.Match(pat, info.Name()); matched {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if !info.IsDir() && info.ModTime().After(cutoff) {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+func collectNewerFiles(item string, cutoff time.Time, exclude []string) ([]string, error) {
+	fi, err := os.Stat(item)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		if cutoff.IsZero() || fi.ModTime().After(cutoff) {
+			return []string{item}, nil
+		}
+		return nil, nil
+	}
+
+	var results []string
+	err = filepath.Walk(item, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		for _, pat := range exclude {
+			if matched, _ := filepath.Match(pat, info.Name()); matched {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if !info.IsDir() {
+			if cutoff.IsZero() || info.ModTime().After(cutoff) {
+				results = append(results, path)
+			}
+		}
+		return nil
+	})
+	return results, err
+}
+
 func generateCompressionTasks(items []string, opts CompressOptions) ([]CompressionTask, error) {
 	var tasks []CompressionTask
 	id := 0
 	warned := make(map[string]bool)
 
 	for _, item := range items {
+		if !opts.CutoffTime.IsZero() && !hasNewerFiles(item, opts.CutoffTime, opts.Exclude) {
+			if opts.Verbose {
+				WriteLogf("  %sℹ [omitido] '%s' no contiene cambios posteriores a %s%s\n", Blue, item, opts.CutoffTime.Format("2006-01-02 15:04:05"), NC)
+			}
+			continue
+		}
 		var formatsToUse []Format
 		if len(opts.Formats) > 0 {
 			seen := make(map[Format]bool)
@@ -249,6 +325,44 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if opts.Clean {
 		opts.Exclude = append(opts.Exclude, DefaultCleanExcludes...)
 	}
+
+	excludeFunc := func(name string) bool {
+		for _, pat := range opts.Exclude {
+			if matched, _ := filepath.Match(pat, filepath.Base(name)); matched {
+				return true
+			}
+			if matched, _ := filepath.Match(pat, name); matched {
+				return true
+			}
+		}
+		return false
+	}
+
+	var filteredFiles []string
+	for _, f := range files {
+		if excludeFunc(f) {
+			if opts.Verbose {
+				WriteLogf("  %sExcluido: %s%s\n", Yellow, f, NC)
+			}
+			continue
+		}
+		if !opts.CutoffTime.IsZero() && !hasNewerFiles(f, opts.CutoffTime, opts.Exclude) {
+			if opts.Verbose {
+				WriteLogf("  %sℹ [omitido] '%s' no contiene cambios posteriores a %s%s\n", Blue, f, opts.CutoffTime.Format("2006-01-02 15:04:05"), NC)
+			}
+			continue
+		}
+		filteredFiles = append(filteredFiles, f)
+	}
+
+	if len(filteredFiles) == 0 {
+		if !opts.CutoffTime.IsZero() {
+			WriteLogf("%sℹ No se encontraron archivos modificados después de %s. Nada que comprimir.%s\n", Blue, opts.CutoffTime.Format("2006-01-02 15:04:05"), NC)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
+	}
+	files = filteredFiles
 
 	if opts.Combine && len(opts.Formats) > 1 {
 		var allOut []string
@@ -408,61 +522,8 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		return nil, err
 	}
 
-	excludeFunc := func(name string) bool {
-		for _, pat := range opts.Exclude {
-			if matched, _ := filepath.Match(pat, filepath.Base(name)); matched {
-				return true
-			}
-			if matched, _ := filepath.Match(pat, name); matched {
-				return true
-			}
-		}
-		return false
-	}
-
-	var filteredFiles []string
-	for _, f := range files {
-		if excludeFunc(f) {
-			if opts.Verbose {
-				WriteLogf("  %sExcluido: %s%s\n", Yellow, f, NC)
-			}
-			continue
-		}
-		filteredFiles = append(filteredFiles, f)
-	}
-
-	if len(filteredFiles) == 0 {
-		return nil, fmt.Errorf("Todos los archivos fueron excluidos")
-	}
-
-	singleItem = len(filteredFiles) == 1 && !opts.Combine && len(opts.Formats) <= 1
-	singleIsDir = false
-	if singleItem {
-		if opts.Format == Auto {
-			checkAndWarnHighEntropy(filteredFiles[0], Auto, nil)
-			opts.Format = DetectAutoFormat(filteredFiles[0])
-		} else {
-			checkAndWarnHighEntropy(filteredFiles[0], opts.Format, nil)
-		}
-		if fi, err := os.Stat(filteredFiles[0]); err == nil && fi.IsDir() {
-			singleIsDir = true
-		}
-		ext = ExtForItem(opts.Format, singleIsDir)
-	} else if opts.Combine && opts.Format == Auto {
-		if hasTool(sevenzBin()) {
-			opts.Format = SevenZ
-		} else {
-			opts.Format = Zst
-		}
-		ext = ExtForFormat(opts.Format)
-	} else {
-		ext = ExtForFormat(opts.Format)
-	}
-
-	canParallel = !singleItem && !opts.Combine
-
 	if canParallel {
-		tasks, err := generateCompressionTasks(filteredFiles, opts)
+		tasks, err := generateCompressionTasks(files, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -523,7 +584,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 			if opts.Format == SevenZ {
 				parFormat = "7z"
 			}
-			WriteLogf("%sComprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(filteredFiles), NC)
+			WriteLogf("%sComprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(files), NC)
 			WriteLogf("  Formato: %s\n", parFormat)
 			WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
 		}
@@ -562,7 +623,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	startTime := time.Now()
 
-	WriteLogf("%sComprimiendo %d archivo(s)...%s\n", Bold, len(filteredFiles), NC)
+	WriteLogf("%sComprimiendo %d archivo(s)...%s\n", Bold, len(files), NC)
 	WriteLogf("  Formato: %s\n", ext)
 	WriteLogf("  Destino: %s\n", outPath)
 	WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
@@ -576,9 +637,9 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 
 	_, preExistErr := os.Stat(realOut)
 	if singleItem {
-		err = compressSingleFile(filteredFiles[0], outPath, opts, nil, totalSize)
+		err = compressSingleFile(files[0], outPath, opts, nil, totalSize)
 	} else {
-		err = compressItems(filteredFiles, outPath, opts)
+		err = compressItems(files, outPath, opts)
 	}
 	if err != nil {
 		if preExistErr != nil {
@@ -629,9 +690,9 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	}
 	WriteLogf("%s=============================%s\n", Green, NC)
 
-	CompressCleanupFiles = filteredFiles
+	CompressCleanupFiles = files
 	if !opts.KeepOrig && !opts.SkipCleanup {
-		removed := removeFiles(filteredFiles, opts.Verbose)
+		removed := removeFiles(files, opts.Verbose)
 		if removed > 0 {
 			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
 		}
@@ -747,15 +808,30 @@ func compressItems(files []string, outPath string, opts CompressOptions) error {
 		return compressTarPipe(files, outPath, opts, nil)
 	}
 
+	targetFiles := files
+	if !opts.CutoffTime.IsZero() {
+		var collected []string
+		for _, f := range files {
+			c, err := collectNewerFiles(f, opts.CutoffTime, opts.Exclude)
+			if err == nil {
+				collected = append(collected, c...)
+			}
+		}
+		if len(collected) == 0 {
+			return nil
+		}
+		targetFiles = collected
+	}
+
 	switch opts.Format {
 	case Zip:
-		return compressZip(files, outPath, opts, nil)
+		return compressZip(targetFiles, outPath, opts, nil)
 	case SevenZ:
-		return compress7z(files, outPath, opts, nil)
+		return compress7z(targetFiles, outPath, opts, nil)
 	case Tar:
 		return compressPlainTar(files, outPath, opts, nil)
 	case Rar:
-		return compressRar(files, outPath, opts, nil)
+		return compressRar(targetFiles, outPath, opts, nil)
 	default:
 		return fmt.Errorf("formato no soportado para compresión: %s", opts.Format)
 	}
@@ -845,15 +921,26 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 		if opts.Format.IsStream() {
 			return compressTarPipe([]string{file}, outPath, opts, fp)
 		}
+		targetFiles := []string{file}
+		if !opts.CutoffTime.IsZero() {
+			collected, err := collectNewerFiles(file, opts.CutoffTime, opts.Exclude)
+			if err != nil {
+				return err
+			}
+			if len(collected) == 0 {
+				return nil
+			}
+			targetFiles = collected
+		}
 		switch opts.Format {
 		case Zip:
-			return compressZip([]string{file}, outPath, opts, fp)
+			return compressZip(targetFiles, outPath, opts, fp)
 		case SevenZ:
-			return compress7z([]string{file}, outPath, opts, fp, fileSize)
+			return compress7z(targetFiles, outPath, opts, fp, fileSize)
 		case Tar:
 			return compressPlainTar([]string{file}, outPath, opts, fp)
 		case Rar:
-			return compressRar([]string{file}, outPath, opts, fp)
+			return compressRar(targetFiles, outPath, opts, fp)
 		default:
 			return fmt.Errorf("formato no soportado para compresión de directorio: %s", opts.Format)
 		}
@@ -1369,6 +1456,9 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 	if opts.ChunkSize > 0 {
 		tarArgs = append(tarArgs, "--record-size="+fmt.Sprintf("%dK", opts.ChunkSize))
 	}
+	if !opts.CutoffTime.IsZero() {
+		tarArgs = append(tarArgs, "--newer-mtime="+opts.CutoffTime.Format("2006-01-02 15:04:05"))
+	}
 	tarArgs = append(tarArgs, "--", "")
 	tarArgs = tarArgs[:len(tarArgs)-1] // remove trailing --
 	tarArgs = append(tarArgs, files...)
@@ -1598,6 +1688,9 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions, fp *
 	}
 	for _, excl := range opts.Exclude {
 		args = append(args, "--exclude="+excl)
+	}
+	if !opts.CutoffTime.IsZero() {
+		args = append(args, "--newer-mtime="+opts.CutoffTime.Format("2006-01-02 15:04:05"))
 	}
 	args = append(args, "--")
 	args = append(args, files...)

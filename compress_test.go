@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCompressDryRun(t *testing.T) {
@@ -2602,6 +2603,282 @@ func TestCompressResume_DirectoriesTarGz(t *testing.T) {
 		t.Errorf("DirA.tar.gz fue reescrito a pesar de Resume")
 	}
 }
+
+func TestCompressIncremental_IndividualFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+
+	fOld := filepath.Join(tmpDir, "file_old.txt")
+	fMid := filepath.Join(tmpDir, "file_mid.txt")
+	fNew := filepath.Join(tmpDir, "file_new.txt")
+
+	if err := os.WriteFile(fOld, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fMid, []byte("mid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fNew, []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// fOld: 10 días atrás, fMid: 5 días atrás, fNew: 1 hora atrás
+	tOld := now.Add(-10 * 24 * time.Hour)
+	tMid := now.Add(-5 * 24 * time.Hour)
+	tNew := now.Add(-1 * time.Hour)
+
+	_ = os.Chtimes(fOld, tOld, tOld)
+	_ = os.Chtimes(fMid, tMid, tMid)
+	_ = os.Chtimes(fNew, tNew, tNew)
+
+	// Cortar en 3 días atrás: solo fNew debe comprimirse
+	cutoff := now.Add(-3 * 24 * time.Hour)
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:     Gz,
+		OutputDir:  outDir,
+		KeepOrig:   true,
+		CutoffTime: cutoff,
+	}
+
+	outPaths, err := DoCompress([]string{fOld, fMid, fNew}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress incremental falló: %v", err)
+	}
+
+	if len(outPaths) != 1 {
+		t.Fatalf("se esperaba 1 solo archivo comprimido, obtenidos %d: %v", len(outPaths), outPaths)
+	}
+
+	expected := filepath.Join(outDir, "file_new.txt.gz")
+	if outPaths[0] != expected {
+		t.Errorf("archivo generado inesperado: %s, esperado %s", outPaths[0], expected)
+	}
+
+	// Comprobar que no existen los otros en outDir
+	if _, err := os.Stat(filepath.Join(outDir, "file_old.txt.gz")); err == nil {
+		t.Errorf("file_old.txt.gz no debió ser generado")
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "file_mid.txt.gz")); err == nil {
+		t.Errorf("file_mid.txt.gz no debió ser generado")
+	}
+}
+
+func TestCompressIncremental_DirectoryTar(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+
+	projDir := filepath.Join(tmpDir, "my_proj")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	fOld := filepath.Join(projDir, "old.txt")
+	fNew := filepath.Join(projDir, "updated.txt")
+	if err := os.WriteFile(fOld, []byte("contenido viejo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fNew, []byte("contenido nuevo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tOld := now.Add(-10 * 24 * time.Hour)
+	tNew := now.Add(-1 * time.Hour)
+	_ = os.Chtimes(fOld, tOld, tOld)
+	_ = os.Chtimes(fNew, tNew, tNew)
+
+	cutoff := now.Add(-3 * 24 * time.Hour)
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:     Gz,
+		OutputDir:  outDir,
+		KeepOrig:   true,
+		CutoffTime: cutoff,
+	}
+
+	outPaths, err := DoCompress([]string{projDir}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress incremental de directorio falló: %v", err)
+	}
+
+	if len(outPaths) != 1 {
+		t.Fatalf("se esperaba 1 archivo tar.gz, obtenidos %d", len(outPaths))
+	}
+
+	tarGz := outPaths[0]
+	members, err := ListArchiveMembers(tarGz, "")
+	if err != nil {
+		t.Fatalf("error listando miembros de %s: %v", tarGz, err)
+	}
+
+	hasUpdated := false
+	hasOld := false
+	for _, m := range members {
+		if strings.HasSuffix(m.Path, "updated.txt") {
+			hasUpdated = true
+		}
+		if strings.HasSuffix(m.Path, "old.txt") {
+			hasOld = true
+		}
+	}
+
+	if !hasUpdated {
+		t.Errorf("el archivo incremental debe incluir updated.txt")
+	}
+	if hasOld {
+		t.Errorf("el archivo incremental NO debe incluir old.txt")
+	}
+}
+
+func TestCompressIncremental_DirectoryContainer7z(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+
+	projDir := filepath.Join(tmpDir, "proj_7z")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	fOld := filepath.Join(projDir, "old.txt")
+	fNew := filepath.Join(projDir, "updated.txt")
+	if err := os.WriteFile(fOld, []byte("contenido viejo 7z"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fNew, []byte("contenido nuevo 7z"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tOld := now.Add(-10 * 24 * time.Hour)
+	tNew := now.Add(-1 * time.Hour)
+	_ = os.Chtimes(fOld, tOld, tOld)
+	_ = os.Chtimes(fNew, tNew, tNew)
+
+	cutoff := now.Add(-3 * 24 * time.Hour)
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:     SevenZ,
+		OutputDir:  outDir,
+		KeepOrig:   true,
+		CutoffTime: cutoff,
+	}
+
+	outPaths, err := DoCompress([]string{projDir}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress incremental 7z falló: %v", err)
+	}
+
+	if len(outPaths) != 1 {
+		t.Fatalf("se esperaba 1 archivo 7z, obtenidos %d", len(outPaths))
+	}
+
+	sevenZFile := outPaths[0]
+	members, err := ListArchiveMembers(sevenZFile, "")
+	if err != nil {
+		t.Fatalf("error listando miembros de %s: %v", sevenZFile, err)
+	}
+
+	hasUpdated := false
+	hasOld := false
+	for _, m := range members {
+		if strings.HasSuffix(m.Path, "updated.txt") {
+			hasUpdated = true
+		}
+		if strings.HasSuffix(m.Path, "old.txt") {
+			hasOld = true
+		}
+	}
+
+	if !hasUpdated {
+		t.Errorf("el archivo 7z incremental debe incluir updated.txt")
+	}
+	if hasOld {
+		t.Errorf("el archivo 7z incremental NO debe incluir old.txt")
+	}
+}
+
+func TestCompressIncremental_NoFilesMatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+
+	fOld := filepath.Join(tmpDir, "file_old.txt")
+	if err := os.WriteFile(fOld, []byte("old content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tOld := now.Add(-10 * 24 * time.Hour)
+	_ = os.Chtimes(fOld, tOld, tOld)
+
+	// Cortar en 1 día atrás (nada califica)
+	cutoff := now.Add(-1 * 24 * time.Hour)
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:     Gz,
+		OutputDir:  outDir,
+		KeepOrig:   true,
+		CutoffTime: cutoff,
+	}
+
+	outPaths, err := DoCompress([]string{fOld}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress no debió fallar: %v", err)
+	}
+	if len(outPaths) != 0 {
+		t.Errorf("se esperaba 0 archivos de salida cuando nada califica, obtenidos %d: %v", len(outPaths), outPaths)
+	}
+}
+
+func TestCompressIncremental_ReferenceFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+
+	refFile := filepath.Join(tmpDir, "backup_ref.tar.gz")
+	if err := os.WriteFile(refFile, []byte("ref"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tRef := now.Add(-5 * 24 * time.Hour)
+	_ = os.Chtimes(refFile, tRef, tRef)
+
+	cutoff, err := ParseCutoffTime("", refFile, now)
+	if err != nil {
+		t.Fatalf("ParseCutoffTime falló: %v", err)
+	}
+
+	fOld := filepath.Join(tmpDir, "old.txt")
+	fNew := filepath.Join(tmpDir, "new.txt")
+	if err := os.WriteFile(fOld, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fNew, []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tOld := now.Add(-10 * 24 * time.Hour)
+	tNew := now.Add(-1 * 24 * time.Hour)
+	_ = os.Chtimes(fOld, tOld, tOld)
+	_ = os.Chtimes(fNew, tNew, tNew)
+
+	outDir := filepath.Join(tmpDir, "out")
+	opts := CompressOptions{
+		Format:     Gz,
+		OutputDir:  outDir,
+		KeepOrig:   true,
+		CutoffTime: cutoff,
+	}
+
+	outPaths, err := DoCompress([]string{fOld, fNew}, opts)
+	if err != nil {
+		t.Fatalf("DoCompress incremental con archivo de referencia falló: %v", err)
+	}
+
+	if len(outPaths) != 1 {
+		t.Fatalf("se esperaba 1 solo archivo comprimido, obtenidos %d: %v", len(outPaths), outPaths)
+	}
+
+	expected := filepath.Join(outDir, "new.txt.gz")
+	if outPaths[0] != expected {
+		t.Errorf("archivo generado inesperado: %s, esperado %s", outPaths[0], expected)
+	}
+}
+
+
 
 
 

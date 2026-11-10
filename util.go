@@ -2210,5 +2210,60 @@ func (p *DynamicThreadPool) Release(tokens int) {
 	}
 }
 
+// ParseCutoffTime parses a cutoff time from either a date/duration string or a reference file.
+// If both are provided, it returns an error. If neither is provided, it returns a zero time.
+func ParseCutoffTime(newerStr, newerThanFile string, now time.Time) (time.Time, error) {
+	if newerStr != "" && newerThanFile != "" {
+		return time.Time{}, fmt.Errorf("--newer y --newer-than son mutuamente excluyentes")
+	}
+	if newerThanFile != "" {
+		fi, err := os.Stat(newerThanFile)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("archivo de referencia para --newer-than no encontrado: %w", err)
+		}
+		return fi.ModTime(), nil
+	}
+	if newerStr == "" {
+		return time.Time{}, nil
+	}
+
+	trimmed := strings.TrimSpace(newerStr)
+
+	// Check if it's a day duration like "7d", "1d"
+	if strings.HasSuffix(trimmed, "d") || strings.HasSuffix(trimmed, "D") {
+		daysStr := trimmed[:len(trimmed)-1]
+		if days, err := strconv.Atoi(daysStr); err == nil && days > 0 {
+			dur := time.Duration(days) * 24 * time.Hour
+			return now.Add(-dur), nil
+		}
+	}
+
+	// Try standard Go duration (e.g. "24h", "30m", "1h30m")
+	if dur, err := time.ParseDuration(trimmed); err == nil {
+		return now.Add(-dur), nil
+	}
+
+	// Try date formats in local time location
+	formats := []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+		"2006/01/02 15:04:05",
+		"2006/01/02 15:04",
+		"2006/01/02",
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+	}
+
+	for _, layout := range formats {
+		if t, err := time.ParseInLocation(layout, trimmed, time.Local); err == nil {
+			return t, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("formato de fecha o duración inválido para --newer: %q (use YYYY-MM-DD o duraciones como 24h, 7d)", newerStr)
+}
+
+
 
 

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReorderArgs(t *testing.T) {
@@ -101,6 +102,16 @@ func TestReorderArgs(t *testing.T) {
 			name: "double dash watch flag",
 			args: []string{"crush", "--watch", "/tmp", "-c"},
 			want: []string{"crush", "--watch", "/tmp", "-c"},
+		},
+		{
+			name: "newer flag with value after positional",
+			args: []string{"crush", "-c", "file.txt", "--newer", "24h"},
+			want: []string{"crush", "-c", "--newer", "24h", "file.txt"},
+		},
+		{
+			name: "newer-than flag with value after positional",
+			args: []string{"crush", "-c", "file.txt", "--newer-than", "ref.tar.gz"},
+			want: []string{"crush", "-c", "--newer-than", "ref.tar.gz", "file.txt"},
 		},
 	}
 	for _, tt := range tests {
@@ -805,5 +816,84 @@ func TestMainAnalyzeCLI(t *testing.T) {
 		t.Errorf("mensaje de error esperado por conflicto no encontrado:\n%s", outConflict)
 	}
 }
+
+func TestMainIncrementalCLI(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "crush_bin")
+	cmdBuild := exec.Command("go", "build", "-o", binPath, ".")
+	cmdBuild.Dir = "."
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("go build falló: %v\n%s", err, out)
+	}
+
+	tmpDir := t.TempDir()
+	now := time.Now()
+
+	fOld := filepath.Join(tmpDir, "file_old.txt")
+	fNew := filepath.Join(tmpDir, "file_new.txt")
+	refFile := filepath.Join(tmpDir, "reference.txt")
+
+	_ = os.WriteFile(fOld, []byte("viejo"), 0644)
+	_ = os.WriteFile(fNew, []byte("nuevo"), 0644)
+	_ = os.WriteFile(refFile, []byte("referencia"), 0644)
+
+	tOld := now.Add(-5 * 24 * time.Hour)
+	tRef := now.Add(-2 * 24 * time.Hour)
+	tNew := now.Add(-1 * time.Hour)
+
+	_ = os.Chtimes(fOld, tOld, tOld)
+	_ = os.Chtimes(refFile, tRef, tRef)
+	_ = os.Chtimes(fNew, tNew, tNew)
+
+	// 1. Error si se usa --newer con -d
+	cmdErrMode := exec.Command(binPath, "-d", "--newer", "24h", fOld)
+	outErrMode, err := cmdErrMode.CombinedOutput()
+	if err == nil {
+		t.Fatalf("crush -d --newer debió fallar, salida:\n%s", outErrMode)
+	}
+	if !strings.Contains(string(outErrMode), "solo son compatibles con compresión") {
+		t.Errorf("mensaje de error inesperado:\n%s", outErrMode)
+	}
+
+	// 2. Error si se usan ambos --newer y --newer-than simultáneamente
+	cmdErrBoth := exec.Command(binPath, "-c", "-f", "gz", "--newer", "24h", "--newer-than", refFile, fNew)
+	outErrBoth, err := cmdErrBoth.CombinedOutput()
+	if err == nil {
+		t.Fatalf("crush --newer y --newer-than juntos debió fallar, salida:\n%s", outErrBoth)
+	}
+	if !strings.Contains(string(outErrBoth), "mutuamente excluyentes") {
+		t.Errorf("mensaje de error inesperado:\n%s", outErrBoth)
+	}
+
+	// 3. Ejecución exitosa de crush -c -f gz --newer 24h -k
+	outDirNewer := filepath.Join(tmpDir, "out_newer")
+	_ = os.MkdirAll(outDirNewer, 0755)
+	cmdNewer := exec.Command(binPath, "-c", "-f", "gz", "--newer", "24h", "-k", "-o", outDirNewer, fOld, fNew)
+	outNewer, err := cmdNewer.CombinedOutput()
+	if err != nil {
+		t.Fatalf("crush -c --newer 24h falló: %v\n%s", err, outNewer)
+	}
+	if _, err := os.Stat(filepath.Join(outDirNewer, "file_new.txt.gz")); err != nil {
+		t.Errorf("file_new.txt.gz debió existir en salida")
+	}
+	if _, err := os.Stat(filepath.Join(outDirNewer, "file_old.txt.gz")); err == nil {
+		t.Errorf("file_old.txt.gz no debió ser creado")
+	}
+
+	// 4. Ejecución exitosa de crush -c -f gz --newer-than reference.txt -k
+	outDirRef := filepath.Join(tmpDir, "out_ref")
+	_ = os.MkdirAll(outDirRef, 0755)
+	cmdRef := exec.Command(binPath, "-c", "-f", "gz", "--newer-than", refFile, "-k", "-o", outDirRef, fOld, fNew)
+	outRef, err := cmdRef.CombinedOutput()
+	if err != nil {
+		t.Fatalf("crush -c --newer-than falló: %v\n%s", err, outRef)
+	}
+	if _, err := os.Stat(filepath.Join(outDirRef, "file_new.txt.gz")); err != nil {
+		t.Errorf("file_new.txt.gz debió existir en out_ref")
+	}
+	if _, err := os.Stat(filepath.Join(outDirRef, "file_old.txt.gz")); err == nil {
+		t.Errorf("file_old.txt.gz no debió existir en out_ref")
+	}
+}
+
 
 

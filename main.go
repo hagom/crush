@@ -39,6 +39,8 @@ func flagTakesValue(a string) bool {
 	switch {
 	case a == "-f", a == "-F", a == "-formats", a == "--formats", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion", a == "-filter", a == "--filter":
 		return true
+	case a == "-newer" || a == "--newer" || a == "-newer-than" || a == "--newer-than":
+		return true
 	case a == "-bench-size" || a == "--bench-size":
 		return true
 	case a == "-watch" || a == "--watch":
@@ -263,6 +265,8 @@ func main() {
 	recompressFlag := flag.Bool("recompress", false, "Alias de -convert")
 	analyzeFlag := flag.Bool("analyze", false, "Analizar recursivamente compresibilidad y estimar ahorro de espacio")
 	resumeFlag := flag.Bool("resume", false, "Reanudar lotes interrumpidos omitiendo archivos ya procesados e íntegros")
+	newerFlag := flag.String("newer", "", "Comprimir solo archivos modificados después de la fecha/duración (ej: 24h, 7d, 2026-01-01)")
+	newerThanFlag := flag.String("newer-than", "", "Comprimir solo archivos modificados después del archivo de referencia especificado")
 
 	flag.Parse()
 
@@ -413,6 +417,21 @@ func main() {
 		}
 		if hasA || hasL || hasR || *treeFlag || *findFlag != "" || *diffFlag || hasConvert || *analyzeFlag || *benchFlag {
 			WriteError("--resume solo es compatible con compresión (-c) o descompresión (-d)")
+			os.Exit(1)
+		}
+	}
+
+	// Validations for --newer / --newer-than
+	var cutoffTime time.Time
+	if *newerFlag != "" || *newerThanFlag != "" {
+		if !hasC && !hasA && *watchDir == "" {
+			WriteError("--newer y --newer-than solo son compatibles con compresión (-c) o agregar (-a)")
+			os.Exit(1)
+		}
+		var err error
+		cutoffTime, err = ParseCutoffTime(*newerFlag, *newerThanFlag, time.Now())
+		if err != nil {
+			WriteError("parámetro incremental inválido: %v", err)
 			os.Exit(1)
 		}
 	}
@@ -659,6 +678,7 @@ func main() {
 			Hash:            *hashFlag,
 			ThreadLimit:     effectiveThreads,
 			Clean:           *cleanFlag,
+			CutoffTime:      cutoffTime,
 			CompressionOpts: *compressionOpts,
 		}
 		if err := DoAppend(targetArchive, itemsToAdd, opts); err != nil {
@@ -832,6 +852,7 @@ func main() {
 				CompressionOpts: *compressionOpts,
 				Exclude:         exclude,
 				Combine:         *combineFlag,
+				CutoffTime:      cutoffTime,
 			}
 		} else if *decompressFlag {
 			mode = WatchModeDecompress
@@ -924,6 +945,7 @@ func main() {
 			NoSparse:        !sparseEnabled,
 			Clean:           *cleanFlag,
 			Resume:          *resumeFlag,
+			CutoffTime:      cutoffTime,
 		}
 		var outPaths []string
 		var err error
@@ -1258,6 +1280,8 @@ func printHelp() {
 	w(Yellow, "  crush -c -f FORMATO [opciones] archivo...              # comprimir archivos en el formato especificado\n")
 	w(Yellow, "  crush -c -F FORMATOS [opciones] archivo...             # comprimir archivos en múltiples formatos a la vez\n")
 	w(Yellow, "  crush -c [opciones]                                    # compresión interactiva del directorio actual\n")
+	w(Yellow, "  crush -c [opciones] --newer TIEMPO archivo...          # compresión incremental por fecha o tiempo relativo\n")
+	w(Yellow, "  crush -c [opciones] --newer-than ARCHIVO archivo...    # compresión incremental referenciada a archivo base\n")
 	w(Yellow, "  crush -d [opciones] archivo...                         # descomprimir archivos con detección automática\n")
 	w(Yellow, "  crush -d [opciones]                                    # descompresión interactiva de detectados\n")
 	w(Yellow, "  crush -a ARCHIVO_COMPRIMIDO [opciones] elemento...     # agregar elementos a archivo existente\n")
@@ -1328,6 +1352,10 @@ func printHelp() {
 	fmt.Print("               Sobrescribir archivos existentes sin confirmación\n")
 	w(Yellow, "  --resume")
 	fmt.Print("             Reanudar lotes interrumpidos omitiendo archivos ya procesados e íntegros\n")
+	w(Yellow, "  --newer TIEMPO/FECHA")
+	fmt.Print("   Comprimir solo archivos modificados después del tiempo o fecha (ej: 24h, 7d, 2026-01-01)\n")
+	w(Yellow, "  --newer-than ARCHIVO")
+	fmt.Print("   Comprimir solo archivos modificados después del archivo de referencia especificado\n")
 	w(Yellow, "  -quick")
 	fmt.Print("               Verificación rápida (no verificar cada archivo individualmente)\n")
 	w(Yellow, "  -s N")
@@ -1399,6 +1427,8 @@ func printHelp() {
 	w(Yellow, "  crush -c -f zip -exclude \"*.bak\" dir/                  # comprimir excluyendo archivos con patrón .bak\n")
 	w(Yellow, "  crush -c -clean -f tar.gz proyecto/                    # comprimir excluyendo automáticamente .git, node_modules, etc.\n")
 	w(Yellow, "  crush -c -f 7z -notify archivo_pesado.iso              # emitir notificación de escritorio y sonido al terminar\n")
+	w(Yellow, "  crush -c -f gz --newer 24h proyecto/                   # comprimir solo archivos modificados en las últimas 24 horas\n")
+	w(Yellow, "  crush -c -f tar.gz --newer-than backup.tar.gz src/     # comprimir solo archivos más recientes que el respaldo previo\n")
 	w(Yellow, "  crush -c -f tar.gz -o /backup/ dir/                    # comprimir enviando el resultado a un directorio\n")
 	w(Yellow, "  crush -c -C -f 7z file1.txt file2.txt file3.txt        # combinar múltiples archivos en un único archivo 7z\n")
 	w(Yellow, "  crush -c -f zst -s 10 archivo_grande.iso               # dividir flujo comprimido en partes de 10 MB\n")
@@ -1463,7 +1493,7 @@ _crush_completions() {
     local split_formats="gz xz bz2 bz3 zst lz lz4 br"
     local split_sizes="10 50 100 500 1000"
     local short="-c -d -l -t -r -h -v -k -n -f -F -o -s -force -quick -opts -exclude -hash -verify -p -password"
-    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --formats --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version --hash --verify --password --analyze --resume"
+    local long="--compress --decompress --list --test --read --help --verbose --keep --dry-run --format --formats --output --split --opts --exclude --force --quick --install --install-deps --uninstall --completion --version --hash --verify --password --analyze --resume --newer --newer-than"
 
     local has_split=0
     local w
@@ -1487,7 +1517,7 @@ _crush_completions() {
             COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur}") )
             return 0
             ;;
-        -o|--output|-opts|-exclude)
+        -o|--output|-opts|-exclude|-newer-than|--newer-than)
             COMPREPLY=( $(compgen -f -- "${cur}") )
             return 0
             ;;
@@ -1565,6 +1595,8 @@ _crush() {
         {-o,--output}'[Directorio de salida]:directorio:_files -/' \
         '--force[Sobrescribir existentes]' \
         '--resume[Reanudar lotes interrumpidos omitiendo archivos completos]' \
+        '--newer[Comprimir solo archivos modificados después de la fecha/duración]:tiempo:' \
+        '--newer-than[Comprimir solo archivos modificados después del archivo de referencia]:archivo de referencia:_files' \
         '--quick[Verificación rápida]' \
         {-v,--verbose}'[Modo verbose]' \
         {-k,--keep}'[Conservar originales]' \
@@ -1631,6 +1663,8 @@ complete -c crush -s F -l formats -d "Comprimir en múltiples formatos separados
 complete -c crush -s o -d "Directorio de salida" -xa "(__fish_complete_directories)"
 complete -c crush -s force -l force -d "Sobrescribir existentes"
 complete -c crush -l resume -d "Reanudar lotes interrumpidos"
+complete -c crush -l newer -d "Comprimir solo archivos modificados después del tiempo o fecha"
+complete -c crush -l newer-than -d "Comprimir solo archivos modificados después del archivo de referencia" -xa "(__fish_complete_files)"
 complete -c crush -s quick -l quick -d "Verificación rápida"
 complete -c crush -s v -d "Modo verbose"
 complete -c crush -s k -d "Conservar originales"

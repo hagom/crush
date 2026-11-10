@@ -25,6 +25,16 @@ Este documento registra el historial de análisis de propuestas técnicas y su e
   - **En descompresión:** Comprueba el estado de extracción consultando el directorio destino contra los miembros y tamaños reales del archivo (`ListArchiveMembers`). Si todos los archivos ya existen y coinciden en tamaño, omite el archivo con aviso `ℹ [reanudado]`. Si la extracción quedó incompleta, reanuda permitiendo sobrescribir las partes truncas y finalizando la extracción sin arrojar errores de colisión.
   - Si todos los elementos del lote ya estaban concluidos, emite de inmediato: `✓ Todos los archivos ya estaban completados. Nada que reanudar.` sin consumir CPU ni I/O.
 
+### Compresión Incremental por Fecha / Referencia (`--newer` / `--newer-than`)
+- **Estado:** ✅ **IMPLEMENTADA**
+- **Descripción:** Filtrado temporal de archivos para copias de seguridad incrementales rápidas y precisas. Permite comprimir exclusivamente los archivos modificados después de una fecha/hora, duración relativa (`24h`, `7d`, `30m`), o con posterioridad a la marca de tiempo de un archivo de referencia (`backup.tar.gz`).
+- **Acción implementada:**
+  - **Parser polimórfico (`ParseCutoffTime` en `util.go`):** Reconoce duraciones relativas estándar (`24h`, `30m`, `7d`), fechas absolutas (`YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, RFC3339) y marcas de tiempo de archivos de referencia vía `os.Stat(ref).ModTime()`.
+  - **Integración nativa con `tar`:** Envío del flag de kernel/sistema `--newer-mtime="YYYY-MM-DD HH:MM:SS"` directamente a los flujos tar (`tar.gz`, `tar.xz`, etc.) sin sobrecosto de I/O.
+  - **Soporte transparente en formatos contenedor:** En `7z`, `zip` y `rar`, recolección recursiva respetando rutas relativas (`collectNewerFiles`) y descartando directorios sin cambios.
+  - **Filtrado temprano zero-waste:** Si ningún archivo califica para compresión, emite mensaje informativo y finaliza con código de salida 0 sin crear archivos vacíos ni consumir I/O.
+  - **Completado de shell:** Añadido soporte en bash, zsh y fish para `--newer` y `--newer-than` (con autocompletado de archivos en este último).
+
 ---
 
 ## 2. Propuestas Evaluadas y Descartadas

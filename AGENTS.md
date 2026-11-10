@@ -150,8 +150,15 @@ crush/
 
 ## Estado actual
 
-- Go: migración completa. 577 tests nativos pasando con race detector (-race). ~19000 líneas. 0 bugs conocidos.
+- Go: migración completa. 597 tests nativos pasando con race detector (-race). ~19500 líneas. 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Compresión Incremental por Fecha / Referencia (`--newer` / `--newer-than` / `compress.go`, `main.go`, `util.go`):
+    - **Filtrado Temporal de Alto Rendimiento:** Capacidad para crear respaldos y archivos comprimidos incrementales ultra-rápidos procesando únicamente aquellos archivos que fueron creados o modificados con posterioridad a un corte temporal.
+    - **Parser Polimórfico de Tiempos (`ParseCutoffTime` en `util.go`):** Admite duraciones relativas estándar (`24h`, `30m`, `7d`, `Nd`), fechas absolutas con soporte automático de zona horaria local (`YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, RFC3339) y marcas de tiempo extraídas de archivos base de referencia (`backup.tar.gz`) con validación de exclusión mutua.
+    - **Aceleración Nativa de Streaming Tar:** Delegación directa del filtrado temporal al comando del sistema vía `--newer-mtime="YYYY-MM-DD HH:MM:SS"`, reduciendo el I/O en flujos `tar.gz`, `tar.xz`, `tar.zst`, etc.
+    - **Soporte Transparente en Contenedores (`7z`, `zip`, `rar`):** Recolección recursiva (`collectNewerFiles`) que preserva la estructura de carpetas relativas empaquetando únicamente los miembros modificados.
+    - **Filtrado Temprano Zero-Waste:** Si ningún archivo fue modificado tras el corte, `crush` emite un aviso limpio (`ℹ No se encontraron archivos modificados después de ... Nada que comprimir.`) y termina limpiamente con exit code 0 sin generar archivos vacíos ni desperdiciar recursos.
+    - **Soporte Completo de CLI y Autocompletado:** Integración de flags `--newer` y `--newer-than` con autocompletado en bash, zsh y fish, preservación de pares argumento-valor en reordenamiento de flags y compatibilidad con `-k`, `-clean`, `-hash`, y `-exclude`.
   - Modo Reanudación de Lotes Interrumpidos (`--resume` / `compress.go`, `decompress.go`, `main.go`):
     - **Reanudación Minimalista y Resiliente (Unix Way):** Capacidad de reanudar lotes masivos de compresión y descompresión ante interrupciones (Ctrl+C, reinicio, falta de espacio) sin generar archivos de estado intermedios ni ensuciar los directorios del usuario.
     - **Validación de Integridad en Compresión (`crush -c --resume`):** Si el archivo comprimido destino ya existe, se comprueba su validez física (`testArchiveIntegrity`). Si el archivo está completo, se omite (`ℹ [reanudado]`); si quedó truncado o corrupto por un corte de proceso, se detecta, elimina y recomprime limpiamente (`⚠ [reanudando]`).

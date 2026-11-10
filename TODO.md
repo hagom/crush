@@ -40,3 +40,17 @@ Este documento registra el historial de análisis de propuestas técnicas y su e
 ### Modo Servidor / Socket Streaming UNIX (`crush serve`)
 - **Estado:** ❌ **DESCARTADA**
 - **Motivo:** Sobreingeniería clara (YAGNI). La sobrecarga de inicio del binario en Linux es de apenas 2 milisegundos. `crush` ya soporta streaming UNIX directo mediante tuberías estándar (`|`) y FIFOs (`mkfifo`) con aceleración en espacio de kernel `splice(2)` zero-copy y buffers de 1 MiB (`F_SETPIPE_SZ`). Introducir un daemon en segundo plano añadiría complejidad de gestión de procesos sin beneficio real de rendimiento.
+
+---
+
+## 3. Propuestas Pospuestas para Futuras Versiones
+
+### Modo Fondo / Prioridad Amigable (`--idle` / `--low-priority`)
+- **Estado:** ⏸️ **POSPUESTA**
+- **Descripción:** Ejecución de tareas pesadas de compresión/descompresión en segundo plano sin penalizar la interactividad del sistema ni provocar congelamientos en el escritorio o juegos.
+- **Detalle técnico previsto:**
+  - Prioridad de CPU amigable mediante `nice +19` (`syscall.Setpriority(syscall.PRIO_PROCESS, 0, 19)`), cediendo ciclos de procesador al instante ante aplicaciones interactivas.
+  - Prioridad de E/S de disco de fondo mediante `IOPRIO_CLASS_IDLE` (`syscall.Syscall(SYS_ioprio_set, ...)` en Linux), accediendo al almacenamiento solo cuando ninguna otra aplicación esté solicitando lecturas/escrituras.
+  - Herencia automática a toda la cadena de subprocesos (`tar`, `pigz`, `xz`, `7z`, `zstd`, etc.) mediante semántica estándar UNIX sin necesidad de invocar utilidades externas (`nice`/`ionice`).
+  - Implementación minimalista sin dependencias externas (100% Go stdlib).
+

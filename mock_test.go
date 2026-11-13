@@ -98,6 +98,9 @@ func TestHelperProcess(t *testing.T) {
 		}
 		os.Exit(0)
 
+	case "mock-noop":
+		os.Exit(0)
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown mock command: %s\n", cmd)
 		os.Exit(127)

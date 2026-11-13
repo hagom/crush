@@ -114,7 +114,7 @@ func buildDecompressCmdForFile(srcFile string, info FormatInfo, threadLimit int)
 	case Br:
 		return execCommand("brotli", "-dc", "--", srcFile)
 	default:
-		return execCommand("cat", srcFile)
+		return execCommand("cat", "--", srcFile)
 	}
 }
 
@@ -203,6 +203,12 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 }
 
 func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat Format, opts ConvertOptions) error {
+	absOut, err := filepath.Abs(outPath)
+	if err != nil {
+		return fmt.Errorf("resolviendo ruta de salida %s: %w", outPath, err)
+	}
+	outPath = absOut
+
 	tmpDir, err := os.MkdirTemp("", "crush_conv_*")
 	if err != nil {
 		return fmt.Errorf("creando directorio temporal para conversión: %w", err)
@@ -324,7 +330,7 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
 		}
-		args = append(args, outPath, "*")
+		args = append(args, outPath, ".")
 		cmd := execCommand(bin, args...)
 		cmd.Dir = tmpDir
 		if err := cmd.Run(); err != nil {
@@ -363,9 +369,13 @@ func DoConvert(files []string, targetFormat Format, opts ConvertOptions) error {
 		outPath := targetPathForConvert(file, srcInfo.Format, targetFormat, opts.OutputDir)
 
 		if !opts.Force {
-			if _, err := os.Stat(outPath); err == nil {
+			if _, err := os.Lstat(outPath); err == nil {
 				return fmt.Errorf("el archivo destino ya existe: %s (use -force para sobrescribir)", outPath)
 			}
+		}
+
+		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return fmt.Errorf("creando directorio destino: %w", err)
 		}
 
 		WriteLogf("%sTranscodificando:%s %s → %s\n", BoldBlue, NC, file, outPath)
@@ -387,18 +397,18 @@ func DoConvert(files []string, targetFormat Format, opts ConvertOptions) error {
 			return fmt.Errorf("fallo transcodificando %s a %s: %w", file, targetFormat, convErr)
 		}
 
+		outFi, statErr := os.Stat(outPath)
+		if statErr != nil {
+			return fmt.Errorf("el archivo convertido no se generó en %s: %w", outPath, statErr)
+		}
+
 		if opts.Hash {
 			if _, err := WriteSHA256File(outPath); err != nil {
 				WriteWarning("generando checksum para %s: %v", outPath, err)
 			}
 		}
 
-		outFi, statErr := os.Stat(outPath)
-		var outSize int64
-		if statErr == nil {
-			outSize = outFi.Size()
-		}
-		WriteSuccess("Convertido con éxito: %s (%s)", outPath, FormatSize(outSize))
+		WriteSuccess("Convertido con éxito: %s (%s)", outPath, FormatSize(outFi.Size()))
 
 		if !opts.KeepOrig {
 			_ = os.Remove(file)

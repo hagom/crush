@@ -37,7 +37,30 @@ Este documento registra el historial de análisis de propuestas técnicas y su e
 
 ---
 
-## 2. Propuestas Evaluadas y Descartadas
+## 2. Seguridad y Robustez
+
+### Sandbox de Extracción contra Zip-Slip (`os.OpenRoot`) — Opción C
+- **Estado:** ✅ **IMPLEMENTADA** (`cb75b71`, `64f0beb`)
+- **Descripción:** Confinamiento de toda escritura y comprobación de extracción al directorio destino, combinando el sandbox nativo de Go para las rutas escritas por `crush` con el endurecimiento de las herramientas externas.
+- **Acción implementada:**
+  - **Saneamiento de rutas (`sanitizeArchiveRelPath` en `decompress.go`):** normaliza `\` a `/`, aplica `path.Clean` y `filepath.IsLocal`; descarta miembros con `../`, rutas absolutas o `..\`, aceptando nombres legítimos como `foo..bar.txt`. Lo consumen `resolveOutputs` e `isArchiveFullyExtracted`.
+  - **Escrituras dentro de `*os.Root`:** `decompressSingle` (casos `.lrz` y formatos de flujo), `checkAndApplyIsoExtensionInRoot` e `isArchiveFullyExtracted` operan con `os.OpenRoot(dir)` y `root.Lstat`; `validateOutputName` rechaza nombres de salida no locales.
+  - **Sin sobrescritura implícita:** `openDecompressOutput` usa `O_EXCL` salvo con `-force`/`--resume`; `ensureLrzOutputSafe` rechaza symlinks existentes; `decompressFile` usa `os.Lstat` para detectar salidas previas.
+  - **Extractores externos endurecidos:** `buildTarExtractArgs` (`--keep-old-files`, `--wildcards --` con filtro), `build7zExtractArgs` (`-aos`/`-aoa`), `unzip -n`/`-o`, `rar -o-`/`-o+`; separador `--` y `safeFlagArg` en `tar`, `7z`, `unzip`, `rar`, `listTarMembers`, `listRarMembers` y `test_cmd.go`; todas las invocaciones vía `execCommand`.
+
+### Auditoría Completa de Bugs y Vulnerabilidades
+- **Estado:** ✅ **CORREGIDA** (rama `fix/audit-critical-bugs`, commits `9ab444e` a `5082c5d`)
+- **Acción implementada:**
+  - **Conversión (`9ab444e`):** ruta de salida relativa resuelta a absoluta y verificación del destino antes de borrar el origen.
+  - **Compresión (`aaf44e2`):** conservación de originales en modo incremental, protección frente a `rar -df` y respeto de exclusiones y corte temporal en contenedores y en `-a`.
+  - **Pipes (`ac778e4`):** `waitPipePair` evita bloqueos de `io.Pipe` cuando el consumidor falla antes de tiempo.
+  - **CLI y watcher (`25180c1`):** `reorderArgs` tolera argumentos vacíos y `--`; validación de conflictos entre todos los modos; watcher inotify con `epoll` cancelable.
+  - **Seguridad, lock y logs (`8c7dd24`):** lock y logs en directorios privados (`0700`/`0600`), enmascarado de contraseñas en logs verbose (`redactArgs`), corrección de carrera en el log y de la comprobación de contraseñas con archivos de 0 bytes.
+  - **Núcleo (`5082c5d`):** techo de hilos también en compresión secuencial (`resolveThreadCap`), `FormatSize` en Go puro, tope de desbordamiento en sumas ZIP64, distinción entre disco lleno y error de `df`, progreso seguro con UTF-8, `GetUniqueName` con `Lstat` sin límite de contador, `ParseFormatFromExt` sobre el nombre base y `crush -r` en streaming (`CompressReadTo`).
+
+---
+
+## 3. Propuestas Evaluadas y Descartadas
 
 ### Extracción Quirúrgica de Miembros a Stdout (`crush --cat`)
 - **Estado:** ❌ **DESCARTADA**
@@ -53,7 +76,7 @@ Este documento registra el historial de análisis de propuestas técnicas y su e
 
 ---
 
-## 3. Propuestas Pospuestas para Futuras Versiones
+## 4. Propuestas Pospuestas para Futuras Versiones
 
 ### Modo Fondo / Prioridad Amigable (`--idle` / `--low-priority`)
 - **Estado:** ⏸️ **POSPUESTA**

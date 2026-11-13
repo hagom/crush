@@ -109,6 +109,9 @@ La arquitectura de `crush` aplica rigurosamente los principios SOLID para garant
 - Cumplimiento estricto del principio DRY: Si una lógica o consulta al sistema de archivos se repite en más de un sitio, debe abstraerse en una función pura o auxiliar en `util.go` o `format.go`.
 - Mantener la stdlib pura: no introducir dependencias externas en `go.mod`.
 - Todo comando externo susceptible de ser testeado debe invocar `execCommand` para preservar la testeabilidad.
+- Todo nombre de archivo o directorio pasado a una herramienta externa (`tar`, `7z`, `unzip`, `rar`, compresores) debe ir tras el separador `--` cuando la herramienta lo admita, y pasar por `safeFlagArg` cuando ocupe la posición de un valor de flag (`-f`, `-C`, `-d`).
+- Toda escritura de extracción realizada por Go debe confinarse al directorio destino con `os.OpenRoot` y comprobar existencia con `Lstat` (nunca seguir symlinks). Las rutas de miembros de un archivo deben pasar por `sanitizeArchiveRelPath`.
+- Sin `-force`/`--resume`, la extracción nunca sobrescribe: `O_EXCL` en Go y modo "no sobrescribir" en extractores externos (`tar --keep-old-files`, `7z -aos`, `unzip -n`, `rar -o-`).
 
 ## Estructura del código Go
 
@@ -128,7 +131,7 @@ crush/
 ├── convert.go       # Transcodificador directo entre formatos (-convert, -recompress)
 ├── notify.go        # Notificaciones de escritorio (notify-send) y campana acústica (-notify)
 ├── watcher.go       # Watcher, DoWatch, loop con stdlib
-├── watcher_linux.go # Backend inotify (IN_CLOSE_WRITE, IN_MOVED_TO)
+├── watcher_linux.go # Backend inotify (IN_CLOSE_WRITE, IN_MOVED_TO) con epoll cancelable
 ├── watcher_other.go # Backend fallback por sondeo
 ├── bench.go         # DoBench, BenchmarkFormat, GenerateBenchmarkDataset, FormatBenchTable
 ├── test_cmd.go      # DoTest, TestFile, -verify con checksum SHA-256
@@ -142,16 +145,27 @@ crush/
 ├── lock_other.go    # Fallback sin bloqueo en plataformas no Unix
 ├── pkgmgr.go        # DetectPkgManager, InstallMissingDeps, list helpers
 ├── Makefile
-├── TODO.md          # Propuestas y mejoras futuras (entropía previa, paridad)
-├── .github/workflows/ci.yml  # GitHub Actions: test matrix Go 1.21-1.23, race detector, build
+├── TODO.md          # Propuestas implementadas, descartadas y pospuestas
+├── .github/workflows/ci.yml  # GitHub Actions: Go 1.27.x, go vet, race detector, build, smoke test
 ├── *_test.go        # Tests por paquete
 └── mock_test.go     # Tests con mocks de exec.Command (patrón TestHelperProcess)
 ```
 
 ## Estado actual
 
-- Go: migración completa. 597 tests nativos pasando con race detector (-race). ~19500 líneas. 0 bugs conocidos.
+- Go: migración completa. 315 tests de primer nivel (685 contando subtests) pasando con race detector (-race); 3 omitidos según entorno (`TestCheckCompressTools`, `TestCompressMissingToolNoOutput` si `brotli` está instalado; `TestLockHolderProcess`, proceso auxiliar). ~27100 líneas de Go (incluyendo tests). 0 bugs conocidos.
 - Features implementadas y fixes recientes:
+  - Sandbox de Extracción contra Zip-Slip — Punto 7, Opción C (`decompress.go`, `test_cmd.go`; commits `cb75b71`, `64f0beb`):
+    - **Saneamiento de rutas de miembros (`sanitizeArchiveRelPath`):** normalización de `\` a `/`, `path.Clean` y `filepath.IsLocal`. `resolveOutputs` e `isArchiveFullyExtracted` descartan `../`, rutas absolutas y `..\`, aceptando nombres legítimos como `foo..bar.txt`.
+    - **Confinamiento con `os.OpenRoot`:** `decompressSingle` (casos `.lrz` y formatos de flujo vía `validateOutputName`, `openDecompressOutput`, `ensureLrzOutputSafe`), `checkAndApplyIsoExtensionInRoot` e `isArchiveFullyExtracted` operan dentro de `*os.Root` con `root.Lstat`; `O_EXCL` cuando no hay `-force` ni `--resume`; rechazo de escritura sobre symlinks existentes; `decompressFile` detecta salidas previas con `os.Lstat`.
+    - **Extractores externos endurecidos:** `buildTarExtractArgs` (`--keep-old-files` sin `-force`/`--resume`; `--wildcards --` con `-filter`), `build7zExtractArgs` (`-aos`/`-aoa`), `unzip -n`/`-o`, `rar -o-`/`-o+`; separador `--` y `safeFlagArg` en `7z`, `unzip`, `rar`, `tar`, `listTarMembers`, `listRarMembers` y `test_cmd.go` (`tar -tf <safeFlagArg> --`); `decompressTar` reutiliza `pipeCmdFor`; todas las llamadas de `decompress.go` y `test_cmd.go` pasan por `execCommand`.
+  - Auditoría Completa de Bugs y Vulnerabilidades (rama `fix/audit-critical-bugs`, commits `9ab444e`..`5082c5d`):
+    - **Conversión (`9ab444e`):** resolución absoluta de la ruta de salida y verificación del destino antes de borrar el origen.
+    - **Compresión (`aaf44e2`):** conservación de originales en modo incremental (`KeepOrig` forzado con `CutoffTime`), protección frente a `rar -df` y respeto de exclusiones y corte temporal en contenedores y en `-a`.
+    - **Pipes (`ac778e4`):** `waitPipePair` en `util.go` cierra ambos extremos con error para evitar bloqueos de `io.Pipe` cuando el consumidor falla antes de tiempo.
+    - **CLI y watcher (`25180c1`):** `reorderArgs` tolera argumentos vacíos y `--`; validación de conflictos entre todos los modos (escritura, lectura, `-t`/`-verify`, `--analyze`, `--bench`, `--install*`); watcher inotify con `epoll` y timeout para cancelación limpia.
+    - **Seguridad, lock y logs (`8c7dd24`):** lock en `$CRUSH_LOCK_FILE`, `$XDG_RUNTIME_DIR/crush.lock`, `<UserCacheDir>/crush/crush.lock` o `<tmp>/crush-<uid>.lock`; logs `0600` en directorios `0700` (`/var/log/crush` como root, `$XDG_STATE_HOME/crush`, `<UserCacheDir>/crush/logs`, `<tmp>/crush-log-<uid>`); `redactArgs` enmascara contraseñas en los comandos `7z`/`zip`/`rar` del log verbose; corrección de carrera en el log y de la comprobación de contraseñas con archivos de 0 bytes.
+    - **Núcleo (`5082c5d`):** `resolveThreadCap` y `safeFlagArg` en `util.go`; techo de hilos también en `DoCompress` secuencial; `FormatSize` determinista en Go puro (sin `numfmt`); tope `math.MaxInt64` ante desbordamiento de sumas ZIP64 en `EstimateUncompressedSize`; `probeDiskAvail`/`getDiskAvail` distinguen disco lleno (`0`) de error de `df` (`-1`); `fileLine` seguro con runas UTF-8; `GetUniqueName` con `os.Lstat` y contador sin límite; `ParseFormatFromExt` evalúa el nombre base; `crush -r` en streaming con `CompressReadTo` (fallback `plzip`→`lzip`, `tar -xO -f <safeFlagArg> --`).
   - Compresión Incremental por Fecha / Referencia (`--newer` / `--newer-than` / `compress.go`, `main.go`, `util.go`):
     - **Filtrado Temporal de Alto Rendimiento:** Capacidad para crear respaldos y archivos comprimidos incrementales ultra-rápidos procesando únicamente aquellos archivos que fueron creados o modificados con posterioridad a un corte temporal.
     - **Parser Polimórfico de Tiempos (`ParseCutoffTime` en `util.go`):** Admite duraciones relativas estándar (`24h`, `30m`, `7d`, `Nd`), fechas absolutas con soporte automático de zona horaria local (`YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, RFC3339) y marcas de tiempo extraídas de archivos base de referencia (`backup.tar.gz`) con validación de exclusión mutua.
@@ -298,7 +312,7 @@ crush/
   - Inyección de dependencias con `var execCommand = exec.Command` y tests con mocks canónicos (`TestHelperProcess`).
   - `lockedWriter` para serializar escrituras concurrentes a stderr en `pipeline()`.
   - Extracción de `getMemFromFree()` como función testeable independiente de `/proc/meminfo`.
-  - CI/CD con GitHub Actions: matriz Go 1.21-1.23, race detector, go vet, build, smoke tests.
+  - CI/CD con GitHub Actions: Go 1.27.x, race detector, go vet, build, smoke tests.
   - Corrección de 10 fallos de lógica auditados (BUG-L1 a BUG-L10):
     - `GetUniqueName` atómico y sincronizado en memoria contra colisiones concurrentes en compresión paralela (BUG-L1).
     - Cierre garantizado de descriptores de archivos divididos en `splitWriter` e implementación de `io.Closer` en `countingWriter` (BUG-L2).

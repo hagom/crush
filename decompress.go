@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -499,18 +500,43 @@ func listArchiveOutputs(file string, dir string, info FormatInfo, passwords ...s
 	return resolveOutputs(paths, dir)
 }
 
+func sanitizeArchiveRelPath(member string) (string, bool) {
+	norm := strings.ReplaceAll(member, "\\", "/")
+	norm = strings.TrimRight(norm, "/")
+	if norm == "" || strings.HasPrefix(norm, "/") {
+		return "", false
+	}
+	clean := path.Clean(norm)
+	if clean == "" || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", false
+	}
+	rel := filepath.FromSlash(clean)
+	if !filepath.IsLocal(rel) {
+		return "", false
+	}
+	return rel, true
+}
+
 func isArchiveFullyExtracted(file string, dir string, password string) bool {
 	members, err := ListArchiveMembers(file, password)
 	if err != nil || len(members) == 0 {
 		return false
 	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
 	for _, m := range members {
 		if m.IsDir {
 			continue
 		}
-		destPath := filepath.Join(dir, m.Path)
-		fi, err := os.Stat(destPath)
-		if err != nil || fi.IsDir() {
+		rel, ok := sanitizeArchiveRelPath(m.Path)
+		if !ok {
+			return false
+		}
+		fi, err := root.Lstat(rel)
+		if err != nil || fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
 			return false
 		}
 		if m.Size > 0 && fi.Size() != m.Size {
@@ -579,11 +605,11 @@ func resolveOutputs(members []string, dir string) []string {
 	seen := make(map[string]bool)
 	var out []string
 	for _, m := range members {
-		p := strings.TrimSuffix(m, "/")
-		if p == "" || strings.Contains(p, "..") || filepath.IsAbs(p) {
+		rel, ok := sanitizeArchiveRelPath(m)
+		if !ok {
 			continue
 		}
-		full := filepath.Join(dir, p)
+		full := filepath.Join(dir, rel)
 		if seen[full] {
 			continue
 		}
@@ -667,7 +693,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	}
 	preExisting := make(map[string]bool, len(outputs))
 	for _, o := range outputs {
-		if _, err := os.Stat(o); err == nil {
+		if _, err := os.Lstat(o); err == nil {
 			preExisting[o] = true
 		}
 	}
@@ -1032,21 +1058,26 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".lrz"):
-		outputPath := filepath.Join(dir, strings.TrimSuffix(filepath.Base(file), ".lrz"))
-		if !opts.Force && !opts.Resume {
-			if _, err := os.Stat(outputPath); err == nil {
-				return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", outputPath)
-			}
+		outName, err := validateOutputName(strings.TrimSuffix(filepath.Base(file), ".lrz"))
+		if err != nil {
+			return err
 		}
+		outputPath := filepath.Join(dir, outName)
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			return fmt.Errorf("Error abriendo directorio de salida: %w", err)
+		}
+		defer root.Close()
+
 		if opts.Progress == nil && hasTool("pv") {
+			outFile, err := openDecompressOutput(root, outName, outputPath, opts)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
 			pipeFlags := strings.Fields(info.PipeFlags)
 			decompCmd := exec.Command(info.Tool, pipeFlags...)
 			decompCmd.Args = append(decompCmd.Args, "--", file)
-			outFile, err := os.Create(outputPath)
-			if err != nil {
-				return fmt.Errorf("Error creando archivo de salida: %w", err)
-			}
-			defer outFile.Close()
 			pvArgs := []string{"-f", "-B", "256k"}
 			if size := EstimateUncompressedSize(file); size > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
@@ -1055,8 +1086,11 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 				return err
 			}
 			outFile.Close()
-			checkAndApplyIsoExtension(outputPath)
+			checkAndApplyIsoExtensionInRoot(root, outName, opts.Force || opts.Resume)
 			return nil
+		}
+		if err := ensureLrzOutputSafe(root, outName, outputPath, opts); err != nil {
+			return err
 		}
 		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-o", outputPath, "--", file}
 		cmd := exec.Command("lrzip", args...)
@@ -1065,27 +1099,33 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		if err := cmd.Run(); err != nil {
 			return err
 		}
-		checkAndApplyIsoExtension(outputPath)
+		checkAndApplyIsoExtensionInRoot(root, outName, opts.Force || opts.Resume)
 		return nil
 
 	default:
-		outputPath := filepath.Join(dir, stripCompressionExt(filepath.Base(file)))
-		if !opts.Force && !opts.Resume {
-			if _, err := os.Stat(outputPath); err == nil {
-				return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", outputPath)
-			}
+		outName, err := validateOutputName(stripCompressionExt(filepath.Base(file)))
+		if err != nil {
+			return err
 		}
+		outputPath := filepath.Join(dir, outName)
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			return fmt.Errorf("Error abriendo directorio de salida: %w", err)
+		}
+		defer root.Close()
+
+		outFile, err := openDecompressOutput(root, outName, outputPath, opts)
+		if err != nil {
+			return err
+		}
+		defer outFile.Close()
+
 		parts := findSplitParts(file)
 		if len(parts) == 1 && opts.Progress == nil && hasTool("pv") {
 			decompCmd, closer := pipeCmdFor(info, file, opts.ThreadLimit)
 			if closer != nil {
 				defer closer.Close()
 			}
-			outFile, err := os.Create(outputPath)
-			if err != nil {
-				return fmt.Errorf("Error creando archivo de salida: %w", err)
-			}
-			defer outFile.Close()
 			pvArgs := []string{"-f", "-B", "256k"}
 			if size := EstimateUncompressedSize(file); size > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
@@ -1095,7 +1135,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 				return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 			}
 			outFile.Close()
-			checkAndApplyIsoExtension(outputPath)
+			checkAndApplyIsoExtensionInRoot(root, outName, opts.Force || opts.Resume)
 			return nil
 		}
 		decompCmd, closer, err := pipeCmdForParts(info, parts, opts.Progress, fp, opts.ThreadLimit)
@@ -1105,27 +1145,63 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		if closer != nil {
 			defer closer.Close()
 		}
-		outFile, err := os.Create(outputPath)
-		if err != nil {
-			return fmt.Errorf("Error creando archivo de salida: %w", err)
-		}
-		defer outFile.Close()
 		decompCmd.Stdout = outFile
 		decompCmd.Stderr = stderrFor(opts.Progress)
 		if err := decompCmd.Run(); err != nil {
 			return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 		}
 		outFile.Close()
-		checkAndApplyIsoExtension(outputPath)
+		checkAndApplyIsoExtensionInRoot(root, outName, opts.Force || opts.Resume)
 		return nil
 	}
 }
 
-func checkAndApplyIsoExtension(outputPath string) {
-	if filepath.Ext(outputPath) != "" {
+func validateOutputName(name string) (string, error) {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) || !filepath.IsLocal(name) {
+		return "", fmt.Errorf("nombre de archivo de salida inválido: %q", name)
+	}
+	return name, nil
+}
+
+func ensureLrzOutputSafe(root *os.Root, outName, displayPath string, opts DecompressOptions) error {
+	fi, err := root.Lstat(outName)
+	if err != nil {
+		return nil
+	}
+	if !opts.Force && !opts.Resume {
+		return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", displayPath)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("rechazando escritura sobre symlink existente: %s", displayPath)
+	}
+	return nil
+}
+
+func openDecompressOutput(root *os.Root, outName, displayPath string, opts DecompressOptions) (*os.File, error) {
+	flags := os.O_CREATE | os.O_WRONLY
+	if !opts.Force && !opts.Resume {
+		if _, err := root.Lstat(outName); err == nil {
+			return nil, fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", displayPath)
+		}
+		flags |= os.O_EXCL
+	} else {
+		flags |= os.O_TRUNC
+	}
+	outFile, err := root.OpenFile(outName, flags, 0644)
+	if err != nil {
+		if os.IsExist(err) && !opts.Force && !opts.Resume {
+			return nil, fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", displayPath)
+		}
+		return nil, fmt.Errorf("Error creando archivo de salida: %w", err)
+	}
+	return outFile, nil
+}
+
+func checkAndApplyIsoExtensionInRoot(root *os.Root, outName string, allowOverwrite bool) {
+	if filepath.Ext(outName) != "" {
 		return
 	}
-	f, err := os.Open(outputPath)
+	f, err := root.Open(outName)
 	if err != nil {
 		return
 	}
@@ -1133,7 +1209,13 @@ func checkAndApplyIsoExtension(outputPath string) {
 	n, err := f.ReadAt(buf, 32769)
 	f.Close()
 	if (err == nil || errors.Is(err, io.EOF)) && n == 5 && string(buf) == "CD001" {
-		_ = os.Rename(outputPath, outputPath+".iso")
+		isoName := outName + ".iso"
+		if fi, statErr := root.Lstat(isoName); statErr == nil {
+			if !allowOverwrite || fi.Mode()&os.ModeSymlink != 0 {
+				return
+			}
+		}
+		_ = root.Rename(outName, isoName)
 	}
 }
 

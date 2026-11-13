@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"crypto/rand"
@@ -2502,6 +2503,228 @@ func TestDoDecompress_ZeroAvailDiskSpaceFails(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("expected failed df to degrade gracefully instead of blocking extraction, got: %v", err)
+		}
+	})
+}
+
+func TestResolveOutputs_AllowsDoubleDotsAndBlocksTraversal(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "extract")
+	members := []string{
+		"foo..bar.txt",
+		"sub..dir/nested..1.tar",
+		"./clean.txt",
+		"../escape.txt",
+		"sub/../../etc/passwd",
+		"/etc/shadow",
+		`..\..\win_escape.txt`,
+		"",
+		".",
+	}
+
+	got := resolveOutputs(members, dir)
+	gotSet := make(map[string]bool, len(got))
+	for _, p := range got {
+		gotSet[p] = true
+	}
+
+	wantIncluded := []string{
+		filepath.Join(dir, "foo..bar.txt"),
+		filepath.Join(dir, "sub..dir", "nested..1.tar"),
+		filepath.Join(dir, "clean.txt"),
+	}
+	for _, w := range wantIncluded {
+		if !gotSet[w] {
+			t.Errorf("resolveOutputs omitted valid path %q; got=%v", w, got)
+		}
+	}
+
+	if len(got) != len(wantIncluded) {
+		t.Errorf("resolveOutputs allowed unsafe paths: got=%v, want=%v", got, wantIncluded)
+	}
+}
+
+func TestDecompressSingle_DanglingSymlinkRejectedAndConfinedByOpenRoot(t *testing.T) {
+	makeGzWithBytes := func(t *testing.T, path string, payload []byte) {
+		t.Helper()
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gw := gzip.NewWriter(f)
+		if _, err := gw.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := gw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("RejectsDanglingSymlinkNoForce", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outDir := filepath.Join(tmpDir, "out")
+		outsideDir := filepath.Join(tmpDir, "outside")
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(outsideDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		outsideTarget := filepath.Join(outsideDir, "created_via_symlink.txt")
+		if err := os.Symlink(outsideTarget, filepath.Join(outDir, "data.txt")); err != nil {
+			t.Fatal(err)
+		}
+
+		gzPath := filepath.Join(tmpDir, "data.txt.gz")
+		makeGzWithBytes(t, gzPath, []byte("evil payload"))
+
+		err := DoDecompress([]string{gzPath}, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+			Force:     false,
+		})
+		if err == nil {
+			t.Fatalf("expected DoDecompress to reject pre-existing dangling symlink without Force")
+		}
+		if _, statErr := os.Lstat(outsideTarget); statErr == nil {
+			t.Fatalf("dangling symlink target %q was created outside extraction root!", outsideTarget)
+		}
+	})
+
+	t.Run("RejectsSymlinkEvenWithForce", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outDir := filepath.Join(tmpDir, "out")
+		outsideDir := filepath.Join(tmpDir, "outside")
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(outsideDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		outsideTarget := filepath.Join(outsideDir, "victim.txt")
+		if err := os.WriteFile(outsideTarget, []byte("DO NOT OVERWRITE"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideTarget, filepath.Join(outDir, "data.txt")); err != nil {
+			t.Fatal(err)
+		}
+
+		gzPath := filepath.Join(tmpDir, "data.txt.gz")
+		makeGzWithBytes(t, gzPath, []byte("overwritten"))
+
+		err := DoDecompress([]string{gzPath}, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+			Force:     true,
+		})
+		if err == nil {
+			t.Fatalf("expected os.OpenRoot to refuse writing through symlink even with Force=true")
+		}
+		got, readErr := os.ReadFile(outsideTarget)
+		if readErr != nil || string(got) != "DO NOT OVERWRITE" {
+			t.Fatalf("outside target modified via symlink: err=%v content=%q", readErr, string(got))
+		}
+	})
+
+	t.Run("IsoRenameNoForceDoesNotOverwriteExistingIso", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outDir := filepath.Join(tmpDir, "out")
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		existingIso := filepath.Join(outDir, "game.iso")
+		if err := os.WriteFile(existingIso, []byte("KEEP EXISTING ISO"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		isoPayload := make([]byte, 34000)
+		copy(isoPayload[32769:], "CD001")
+		gzPath := filepath.Join(tmpDir, "game.gz")
+		makeGzWithBytes(t, gzPath, isoPayload)
+
+		err := DoDecompress([]string{gzPath}, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+			Force:     false,
+		})
+		if err != nil {
+			t.Fatalf("DoDecompress failed unexpectedly: %v", err)
+		}
+		got, readErr := os.ReadFile(existingIso)
+		if readErr != nil || string(got) != "KEEP EXISTING ISO" {
+			t.Fatalf("existing game.iso overwritten without --force: err=%v content=%q", readErr, string(got[:min(len(got), 30)]))
+		}
+	})
+}
+
+func TestIsArchiveFullyExtracted_BlocksTraversalAndSymlinkEscape(t *testing.T) {
+	makeZipWithMember := func(t *testing.T, zipPath, memberName string, content []byte) {
+		t.Helper()
+		f, err := os.Create(zipPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(f)
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: memberName, Method: zip.Deflate})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(content); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("RejectsTraversalOutsideDir", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outDir := filepath.Join(tmpDir, "a", "b")
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		payload := []byte("outside content")
+		outsideFile := filepath.Join(tmpDir, "outside_resume.txt")
+		if err := os.WriteFile(outsideFile, payload, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		zipPath := filepath.Join(tmpDir, "traversal.zip")
+		makeZipWithMember(t, zipPath, "../../outside_resume.txt", payload)
+
+		if isArchiveFullyExtracted(zipPath, outDir, "") {
+			t.Fatalf("isArchiveFullyExtracted escaped extraction dir via ../../outside_resume.txt")
+		}
+	})
+
+	t.Run("RejectsSymlinkTargetInsideDir", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outDir := filepath.Join(tmpDir, "out")
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		payload := []byte("target bytes")
+		outsideFile := filepath.Join(tmpDir, "outside.txt")
+		if err := os.WriteFile(outsideFile, payload, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideFile, filepath.Join(outDir, "legit.txt")); err != nil {
+			t.Fatal(err)
+		}
+
+		zipPath := filepath.Join(tmpDir, "sym.zip")
+		makeZipWithMember(t, zipPath, "legit.txt", payload)
+
+		if isArchiveFullyExtracted(zipPath, outDir, "") {
+			t.Fatalf("isArchiveFullyExtracted accepted symlink pointing outside dir as extracted file")
 		}
 	})
 }

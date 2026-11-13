@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"os"
@@ -258,5 +259,106 @@ func TestDecompressBatchDiskSpaceCheck(t *testing.T) {
 	if !strings.Contains(err.Error(), "Espacio insuficiente para descomprimir") {
 		t.Errorf("error inesperado: %v", err)
 	}
+}
+
+func TestIoPipeDeadlocks_ConsumerFailure(t *testing.T) {
+	runWithTimeout := func(t *testing.T, name string, fn func() error) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() {
+			done <- fn()
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Errorf("%s: expected error when compressor fails, got nil", name)
+			}
+		case <-time.After(1 * time.Second):
+			t.Errorf("%s: DEADLOCK timed out after 1s when compressor failed early", name)
+		}
+	}
+
+	trackCmd := func(t *testing.T, cmd *exec.Cmd) *exec.Cmd {
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		})
+		return cmd
+	}
+
+	t.Run("compressTarPipe_Progress", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "data.txt")
+		_ = os.WriteFile(src, []byte("payload"), 0644)
+		out := filepath.Join(tmpDir, "out.tar.xz")
+
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "tar" {
+				return trackCmd(t, mockExecCommand("mock-producer"))
+			}
+			return trackCmd(t, mockExecCommand("mock-fail-compressor"))
+		}
+
+		pt := NewProgressTracker(100, 1)
+		fp := &FileProgress{Name: "data.txt", Size: 100}
+		runWithTimeout(t, "compressTarPipe", func() error {
+			return compressTarPipe([]string{src}, out, CompressOptions{
+				Format:      Xz,
+				ThreadLimit: 1,
+				Progress:    pt,
+			}, fp)
+		})
+	})
+
+	t.Run("convertStreamPipe", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "in.gz")
+		_ = os.WriteFile(src, []byte("dummy"), 0644)
+		out := filepath.Join(tmpDir, "out.xz")
+
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "pigz" || name == "gzip" {
+				return trackCmd(t, mockExecCommand("mock-producer"))
+			}
+			return trackCmd(t, mockExecCommand("mock-fail-compressor"))
+		}
+
+		runWithTimeout(t, "convertStreamPipe", func() error {
+			return convertStreamPipe(src, out, FormatInfo{Format: Gz}, Xz, ConvertOptions{ThreadLimit: 1})
+		})
+	})
+
+	t.Run("convertViaTempDir", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		tmpDir := t.TempDir()
+		srcZip := filepath.Join(tmpDir, "in.zip")
+		zf, _ := os.Create(srcZip)
+		zw := zip.NewWriter(zf)
+		w, _ := zw.Create("inside.txt")
+		_, _ = w.Write([]byte("zip body"))
+		_ = zw.Close()
+		_ = zf.Close()
+
+		outXz := filepath.Join(tmpDir, "in.tar.xz")
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "tar" {
+				return trackCmd(t, mockExecCommand("mock-producer"))
+			}
+			if name == "xz" {
+				return trackCmd(t, mockExecCommand("mock-fail-compressor"))
+			}
+			return exec.Command(name, args...)
+		}
+
+		runWithTimeout(t, "convertViaTempDir", func() error {
+			return convertViaTempDir(srcZip, outXz, FormatInfo{Format: Zip}, Xz, ConvertOptions{ThreadLimit: 1})
+		})
+	})
 }
 

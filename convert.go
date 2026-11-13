@@ -184,10 +184,7 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		return fmt.Errorf("iniciando compresión en pipe: %w", err)
 	}
 
-	decompErr := decompCmd.Wait()
-	_ = pw.CloseWithError(decompErr)
-
-	compErr := compCmd.Wait()
+	decompErr, compErr := waitPipePair(decompCmd, compCmd, pr, pw)
 	_ = outFile.Close()
 
 	if decompErr != nil {
@@ -263,9 +260,7 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 			return err
 		}
 
-		tarErr := tarCmd.Wait()
-		_ = pw.CloseWithError(tarErr)
-		compErr := compCmd.Wait()
+		tarErr, compErr := waitPipePair(tarCmd, compCmd, pr, pw)
 		_ = outFile.Close()
 
 		if tarErr != nil {

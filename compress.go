@@ -1558,16 +1558,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 			return fmt.Errorf("Error iniciando compresor: %w", err)
 		}
 
-		var tarErr error
-		tarDone := make(chan struct{})
-		go func() {
-			tarErr = augmentErr(tarCmd, tarCmd.Wait())
-			_ = pw.CloseWithError(tarErr)
-			close(tarDone)
-		}()
-
-		compErr := augmentErr(compressCmd, compressCmd.Wait())
-		<-tarDone
+		tarErr, compErr := waitPipePair(tarCmd, compressCmd, pr, pw)
 
 		if compErr != nil {
 			return fmt.Errorf("Error en compresión: %w", compErr)

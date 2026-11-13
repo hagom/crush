@@ -1743,6 +1743,27 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	return firstErr
 }
 
+func waitPipePair(prod, cons *exec.Cmd, pr *io.PipeReader, pw *io.PipeWriter) (prodErr, consErr error) {
+	done := make(chan struct{})
+	go func() {
+		prodErr = augmentErr(prod, prod.Wait())
+		_ = pw.CloseWithError(prodErr)
+		close(done)
+	}()
+
+	consErr = augmentErr(cons, cons.Wait())
+	_ = pr.CloseWithError(consErr)
+	select {
+	case <-done:
+	default:
+		if consErr != nil && prod.Process != nil {
+			_ = prod.Process.Kill()
+		}
+		<-done
+	}
+	return prodErr, consErr
+}
+
 func ComputeSHA256(filePath string) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {

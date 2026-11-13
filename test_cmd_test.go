@@ -218,3 +218,41 @@ func TestDoTestVerifyNoShaFile(t *testing.T) {
 		t.Fatalf("DoTest sin .sha256 debe verificar integridad sin error: %v", err)
 	}
 }
+
+func TestTestFile_TarDashAndUsesExecCommand(t *testing.T) {
+	origExec := execCommand
+	origLook := lookPath
+	defer func() {
+		execCommand = origExec
+		lookPath = origLook
+	}()
+
+	lookPath = func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	}
+
+	var tarArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "tar" {
+			tarArgs = append([]string(nil), args...)
+		}
+		return mockExecCommand("mock-noop")
+	}
+
+	status, err := TestFile("-dash.tar", TestOptions{})
+	if err != nil || status != "OK" {
+		t.Fatalf("TestFile(-dash.tar) returned status=%q err=%v", status, err)
+	}
+	hasDashDash, hasSafe := false, false
+	for _, a := range tarArgs {
+		if a == "--" {
+			hasDashDash = true
+		}
+		if a == "./-dash.tar" {
+			hasSafe = true
+		}
+	}
+	if !hasDashDash || !hasSafe {
+		t.Errorf("TestFile(-dash.tar) expected -- and ./-dash.tar via execCommand, got: %v", tarArgs)
+	}
+}

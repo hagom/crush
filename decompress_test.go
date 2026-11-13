@@ -2729,6 +2729,219 @@ func TestIsArchiveFullyExtracted_BlocksTraversalAndSymlinkEscape(t *testing.T) {
 	})
 }
 
+func TestExternalExtractors_HardenedArgsAndKeepOldFiles(t *testing.T) {
+	containsSlice := func(args []string, want string) bool {
+		for _, a := range args {
+			if a == want {
+				return true
+			}
+		}
+		return false
+	}
+	indexOfSlice := func(args []string, want string) int {
+		for i, a := range args {
+			if a == want {
+				return i
+			}
+		}
+		return -1
+	}
+
+	t.Run("TarPipeUsesKeepOldFilesWithoutForceAndProtectsFilter", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tarGz := filepath.Join(tmpDir, "sample.tar.gz")
+		_ = os.WriteFile(tarGz, []byte("stub"), 0644)
+		outDir := filepath.Join(tmpDir, "out")
+		_ = os.MkdirAll(outDir, 0755)
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		var tarArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "tar" {
+				tarArgs = append([]string(nil), args...)
+				return mockExecCommand("mock-noop")
+			}
+			if name == "df" {
+				return exec.Command(name, args...)
+			}
+			return mockExecCommand("mock-noop")
+		}
+
+		info := FormatInfo{Format: Gz, IsTar: true, Tool: "gzip", PipeFlags: "-dc"}
+		if err := decompressTar(tarGz, outDir, info, DecompressOptions{Force: false, Filter: "--checkpoint=1", Progress: &ProgressTracker{}}, nil); err != nil {
+			t.Fatalf("decompressTar mock failed: %v", err)
+		}
+		if !containsSlice(tarArgs, "--keep-old-files") {
+			t.Errorf("expected --keep-old-files when !Force && !Resume, got tar args: %v", tarArgs)
+		}
+		dashIdx := indexOfSlice(tarArgs, "--")
+		fltIdx := indexOfSlice(tarArgs, "--checkpoint=1")
+		if dashIdx < 0 || fltIdx < 0 || dashIdx >= fltIdx {
+			t.Errorf("expected -- before filter arg, got tar args: %v", tarArgs)
+		}
+
+		tarArgs = nil
+		_ = decompressTar(tarGz, outDir, info, DecompressOptions{Force: true, Progress: &ProgressTracker{}}, nil)
+		if containsSlice(tarArgs, "--keep-old-files") {
+			t.Errorf("unexpected --keep-old-files with Force=true: %v", tarArgs)
+		}
+
+		tarArgs = nil
+		_ = decompressTar(tarGz, outDir, info, DecompressOptions{Resume: true, Progress: &ProgressTracker{}}, nil)
+		if containsSlice(tarArgs, "--keep-old-files") {
+			t.Errorf("unexpected --keep-old-files with Resume=true: %v", tarArgs)
+		}
+	})
+
+	t.Run("TarRejectsOverwriteExistingFileWithoutForce", func(t *testing.T) {
+		if _, err := exec.LookPath("tar"); err != nil {
+			t.Skip("tar no disponible")
+		}
+		tmpDir := t.TempDir()
+		srcDir := filepath.Join(tmpDir, "src")
+		outDir := filepath.Join(tmpDir, "out")
+		_ = os.MkdirAll(srcDir, 0755)
+		_ = os.MkdirAll(outDir, 0755)
+		_ = os.WriteFile(filepath.Join(srcDir, "hello.txt"), []byte("new-from-tar"), 0644)
+
+		tarGz := filepath.Join(tmpDir, "hello.tar.gz")
+		if err := exec.Command("tar", "-czf", tarGz, "-C", srcDir, "hello.txt").Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		existing := filepath.Join(outDir, "hello.txt")
+		_ = os.WriteFile(existing, []byte("keep-original"), 0644)
+
+		err := DoDecompress([]string{tarGz}, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+			Force:     false,
+		})
+		if err == nil {
+			t.Fatalf("expected DoDecompress on tar.gz without Force to fail instead of overwriting existing file")
+		}
+		got, _ := os.ReadFile(existing)
+		if string(got) != "keep-original" {
+			t.Fatalf("existing file overwritten without Force: got %q", string(got))
+		}
+	})
+
+	t.Run("TarRejectsOverwriteSymlinkWithoutForce", func(t *testing.T) {
+		if _, err := exec.LookPath("tar"); err != nil {
+			t.Skip("tar no disponible")
+		}
+		tmpDir := t.TempDir()
+		srcDir := filepath.Join(tmpDir, "src")
+		outDir := filepath.Join(tmpDir, "out")
+		_ = os.MkdirAll(srcDir, 0755)
+		_ = os.MkdirAll(outDir, 0755)
+		_ = os.WriteFile(filepath.Join(srcDir, "hello.txt"), []byte("from-tar"), 0644)
+
+		tarGz := filepath.Join(tmpDir, "sym.tar.gz")
+		if err := exec.Command("tar", "-czf", tarGz, "-C", srcDir, "hello.txt").Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		outside := filepath.Join(tmpDir, "outside.txt")
+		_ = os.WriteFile(outside, []byte("outside-intact"), 0644)
+		linkPath := filepath.Join(outDir, "hello.txt")
+		if err := os.Symlink(outside, linkPath); err != nil {
+			t.Fatal(err)
+		}
+
+		err := DoDecompress([]string{tarGz}, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+			Force:     false,
+		})
+		if err == nil {
+			t.Fatalf("expected DoDecompress on tar.gz without Force to fail on pre-existing symlink")
+		}
+		if fi, lerr := os.Lstat(linkPath); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("pre-existing symlink at %q was replaced or removed without Force (lerr=%v)", linkPath, lerr)
+		}
+		got, _ := os.ReadFile(outside)
+		if string(got) != "outside-intact" {
+			t.Fatalf("outside target altered: %q", string(got))
+		}
+	})
+
+	t.Run("ContainersUseDashDashAndExecCommand", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		origExec := execCommand
+		origLook := lookPath
+		defer func() {
+			execCommand = origExec
+			lookPath = origLook
+		}()
+
+		var capturedTool string
+		var capturedArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			capturedTool = name
+			capturedArgs = append([]string(nil), args...)
+			return mockExecCommand("mock-noop")
+		}
+
+		// Force unzip branch for .zip (no 7z tool)
+		lookPath = func(name string) (string, error) {
+			if name == "unzip" {
+				return "/usr/bin/unzip", nil
+			}
+			return "", exec.ErrNotFound
+		}
+		zipFile := "-dash.zip"
+		_ = decompressSingle(zipFile, tmpDir, FormatInfo{Format: Zip, Tool: "unzip"}, DecompressOptions{Filter: "-evil.txt"}, nil)
+		if capturedTool != "unzip" {
+			t.Fatalf("expected unzip via execCommand, got %q", capturedTool)
+		}
+		if idxDash, idxFile := indexOfSlice(capturedArgs, "--"), indexOfSlice(capturedArgs, "./-dash.zip"); idxDash < 0 || idxFile < 0 || idxDash >= idxFile {
+			t.Errorf("unzip args missing -- before ./-dash.zip: %v", capturedArgs)
+		}
+
+		// 7z branch
+		capturedTool = ""
+		capturedArgs = nil
+		lookPath = func(name string) (string, error) {
+			return "/usr/bin/" + name, nil
+		}
+		szFile := "-dash.7z"
+		_ = decompressSingle(szFile, tmpDir, FormatInfo{Format: SevenZ, Tool: "7z"}, DecompressOptions{Filter: "-evil.txt"}, nil)
+		if capturedTool != "7z" {
+			t.Fatalf("expected 7z via execCommand, got %q", capturedTool)
+		}
+		if idxDash, idxFile := indexOfSlice(capturedArgs, "--"), indexOfSlice(capturedArgs, "./-dash.7z"); idxDash < 0 || idxFile < 0 || idxDash >= idxFile {
+			t.Errorf("7z args missing -- before ./-dash.7z: %v", capturedArgs)
+		}
+
+		// rar branch
+		capturedTool = ""
+		capturedArgs = nil
+		rarFile := "-dash.rar"
+		_ = decompressSingle(rarFile, tmpDir, FormatInfo{Format: Rar, Tool: "rar"}, DecompressOptions{Filter: "-evil.txt"}, nil)
+		if capturedTool != "rar" {
+			t.Fatalf("expected rar via execCommand, got %q", capturedTool)
+		}
+		if idxDash, idxFile := indexOfSlice(capturedArgs, "--"), indexOfSlice(capturedArgs, "./-dash.rar"); idxDash < 0 || idxFile < 0 || idxDash >= idxFile {
+			t.Errorf("rar args missing -- before ./-dash.rar: %v", capturedArgs)
+		}
+
+		// listTarMembers + listRarMembers
+		capturedArgs = nil
+		listTarMembers("-dash.tar")
+		if !containsSlice(capturedArgs, "--") || !containsSlice(capturedArgs, "./-dash.tar") {
+			t.Errorf("listTarMembers missing -- / safeFlagArg via execCommand: %v", capturedArgs)
+		}
+
+		capturedArgs = nil
+		listRarMembers("-dash.rar", "")
+		if !containsSlice(capturedArgs, "--") || !containsSlice(capturedArgs, "./-dash.rar") {
+			t.Errorf("listRarMembers missing -- / safeFlagArg via execCommand: %v", capturedArgs)
+		}
+	})
+}
+
 
 
 

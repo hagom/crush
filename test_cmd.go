@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -169,7 +168,7 @@ func testArchiveIntegrity(file string, opts TestOptions) (string, error) {
 		return testWith(file, "brotli", "-t", "--", file)
 
 	case strings.HasSuffix(ext, ".tar"):
-		return testWith(file, "tar", "-tf", file)
+		return testWith(file, "tar", "-tf", safeFlagArg(file), "--")
 
 	case strings.HasSuffix(ext, ".gz"):
 		if hasTool("pigz") {
@@ -238,7 +237,7 @@ func testWith(file, tool string, args ...string) (string, error) {
 	if !hasTool(tool) {
 		return "WARNING", nil
 	}
-	cmd := exec.Command(tool, args...)
+	cmd := execCommand(tool, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// Return combined output for diagnostics

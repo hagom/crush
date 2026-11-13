@@ -35,7 +35,7 @@ func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
 		return fmt.Errorf("formato no soportado para pipe")
 	}
 	pipeFlags := strings.Fields(info.PipeFlags)
-	decompCmd := exec.Command(info.Tool, pipeFlags...)
+	decompCmd := execCommand(info.Tool, pipeFlags...)
 	decompCmd.Stdin = r
 	decompCmd.Stdout = w
 	decompCmd.Stderr = os.Stderr
@@ -559,8 +559,8 @@ func listTarMembers(file string) ([]string, bool) {
 	case strings.HasSuffix(lower, ".tar.lz4"):
 		args = []string{"-I", "lz4 -dc", "-tf"}
 	}
-	args = append(args, file)
-	cmd := exec.Command("tar", args...)
+	args = append(args, safeFlagArg(file), "--")
+	cmd := execCommand("tar", args...)
 	var out strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
@@ -585,8 +585,8 @@ func listRarMembers(file string, password string) ([]string, bool) {
 	} else {
 		args = append(args, "-p-")
 	}
-	args = append(args, file)
-	cmd := exec.Command(tool, args...)
+	args = append(args, "--", safeFlagArg(file))
+	cmd := execCommand(tool, args...)
 	cmd.Stdin = getNullFile()
 	var out strings.Builder
 	cmd.Stdout = &out
@@ -795,6 +795,42 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 	return nil
 }
 
+func buildTarExtractArgs(tarFile, dir string, opts DecompressOptions) []string {
+	var args []string
+	if tarFile == "-" {
+		args = []string{"-xf", "-"}
+	} else {
+		args = []string{"-x", "-f", safeFlagArg(tarFile)}
+	}
+	args = append(args, "-C", safeFlagArg(dir))
+	if !opts.Force && !opts.Resume {
+		args = append(args, "--keep-old-files")
+	}
+	if opts.Filter != "" {
+		args = append(args, "--wildcards", "--", opts.Filter)
+	} else {
+		args = append(args, "--")
+	}
+	return args
+}
+
+func build7zExtractArgs(file, dir string, opts DecompressOptions, baseFlags ...string) []string {
+	args := append([]string(nil), baseFlags...)
+	if opts.Password != "" {
+		args = append(args, "-p"+opts.Password)
+	}
+	if opts.Force || opts.Resume {
+		args = append(args, "-aoa")
+	} else {
+		args = append(args, "-aos")
+	}
+	args = append(args, fmt.Sprintf("-o%s", dir), "--", safeFlagArg(file))
+	if opts.Filter != "" {
+		args = append(args, opts.Filter)
+	}
+	return args
+}
+
 func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
 	if info.Tool == "" {
 		return fmt.Errorf("No se detectó herramienta para: %s", file)
@@ -803,71 +839,27 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 	WriteLogf("  → %s/\n", dir)
 
 	parts := findSplitParts(file)
+	tarExtract := execCommand("tar", buildTarExtractArgs("-", dir, opts)...)
 
 	if len(parts) == 1 && opts.Progress == nil && hasTool("pv") {
-		tarArgs := []string{"-xf", "-", "-C", dir}
-		if opts.Filter != "" {
-			tarArgs = append(tarArgs, "--wildcards", opts.Filter)
+		if strings.HasSuffix(strings.ToLower(file), ".tar") {
+			return execCommand("tar", buildTarExtractArgs(file, dir, opts)...).Run()
 		}
-		tarExtract := exec.Command("tar", tarArgs...)
-		// Build decompressor pipe: decompress -> pv -> tar -xf -
-		var decompCmd *exec.Cmd
-		ext := strings.ToLower(file)
-		switch {
-		case strings.HasSuffix(ext, ".tar.gz") || strings.HasSuffix(ext, ".tgz"):
-			if hasTool("pigz") {
-				decompCmd = exec.Command("pigz", "-dc", "-p", threadStr(opts.ThreadLimit), "--", file)
-			} else {
-				decompCmd = exec.Command("gzip", "-dc", "--", file)
-			}
-		case strings.HasSuffix(ext, ".tar.xz") || strings.HasSuffix(ext, ".txz"):
-			decompCmd = exec.Command("xz", "-dc", "-T"+threadStr(opts.ThreadLimit), "--", file)
-		case strings.HasSuffix(ext, ".tar.bz2") || strings.HasSuffix(ext, ".tbz2"):
-			decompCmd = exec.Command(bzip2Bin(), "-dc", "--", file)
-		case strings.HasSuffix(ext, ".tar.bz3"):
-			decompCmd = exec.Command("bzip3", "-dc", "-j", threadStr(opts.ThreadLimit), "--", file)
-		case strings.HasSuffix(ext, ".tar.zst") || strings.HasSuffix(ext, ".tzst"):
-			decompCmd = exec.Command("zstd", "-dc", "-T"+threadStr(opts.ThreadLimit), "--", file)
-		case strings.HasSuffix(ext, ".tar.lz") || strings.HasSuffix(ext, ".tlz"):
-			if hasTool("plzip") {
-				decompCmd = exec.Command("plzip", "-dc", "--threads="+threadStr(opts.ThreadLimit), "--", file)
-			} else {
-				decompCmd = exec.Command("lzip", "-dc", "--", file)
-			}
-		case strings.HasSuffix(ext, ".tar.lrz"):
-			decompCmd = exec.Command("lrzip", "-d", "-p", threadStr(opts.ThreadLimit), "-o", "-", "--", file)
-		case strings.HasSuffix(ext, ".tar.lz4"):
-			lz4Args := []string{"-dc"}
-			if lz4SupportsThreads() && opts.ThreadLimit > 0 {
-				lz4Args = append(lz4Args, "-T"+threadStr(opts.ThreadLimit))
-			}
-			lz4Args = append(lz4Args, "--", file)
-			decompCmd = exec.Command("lz4", lz4Args...)
-		case strings.HasSuffix(ext, ".tar.br"):
-			decompCmd = exec.Command("brotli", "-dc", "--", file)
-		case strings.HasSuffix(ext, ".tar"):
-			tarArgs := []string{"-xf", file, "-C", dir}
-			if opts.Filter != "" {
-				tarArgs = append(tarArgs, "--wildcards", opts.Filter)
-			}
-			return exec.Command("tar", tarArgs...).Run()
+		decompCmd, closer := pipeCmdFor(info, file, opts.ThreadLimit)
+		if closer != nil {
+			defer closer.Close()
 		}
 
 		pvArgs := []string{"-f", "-B", "256k"}
 		if size := EstimateUncompressedSize(file); size > 0 {
 			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
 		}
-		pvCmd := exec.Command("pv", pvArgs...)
+		pvCmd := execCommand("pv", pvArgs...)
 
 		if err := pipeline(os.Stdout, os.Stderr, decompCmd, pvCmd, tarExtract); err != nil {
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 	} else {
-		tarArgs := []string{"-xf", "-", "-C", dir}
-		if opts.Filter != "" {
-			tarArgs = append(tarArgs, "--wildcards", opts.Filter)
-		}
-		tarExtract := exec.Command("tar", tarArgs...)
 		decompCmd, closer, err := pipeCmdForParts(info, parts, opts.Progress, fp, opts.ThreadLimit)
 		if err != nil {
 			return fmt.Errorf("Error preparando descompresión de %s: %w", file, err)
@@ -893,7 +885,7 @@ func pipeCmdFor(info FormatInfo, file string, threads ...int) (*exec.Cmd, io.Clo
 		th = threads[0]
 	}
 	flags := PipeFlagsForThreads(info, th)
-	cmd := exec.Command(info.Tool, flags...)
+	cmd := execCommand(info.Tool, flags...)
 	if info.Tool == "lz4" {
 		in, err := os.Open(file)
 		if err != nil {
@@ -926,7 +918,7 @@ func pipeCmdForParts(info FormatInfo, parts []string, pt *ProgressTracker, fp *F
 		th = threads[0]
 	}
 	flags := PipeFlagsForThreads(info, th)
-	cmd := exec.Command(info.Tool, flags...)
+	cmd := execCommand(info.Tool, flags...)
 	if len(parts) == 1 && info.Tool == "lrzip" {
 		cmd.Args = append(cmd.Args, "--", parts[0])
 		return cmd, nil, nil
@@ -964,20 +956,8 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 	case strings.HasSuffix(ext, ".zip"):
 		sevenz := sevenzBin()
 		if hasTool(sevenz) {
-			args := []string{"x", "-tzip", "-bsp1", "-mmt=" + threadStr(opts.ThreadLimit)}
-			if opts.Password != "" {
-				args = append(args, "-p"+opts.Password)
-			}
-			if opts.Force || opts.Resume {
-				args = append(args, "-aoa")
-			} else {
-				args = append(args, "-aos")
-			}
-			args = append(args, file, fmt.Sprintf("-o%s", dir))
-			if opts.Filter != "" {
-				args = append(args, opts.Filter)
-			}
-			cmd := exec.Command(sevenz, args...)
+			args := build7zExtractArgs(file, dir, opts, "x", "-tzip", "-bsp1", "-mmt="+threadStr(opts.ThreadLimit))
+			cmd := execCommand(sevenz, args...)
 			if fi, err := os.Stat(file); err == nil {
 				return runWithProgress(cmd, opts.Progress, fi.Size(), fp)
 			}
@@ -993,31 +973,18 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		} else {
 			args = append(args, "-n")
 		}
-		dirFlag := "-d"
-		args = append(args, file, dirFlag, dir)
+		args = append(args, "-d", safeFlagArg(dir), "--", safeFlagArg(file))
 		if opts.Filter != "" {
 			args = append(args, opts.Filter)
 		}
-		cmd := exec.Command("unzip", args...)
+		cmd := execCommand("unzip", args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".7z"):
-		args := []string{"x", "-bsp1", "-y", "-mmt=" + threadStr(opts.ThreadLimit)}
-		if opts.Password != "" {
-			args = append(args, "-p"+opts.Password)
-		}
-		if opts.Force || opts.Resume {
-			args = append(args, "-aoa")
-		} else {
-			args = append(args, "-aos")
-		}
-		args = append(args, file, fmt.Sprintf("-o%s", dir))
-		if opts.Filter != "" {
-			args = append(args, opts.Filter)
-		}
-		cmd := exec.Command(info.Tool, args...)
+		args := build7zExtractArgs(file, dir, opts, "x", "-bsp1", "-y", "-mmt="+threadStr(opts.ThreadLimit))
+		cmd := execCommand(info.Tool, args...)
 		if fi, err := os.Stat(file); err == nil {
 			return runWithProgress(cmd, opts.Progress, fi.Size(), fp)
 		}
@@ -1036,11 +1003,12 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		} else {
 			args = append(args, "-o-")
 		}
-		args = append(args, file, fmt.Sprintf("%s/", dir))
+		args = append(args, "--", safeFlagArg(file))
 		if opts.Filter != "" {
 			args = append(args, opts.Filter)
 		}
-		cmd := exec.Command(info.Tool, args...)
+		args = append(args, fmt.Sprintf("%s/", safeFlagArg(dir)))
+		cmd := execCommand(info.Tool, args...)
 		if fi, err := os.Stat(file); err == nil {
 			return runWithProgress(cmd, opts.Progress, fi.Size(), fp)
 		}
@@ -1048,11 +1016,8 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		return cmd.Run()
 
 	case strings.HasSuffix(ext, ".tar"):
-		args := []string{"-xf", file, "-C", dir}
-		if opts.Filter != "" {
-			args = append(args, "--wildcards", opts.Filter)
-		}
-		cmd := exec.Command("tar", args...)
+		args := buildTarExtractArgs(file, dir, opts)
+		cmd := execCommand("tar", args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		return cmd.Run()
@@ -1076,13 +1041,13 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			}
 			defer outFile.Close()
 			pipeFlags := strings.Fields(info.PipeFlags)
-			decompCmd := exec.Command(info.Tool, pipeFlags...)
+			decompCmd := execCommand(info.Tool, pipeFlags...)
 			decompCmd.Args = append(decompCmd.Args, "--", file)
 			pvArgs := []string{"-f", "-B", "256k"}
 			if size := EstimateUncompressedSize(file); size > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
 			}
-			if err := pipeline(outFile, os.Stderr, decompCmd, exec.Command("pv", pvArgs...)); err != nil {
+			if err := pipeline(outFile, os.Stderr, decompCmd, execCommand("pv", pvArgs...)); err != nil {
 				return err
 			}
 			outFile.Close()
@@ -1093,7 +1058,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			return err
 		}
 		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-o", outputPath, "--", file}
-		cmd := exec.Command("lrzip", args...)
+		cmd := execCommand("lrzip", args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		if err := cmd.Run(); err != nil {
@@ -1130,7 +1095,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			if size := EstimateUncompressedSize(file); size > 0 {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", size))
 			}
-			pvCmd := exec.Command("pv", pvArgs...)
+			pvCmd := execCommand("pv", pvArgs...)
 			if err := pipeline(outFile, os.Stderr, decompCmd, pvCmd); err != nil {
 				return fmt.Errorf("Error descomprimiendo %s: %w", file, err)
 			}

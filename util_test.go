@@ -1870,6 +1870,73 @@ func TestParseCutoffTime_Table(t *testing.T) {
 	}
 }
 
+func TestSetupLogging_PrivatePathAndConcurrentCloseRace(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	t.Setenv("XDG_CACHE_HOME", stateDir)
+	t.Cleanup(CloseLog)
+
+	if err := SetupLogging(); err != nil {
+		t.Fatalf("SetupLogging failed: %v", err)
+	}
+
+	logMu.Lock()
+	lf := logFile
+	logMu.Unlock()
+	if lf == nil {
+		t.Fatal("SetupLogging left logFile nil")
+	}
+	logPath := lf.Name()
+	if strings.HasPrefix(logPath, "/tmp/crush/") {
+		t.Errorf("logFile must not be created inside shared /tmp/crush/: %s", logPath)
+	}
+	fi, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("log file permissions = %04o, want 0600", perm)
+	}
+	dirFi, err := os.Stat(filepath.Dir(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := dirFi.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("log dir permissions too permissive: %04o (want 0700)", perm)
+	}
+
+	loggingActive.Store(true)
+	defer func() {
+		loggingActive.Store(false)
+		logMu.Lock()
+		logBuf.Reset()
+		logMu.Unlock()
+	}()
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				WriteLogf("worker %d line %d\n", id, j)
+			}
+		}(i)
+	}
+	time.Sleep(time.Millisecond)
+	CloseLog()
+	wg.Wait()
+}
+
+func TestRunWithProgress_AttachesNullStdin(t *testing.T) {
+	cmd := exec.Command("true")
+	if err := runWithProgress(cmd, nil, 0, nil); err != nil {
+		t.Fatalf("runWithProgress failed: %v", err)
+	}
+	if cmd.Stdin != getNullFile() {
+		t.Errorf("expected cmd.Stdin to be set to getNullFile(), got %v", cmd.Stdin)
+	}
+}
+
 
 
 

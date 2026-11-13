@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -214,6 +215,28 @@ func formatSupportsPassword(f Format) bool {
 	return f == SevenZ || f == Zip || f == Rar
 }
 
+func probeStdoutPassword(cmd *exec.Cmd) (started, valid bool) {
+	cmd.Stdin = getNullFile()
+	cmd.Stderr = io.Discard
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return false, false
+	}
+	if err := cmd.Start(); err != nil {
+		return false, false
+	}
+	buf := make([]byte, 256)
+	n, _ := stdout.Read(buf)
+	if n > 0 {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		return true, true
+	}
+	return true, cmd.Wait() == nil
+}
+
 func checkArchivePassword(file string, format Format, pass string) bool {
 	if !formatSupportsPassword(format) {
 		return true
@@ -229,47 +252,16 @@ func checkArchivePassword(file string, format Format, pass string) bool {
 		if !hasTool(sevenz) {
 			return false
 		}
-		cmd := execCommand(sevenz, "e", "-so", passArg, "-y", file)
-		cmd.Stdin = getNullFile()
-		cmd.Stderr = io.Discard
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return false
-		}
-		if err := cmd.Start(); err != nil {
-			return false
-		}
-		buf := make([]byte, 256)
-		n, _ := stdout.Read(buf)
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		waitErr := cmd.Wait()
-		if n > 0 {
-			return true
-		}
-		return waitErr == nil
+		cmd := execCommand(sevenz, "e", "-so", passArg, "-y", "--", file)
+		_, valid := probeStdoutPassword(cmd)
+		return valid
 
 	case Zip:
 		sevenz := sevenzBin()
 		if hasTool(sevenz) {
-			cmd := execCommand(sevenz, "e", "-so", passArg, "-y", file)
-			cmd.Stdin = getNullFile()
-			cmd.Stderr = io.Discard
-			stdout, err := cmd.StdoutPipe()
-			if err == nil {
-				if err := cmd.Start(); err == nil {
-					buf := make([]byte, 256)
-					n, _ := stdout.Read(buf)
-					if cmd.Process != nil {
-						_ = cmd.Process.Kill()
-					}
-					waitErr := cmd.Wait()
-					if n > 0 {
-						return true
-					}
-					return waitErr == nil
-				}
+			cmd := execCommand(sevenz, "e", "-so", passArg, "-y", "--", file)
+			if started, valid := probeStdoutPassword(cmd); started {
+				return valid
 			}
 		}
 		args := []string{"-p"}
@@ -280,51 +272,17 @@ func checkArchivePassword(file string, format Format, pass string) bool {
 		}
 		args = append(args, file)
 		cmd := execCommand("unzip", args...)
-		cmd.Stdin = getNullFile()
-		cmd.Stderr = io.Discard
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return false
-		}
-		if err := cmd.Start(); err != nil {
-			return false
-		}
-		buf := make([]byte, 256)
-		n, _ := stdout.Read(buf)
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		waitErr := cmd.Wait()
-		if n > 0 {
-			return true
-		}
-		return waitErr == nil
+		_, valid := probeStdoutPassword(cmd)
+		return valid
 
 	case Rar:
 		rar := rarBin()
 		if !hasTool(rar) {
 			return false
 		}
-		cmd := execCommand(rar, "p", passArg, "-inul", file)
-		cmd.Stdin = getNullFile()
-		cmd.Stderr = io.Discard
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return false
-		}
-		if err := cmd.Start(); err != nil {
-			return false
-		}
-		buf := make([]byte, 256)
-		n, _ := stdout.Read(buf)
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		waitErr := cmd.Wait()
-		if n > 0 {
-			return true
-		}
-		return waitErr == nil
+		cmd := execCommand(rar, "p", passArg, "-inul", "--", file)
+		_, valid := probeStdoutPassword(cmd)
+		return valid
 	}
 	return false
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,11 @@ import (
 )
 
 func openLockFile(path string) (*os.File, error) {
+	if path == defaultLockFilePath {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, err
+		}
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		f, err := os.OpenFile(path, os.O_RDWR, 0)
 		if err == nil {
@@ -25,9 +31,8 @@ func openLockFile(path string) (*os.File, error) {
 		case errors.Is(err, fs.ErrPermission):
 			return os.OpenFile(path, os.O_RDONLY, 0)
 		case errors.Is(err, fs.ErrNotExist):
-			f, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+			f, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 			if err == nil {
-				f.Chmod(0o666)
 				return f, nil
 			}
 			if !errors.Is(err, fs.ErrExist) {

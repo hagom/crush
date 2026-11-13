@@ -3080,6 +3080,45 @@ func TestDoAppend_RespectsExcludeAndCutoff(t *testing.T) {
 	}
 }
 
+func TestCompressVerbose_RedactsPasswords(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "secret.txt")
+	_ = os.WriteFile(src, []byte("top secret payload"), 0644)
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return mockExecCommand("mock-noop")
+	}
+
+	const secret = "SuperSecretPass_99!"
+	logMu.Lock()
+	logBuf.Reset()
+	logMu.Unlock()
+	loggingActive.Store(true)
+	defer func() {
+		loggingActive.Store(false)
+		logMu.Lock()
+		logBuf.Reset()
+		logMu.Unlock()
+	}()
+
+	_ = compress7z([]string{src}, filepath.Join(tmpDir, "s.7z"), CompressOptions{Format: SevenZ, Password: secret, Verbose: true}, nil)
+	_ = compressZip([]string{src}, filepath.Join(tmpDir, "s.zip"), CompressOptions{Format: Zip, Password: secret, Verbose: true}, nil)
+	_ = compressRar([]string{src}, filepath.Join(tmpDir, "s.rar"), CompressOptions{Format: Rar, Password: secret, Verbose: true}, nil)
+
+	logMu.Lock()
+	logged := logBuf.String()
+	logMu.Unlock()
+
+	if strings.Contains(logged, secret) {
+		t.Errorf("plaintext password %q leaked in verbose log output:\n%s", secret, logged)
+	}
+	if !strings.Contains(logged, "-p***") {
+		t.Errorf("expected redacted -p*** in verbose output, got:\n%s", logged)
+	}
+}
+
 
 
 

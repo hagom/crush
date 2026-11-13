@@ -414,6 +414,21 @@ func TestCheckArchivePassword_Rar(t *testing.T) {
 	}
 }
 
+func TestCheckArchivePassword_ZeroByteSlowExit(t *testing.T) {
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return mockExecCommand("mock-zero-byte-slow-exit")
+	}
+
+	if !checkArchivePassword("dummy.7z", SevenZ, "rightpass") {
+		t.Errorf("expected true when 0-byte encrypted archive extractor exits 0 cleanly")
+	}
+	if !checkArchivePassword("dummy.zip", Zip, "rightpass") {
+		t.Errorf("expected true for zip when 0-byte encrypted archive extractor exits 0 cleanly")
+	}
+}
+
 
 
 

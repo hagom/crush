@@ -874,26 +874,58 @@ func GetUniqueName(base, ext string) string {
 
 // --- Logging ---
 
+func resolvePrivateLogDir() string {
+	if os.Geteuid() == 0 {
+		if err := os.MkdirAll("/var/log/crush", 0o700); err == nil {
+			return "/var/log/crush"
+		}
+	}
+	if state := os.Getenv("XDG_STATE_HOME"); state != "" {
+		dir := filepath.Join(state, "crush")
+		if err := os.MkdirAll(dir, 0o700); err == nil {
+			return dir
+		}
+	}
+	if cache, err := os.UserCacheDir(); err == nil && cache != "" {
+		dir := filepath.Join(cache, "crush", "logs")
+		if err := os.MkdirAll(dir, 0o700); err == nil {
+			return dir
+		}
+	}
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("crush-log-%d", os.Getuid()))
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
+}
+
 func SetupLogging() error {
-	logDir := "/var/log/crush"
-	os.MkdirAll(logDir, 0755)
-
+	logDir := resolvePrivateLogDir()
 	now := time.Now().Format("20060102_150405")
-	logPath := filepath.Join(logDir, "crush_"+now+".log")
+	logPath := filepath.Join(logDir, fmt.Sprintf("crush_%s_%d.log", now, os.Getpid()))
 
-	f, err := os.Create(logPath)
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		logDir = "/tmp/crush"
-		os.MkdirAll(logDir, 0755)
-		logPath = filepath.Join(logDir, "crush_"+now+".log")
-		f, err = os.Create(logPath)
+		f, err = os.CreateTemp(logDir, "crush_*.log")
 		if err != nil {
 			return err
 		}
 	}
+
+	logMu.Lock()
+	if logFile != nil {
+		_ = logFile.Close()
+	}
 	logFile = f
+	logMu.Unlock()
 
 	return nil
+}
+
+func appendToLogFile(s string) {
+	logMu.Lock()
+	if logFile != nil {
+		_, _ = logFile.WriteString(s)
+	}
+	logMu.Unlock()
 }
 
 func WriteLog(s string) {
@@ -904,11 +936,7 @@ func WriteLog(s string) {
 	} else {
 		lockedStderr.Write([]byte(s))
 	}
-	if logFile != nil {
-		logMu.Lock()
-		logFile.WriteString(s)
-		logMu.Unlock()
-	}
+	appendToLogFile(s)
 }
 
 func WriteLogf(format string, args ...interface{}) {
@@ -916,9 +944,12 @@ func WriteLogf(format string, args ...interface{}) {
 }
 
 func CloseLog() {
+	logMu.Lock()
 	if logFile != nil {
-		logFile.Close()
+		_ = logFile.Close()
+		logFile = nil
 	}
+	logMu.Unlock()
 }
 
 // --- Colors ---
@@ -993,20 +1024,12 @@ func writeStderrFormatted(out string) {
 	} else {
 		lockedStderr.Write([]byte(out))
 	}
-	if logFile != nil {
-		logMu.Lock()
-		logFile.WriteString(out)
-		logMu.Unlock()
-	}
+	appendToLogFile(out)
 }
 
 func writeStdoutFormatted(out string) {
 	lockedStdout.Write([]byte(out))
-	if logFile != nil {
-		logMu.Lock()
-		logFile.WriteString(out)
-		logMu.Unlock()
-	}
+	appendToLogFile(out)
 }
 
 func WriteWarning(format string, a ...any) {
@@ -1210,7 +1233,32 @@ func trackProgress(r io.Reader, pt *ProgressTracker, fileSize int64, fp *FilePro
 	}
 }
 
+func redactArgs(args []string) []string {
+	masked := make([]string, len(args))
+	copy(masked, args)
+	for i := 0; i < len(masked); i++ {
+		a := masked[i]
+		switch {
+		case a == "-p" || a == "-P" || a == "-password" || a == "--password":
+			if i+1 < len(masked) {
+				masked[i+1] = "***"
+				i++
+			}
+		case strings.HasPrefix(a, "-p") && len(a) > 2:
+			masked[i] = "-p***"
+		case strings.HasPrefix(a, "-password="):
+			masked[i] = "-password=***"
+		case strings.HasPrefix(a, "--password="):
+			masked[i] = "--password=***"
+		}
+	}
+	return masked
+}
+
 func runWithProgress(cmd *exec.Cmd, pt *ProgressTracker, fileSize int64, fp *FileProgress) error {
+	if cmd.Stdin == nil {
+		cmd.Stdin = getNullFile()
+	}
 	if pt == nil || fileSize == 0 {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = stderrFor(pt)

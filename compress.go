@@ -1603,7 +1603,7 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 		cmd := execCommand(sevenz, args...)
 
 		if opts.Verbose {
-			WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
+			WriteLogf("  $ %s %s\n", sevenz, strings.Join(redactArgs(args), " "))
 		}
 
 		fileSize := totalFileSize(files)
@@ -1628,7 +1628,7 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 	cmd.Stderr = stderrFor(opts.Progress)
 
 	if opts.Verbose {
-		WriteLogf("  $ zip %s\n", strings.Join(args, " "))
+		WriteLogf("  $ zip %s\n", strings.Join(redactArgs(args), " "))
 	}
 
 	err := augmentErr(cmd, cmd.Run())
@@ -1710,7 +1710,7 @@ func compress7z(files []string, outPath string, opts CompressOptions, fp *FilePr
 	cmd := execCommand(sevenz, args...)
 
 	if opts.Verbose {
-		WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
+		WriteLogf("  $ %s %s\n", sevenz, strings.Join(redactArgs(args), " "))
 	}
 
 	err := runWithProgress(cmd, opts.Progress, fileSize, fp)
@@ -1764,7 +1764,7 @@ func compressRar(files []string, outPath string, opts CompressOptions, fp *FileP
 	cmd.Stderr = stderrFor(opts.Progress)
 
 	if opts.Verbose {
-		WriteLogf("  $ %s %s\n", rar, strings.Join(args, " "))
+		WriteLogf("  $ %s %s\n", rar, strings.Join(redactArgs(args), " "))
 	}
 
 	err := augmentErr(cmd, cmd.Run())

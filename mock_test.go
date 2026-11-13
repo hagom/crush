@@ -102,6 +102,11 @@ func TestHelperProcess(t *testing.T) {
 	case "mock-noop":
 		os.Exit(0)
 
+	case "mock-zero-byte-slow-exit":
+		_ = os.Stdout.Close()
+		time.Sleep(30 * time.Millisecond)
+		os.Exit(0)
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown mock command: %s\n", cmd)
 		os.Exit(127)

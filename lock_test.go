@@ -349,3 +349,57 @@ func TestLockScopeNeedsLock(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultLockPath_NotSharedTmpAndPrivatePermissions(t *testing.T) {
+	if os.Getenv("CRUSH_LOCK_FILE") == "" && lockFilePath == "/tmp/crush.lock" {
+		t.Errorf("default lockFilePath must not be shared /tmp/crush.lock, got %q", lockFilePath)
+	}
+
+	t.Run("xdg_runtime_dir", func(t *testing.T) {
+		t.Setenv("CRUSH_LOCK_FILE", "")
+		rtDir := t.TempDir()
+		t.Setenv("XDG_RUNTIME_DIR", rtDir)
+		got := resolveDefaultLockPath()
+		if !strings.HasPrefix(got, rtDir+string(filepath.Separator)) {
+			t.Errorf("resolveDefaultLockPath() = %q, want prefix %q", got, rtDir)
+		}
+	})
+
+	t.Run("xdg_cache_home_private_dir", func(t *testing.T) {
+		t.Setenv("CRUSH_LOCK_FILE", "")
+		t.Setenv("XDG_RUNTIME_DIR", "")
+		cacheDir := t.TempDir()
+		t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+		p := resolveDefaultLockPath()
+		oldDefault := defaultLockFilePath
+		oldPath := lockFilePath
+		defaultLockFilePath = p
+		lockFilePath = p
+		defer func() {
+			defaultLockFilePath = oldDefault
+			lockFilePath = oldPath
+		}()
+
+		f, err := openLockFile(p)
+		if err != nil {
+			t.Fatalf("openLockFile failed: %v", err)
+		}
+		_ = f.Close()
+
+		dirInfo, err := os.Stat(filepath.Dir(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("lock dir permissions too permissive: %04o (want user-private 0700)", perm)
+		}
+		fileInfo, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fileInfo.Mode().Perm(); perm != 0o600 {
+			t.Errorf("lock file permissions = %04o, want 0600", perm)
+		}
+	})
+}

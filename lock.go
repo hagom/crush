@@ -4,22 +4,31 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
-var (
-	lockFilePath     = "/tmp/crush.lock"
-	lockPollInterval = 250 * time.Millisecond
-	lockOutputMu     sync.Mutex
-	lockOutput       io.Writer = os.Stderr
-)
-
-func init() {
+func resolveDefaultLockPath() string {
 	if p := os.Getenv("CRUSH_LOCK_FILE"); p != "" {
-		lockFilePath = p
+		return p
 	}
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
+		return filepath.Join(rt, "crush.lock")
+	}
+	if cache, err := os.UserCacheDir(); err == nil && cache != "" {
+		return filepath.Join(cache, "crush", "crush.lock")
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("crush-%d.lock", os.Getuid()))
 }
+
+var (
+	defaultLockFilePath = resolveDefaultLockPath()
+	lockFilePath        = defaultLockFilePath
+	lockPollInterval    = 250 * time.Millisecond
+	lockOutputMu        sync.Mutex
+	lockOutput          io.Writer = os.Stderr
+)
 
 
 func setLockOutput(w io.Writer) func() {

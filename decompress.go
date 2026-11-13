@@ -186,7 +186,7 @@ func DoDecompress(files []string, opts DecompressOptions) error {
 
 		avail := getDiskAvail(targetDir)
 
-		if avail <= 0 || totalNeeded <= avail {
+		if avail < 0 || totalNeeded <= avail {
 			// FAST PATH: Capacidad suficiente para todo el lote
 			var readyFiles, deferredFiles []string
 			for _, f := range dirFiles {
@@ -363,12 +363,7 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 			}
 			info, err := DetectFormat(f)
 			if err == nil {
-				c := MaxEffectiveThreads(info.Format, sz)
-				c = MemorySafeMaxThreads(info.Format, c)
-				fmtMax := FormatMaxThreads(info.Format)
-				if c > fmtMax {
-					c = fmtMax
-				}
+				c := resolveThreadCap(info.Format, sz)
 				if c > 1 {
 					allMono = false
 				}

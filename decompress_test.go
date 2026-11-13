@@ -2420,6 +2420,92 @@ func TestDecompressResume_TarGzContainer(t *testing.T) {
 	}
 }
 
+func TestDoDecompress_ZeroAvailDiskSpaceFails(t *testing.T) {
+	makeGz := func(t *testing.T, dir string) string {
+		t.Helper()
+		gzPath := filepath.Join(dir, "sample.txt.gz")
+		f, err := os.Create(gzPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gw := gzip.NewWriter(f)
+		if _, err := gw.Write(bytes.Repeat([]byte("hello world\n"), 64)); err != nil {
+			t.Fatal(err)
+		}
+		if err := gw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return gzPath
+	}
+
+	t.Run("ZeroAvailFromGetDiskAvail", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		gzPath := makeGz(t, tmpDir)
+
+		oldAvail := getDiskAvail
+		defer func() { getDiskAvail = oldAvail }()
+		getDiskAvail = func(dir string) int64 { return 0 }
+
+		err := DoDecompress([]string{gzPath}, DecompressOptions{
+			OutputDir: tmpDir,
+			KeepOrig:  true,
+			Force:     true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "Espacio insuficiente") {
+			t.Fatalf("expected insufficient disk space error when avail==0, got: %v", err)
+		}
+	})
+
+	t.Run("ZeroAvailFromDfCommand", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		gzPath := makeGz(t, tmpDir)
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "df" {
+				return exec.Command("printf", "Avail\n0\n")
+			}
+			return exec.Command(name, args...)
+		}
+
+		err := DoDecompress([]string{gzPath}, DecompressOptions{
+			OutputDir: tmpDir,
+			KeepOrig:  true,
+			Force:     true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "Espacio insuficiente") {
+			t.Fatalf("expected insufficient disk space error when df reports 0, got: %v", err)
+		}
+	})
+
+	t.Run("FailedDfCommandDegradesGracefully", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		gzPath := makeGz(t, tmpDir)
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "df" {
+				return mockExecCommand("df-fail")
+			}
+			return exec.Command(name, args...)
+		}
+
+		err := DoDecompress([]string{gzPath}, DecompressOptions{
+			OutputDir: tmpDir,
+			KeepOrig:  true,
+			Force:     true,
+		})
+		if err != nil {
+			t.Fatalf("expected failed df to degrade gracefully instead of blocking extraction, got: %v", err)
+		}
+	})
+}
+
 
 
 

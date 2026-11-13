@@ -57,7 +57,7 @@ func TestDoList_Tar(t *testing.T) {
 	if !strings.Contains(out, "1 archivo, 1 carpeta") {
 		t.Errorf("resumen faltante en salida:\n%s", out)
 	}
-	if !strings.Contains(out, "Total sin comprimir: 1,0KiB") && !strings.Contains(out, "Total sin comprimir: 1.0KiB") {
+	if !strings.Contains(out, "Total sin comprimir: "+FormatSize(int64(len(data)))) {
 		t.Errorf("tamaño total formateado incorrecto en salida:\n%s", out)
 	}
 }

@@ -3119,6 +3119,46 @@ func TestCompressVerbose_RedactsPasswords(t *testing.T) {
 	}
 }
 
+func TestDoCompress_SequentialRespectsThreadCap(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "tiny.txt")
+	if err := os.WriteFile(src, []byte("small payload for thread cap"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+	var xzArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "xz" {
+			xzArgs = append([]string(nil), args...)
+			return mockExecCommand("mock-noop")
+		}
+		return exec.Command(name, args...)
+	}
+
+	opts := CompressOptions{
+		Format:      Xz,
+		OutputDir:   tmpDir,
+		KeepOrig:    true,
+		SkipCleanup: true,
+		ThreadLimit: 8,
+	}
+	if _, err := DoCompress([]string{src}, opts); err != nil {
+		t.Fatalf("DoCompress sequential xz failed: %v", err)
+	}
+
+	hasT1 := false
+	for _, a := range xzArgs {
+		if a == "-T1" {
+			hasT1 = true
+		}
+	}
+	if !hasT1 {
+		t.Errorf("sequential DoCompress on tiny xz file should cap threads to -T1, got args: %v", xzArgs)
+	}
+}
+
 
 
 

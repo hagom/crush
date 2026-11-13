@@ -393,7 +393,12 @@ func ParseFormatFromExt(filename string) (Format, bool) {
 			return entry.format, true
 		}
 	}
-	ext := lower[strings.LastIndex(lower, ".")+1:]
+	base := filepath.Base(lower)
+	dot := strings.LastIndexByte(base, '.')
+	if dot < 0 || dot == len(base)-1 {
+		return 0, false
+	}
+	ext := base[dot+1:]
 	f, err := ParseFormat(ext)
 	if err != nil {
 		return 0, false

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -440,25 +441,28 @@ func getMemFromFree() int {
 // --- Size formatting ---
 
 func FormatSize(bytes int64) string {
-	if hasTool("numfmt") {
-		cmd := exec.Command("numfmt", "--to=iec-i", "--suffix=B", strconv.FormatInt(bytes, 10))
-		out, err := cmd.Output()
-		if err == nil {
-			return strings.TrimSpace(string(out))
-		}
+	neg := bytes < 0
+	var u uint64
+	if neg {
+		u = uint64(-bytes)
+	} else {
+		u = uint64(bytes)
 	}
-
 	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
 	unit := 0
-	size := float64(bytes)
+	size := float64(u)
 	for size >= 1024 && unit < 5 {
 		size /= 1024
 		unit++
 	}
-	if unit == 0 {
-		return fmt.Sprintf("%d %s", bytes, units[unit])
+	prefix := ""
+	if neg {
+		prefix = "-"
 	}
-	return fmt.Sprintf("%.1f %s", size, units[unit])
+	if unit == 0 {
+		return fmt.Sprintf("%s%d %s", prefix, u, units[unit])
+	}
+	return fmt.Sprintf("%s%.1f %s", prefix, size, units[unit])
 }
 
 func CalcPct(orig, final int64) string {
@@ -471,9 +475,17 @@ func CalcPct(orig, final int64) string {
 
 // --- Disk space ---
 
-var getDiskAvail = GetAvailBytes
+var getDiskAvail = getDiskAvailOrUnknown
 
-func GetAvailBytes(dir string) int64 {
+func getDiskAvailOrUnknown(dir string) int64 {
+	avail, ok := probeDiskAvail(dir)
+	if !ok {
+		return -1
+	}
+	return avail
+}
+
+func probeDiskAvail(dir string) (int64, bool) {
 	if dir == "" {
 		dir = "."
 	}
@@ -496,7 +508,7 @@ func GetAvailBytes(dir string) int64 {
 		lines := strings.Split(string(out), "\n")
 		if len(lines) >= 2 {
 			if avail, err := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64); err == nil {
-				return avail
+				return avail, true
 			}
 		}
 	}
@@ -509,17 +521,28 @@ func GetAvailBytes(dir string) int64 {
 			fields := strings.Fields(lines[1])
 			if len(fields) >= 4 {
 				if blocks, err := strconv.ParseInt(fields[3], 10, 64); err == nil {
-					return blocks * 1024
+					return blocks * 1024, true
 				}
 			}
 		}
 	}
 
-	return 0
+	return 0, false
+}
+
+func GetAvailBytes(dir string) int64 {
+	avail, ok := probeDiskAvail(dir)
+	if !ok {
+		return 0
+	}
+	return avail
 }
 
 func CheckDiskSpace(needed int64, dir string, op string) error {
 	avail := getDiskAvail(dir)
+	if avail < 0 {
+		return nil
+	}
 	if avail < needed {
 		delta := needed - avail
 		return fmt.Errorf("Espacio insuficiente para %s: libera %s. Necesario: %s, Disponible: %s",
@@ -691,13 +714,17 @@ func EstimateUncompressedSize(file string) int64 {
 
 	case strings.HasSuffix(f, ".zip"):
 		if r, err := zip.OpenReader(file); err == nil {
-			var sum int64
+			var sum uint64
 			for _, zf := range r.File {
-				sum += int64(zf.UncompressedSize64)
+				if zf.UncompressedSize64 > uint64(math.MaxInt64)-sum {
+					sum = uint64(math.MaxInt64)
+					break
+				}
+				sum += zf.UncompressedSize64
 			}
 			r.Close()
 			if sum > 0 {
-				return sum
+				return int64(sum)
 			}
 		}
 		cmd := execCommand("unzip", "-l", "--", file)
@@ -840,11 +867,30 @@ var (
 	reservedNames = make(map[string]bool)
 )
 
+func safeFlagArg(p string) string {
+	if strings.HasPrefix(p, "-") {
+		return "./" + p
+	}
+	return p
+}
+
+func resolveThreadCap(f Format, sizeBytes int64) int {
+	c := MaxEffectiveThreads(f, sizeBytes)
+	c = MemorySafeMaxThreads(f, c)
+	if fmtMax := FormatMaxThreads(f); c > fmtMax {
+		c = fmtMax
+	}
+	if c < 1 {
+		c = 1
+	}
+	return c
+}
+
 func isNameAvailable(name string) bool {
 	if reservedNames[name] {
 		return false
 	}
-	_, err := os.Stat(name)
+	_, err := os.Lstat(name)
 	return os.IsNotExist(err)
 }
 
@@ -860,16 +906,13 @@ func GetUniqueName(base, ext string) string {
 		reservedNames[name] = true
 		return name
 	}
-	for counter := 1; counter < 1000; counter++ {
+	for counter := 1; ; counter++ {
 		name = fmt.Sprintf("%s_%d.%s", base, counter, ext)
 		if isNameAvailable(name) {
 			reservedNames[name] = true
 			return name
 		}
 	}
-	name = fmt.Sprintf("%s_%d.%s", base, 999, ext)
-	reservedNames[name] = true
-	return name
 }
 
 // --- Logging ---
@@ -1514,11 +1557,15 @@ func globalBarLine(pct float64, current int64, done int64, filesTotal int, total
 
 func fileLine(fp *FileProgress) string {
 	pad := 26
-	name := fp.Name
-	if len(name) > pad-4 {
-		name = name[:pad-7] + "..."
+	runes := []rune(fp.Name)
+	if len(runes) > pad-4 {
+		runes = append(runes[:pad-7], '.', '.', '.')
 	}
-	name = fmt.Sprintf("  %-"+fmt.Sprintf("%d", pad-2)+"s", name)
+	display := string(runes)
+	if padSpaces := (pad - 2) - utf8.RuneCountInString(display); padSpaces > 0 {
+		display += strings.Repeat(" ", padSpaces)
+	}
+	name := "  " + display
 
 	switch fp.Status() {
 	case "waiting":

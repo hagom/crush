@@ -180,13 +180,6 @@ func appendTarFilterFlags(args []string, opts CompressOptions) []string {
 	return args
 }
 
-func safeFlagArg(p string) string {
-	if strings.HasPrefix(p, "-") {
-		return "./" + p
-	}
-	return p
-}
-
 func hasNewerFiles(item string, cutoff time.Time, exclude []string) bool {
 	if cutoff.IsZero() {
 		return true
@@ -347,16 +340,7 @@ func generateCompressionTasks(items []string, opts CompressOptions) ([]Compressi
 				task.OutPath = outPath
 			}
 
-			cap := MaxEffectiveThreads(fmtChoice, itemSize)
-			cap = MemorySafeMaxThreads(fmtChoice, cap)
-			fmtMax := FormatMaxThreads(fmtChoice)
-			if cap > fmtMax {
-				cap = fmtMax
-			}
-			if cap < 1 {
-				cap = 1
-			}
-			task.ThreadCap = cap
+			task.ThreadCap = resolveThreadCap(fmtChoice, itemSize)
 
 			tasks = append(tasks, task)
 		}
@@ -666,6 +650,9 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	}
 
 	opts.TotalSize = totalSize
+	if cap := resolveThreadCap(opts.Format, totalSize); opts.ThreadLimit <= 0 || cap < opts.ThreadLimit {
+		opts.ThreadLimit = cap
+	}
 	realOut := splitOutPath(outPath, opts)
 	if opts.Resume {
 		if _, err := os.Stat(realOut); err == nil {

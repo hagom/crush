@@ -802,13 +802,11 @@ func main() {
 				WriteError("abriendo %s: %v", f, err)
 				continue
 			}
-			data, err := CompressRead(file)
-			if err != nil {
+			if err := CompressReadTo(file, os.Stdout); err != nil {
 				WriteError("leyendo %s: %v", f, err)
 				file.Close()
 				continue
 			}
-			os.Stdout.Write(data)
 			file.Close()
 		}
 		return

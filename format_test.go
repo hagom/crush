@@ -695,3 +695,31 @@ func TestIsHighEntropyFile(t *testing.T) {
 	}
 }
 
+func TestParseFormatFromExt_StrictDots(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		wantFmt  Format
+		wantOK   bool
+	}{
+		{"bare zip", "zip", 0, false},
+		{"bare tar", "tar", 0, false},
+		{"bare 7z", "7z", 0, false},
+		{"bare gz", "gz", 0, false},
+		{"empty", "", 0, false},
+		{"dir dot bare base", "dir.zip/plain", 0, false},
+		{"valid zip", "a.zip", Zip, true},
+		{"valid tar.gz", "a.tar.gz", Gz, true},
+		{"valid nested tar.xz", "dir.zip/file.tar.xz", Xz, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFmt, gotOK := ParseFormatFromExt(tc.filename)
+			if gotOK != tc.wantOK || gotFmt != tc.wantFmt {
+				t.Errorf("ParseFormatFromExt(%q) = (%v, %v), want (%v, %v)",
+					tc.filename, gotFmt, gotOK, tc.wantFmt, tc.wantOK)
+			}
+		})
+	}
+}
+

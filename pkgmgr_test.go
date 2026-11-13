@@ -300,3 +300,128 @@ func TestEnsureFormatTool(t *testing.T) {
 		}
 	})
 }
+
+func TestCompressRead_TarDashAndLzipFallback(t *testing.T) {
+	t.Run("TarSingleDashFilename", func(t *testing.T) {
+		if _, err := exec.LookPath("tar"); err != nil {
+			t.Skip("tar no disponible")
+		}
+		tmp := t.TempDir()
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(origWd) }()
+
+		if err := os.WriteFile("inner.txt", []byte("dash payload\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		dashTar := "-dash.tar"
+		if err := exec.Command("tar", "-cf", dashTar, "inner.txt").Run(); err != nil {
+			t.Fatal(err)
+		}
+		// Ensure bare "-" file name also works safely with Format fallback tested via CompressRead
+		// For Format detection we use .tar suffix and also verify -f arg passes safeFlagArg via mock
+		f, err := os.Open(dashTar)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		var tarArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "tar" {
+				tarArgs = append([]string(nil), args...)
+			}
+			return exec.Command(name, args...)
+		}
+
+		data, err := CompressRead(f)
+		if err != nil {
+			t.Fatalf("CompressRead(%s) failed: %v", dashTar, err)
+		}
+		if strings.TrimSpace(string(data)) != "dash payload" {
+			t.Errorf("CompressRead(%s) = %q, want %q", dashTar, string(data), "dash payload")
+		}
+		hasSafeArg := false
+		for _, a := range tarArgs {
+			if a == "./-dash.tar" {
+				hasSafeArg = true
+			}
+		}
+		if !hasSafeArg {
+			t.Errorf("expected tar args to protect leading dash with ./-dash.tar and go through execCommand, got: %v", tarArgs)
+		}
+	})
+
+	t.Run("LzipFallbackWhenPlzipMissing", func(t *testing.T) {
+		tmp := t.TempDir()
+		lzFile := filepath.Join(tmp, "sample.txt.lz")
+		if err := os.WriteFile(lzFile, []byte("fake lz"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(lzFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+
+		origLookPath := lookPath
+		origExec := execCommand
+		defer func() {
+			lookPath = origLookPath
+			execCommand = origExec
+		}()
+		lookPath = func(name string) (string, error) {
+			if name == "lzip" {
+				return "/usr/bin/lzip", nil
+			}
+			return "", exec.ErrNotFound
+		}
+		var calledBin string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			calledBin = name
+			return mockExecCommand("mock-noop")
+		}
+
+		if _, err := CompressRead(f); err != nil {
+			t.Fatalf("CompressRead(.lz) fallback error: %v", err)
+		}
+		if calledBin != "lzip" {
+			t.Errorf("expected CompressRead(.lz) fallback to lzip via execCommand, got %q", calledBin)
+		}
+	})
+
+	t.Run("StreamsToWriterDirectly", func(t *testing.T) {
+		if _, err := exec.LookPath("tar"); err != nil {
+			t.Skip("tar no disponible")
+		}
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "stream.txt")
+		if err := os.WriteFile(src, []byte("streaming writer payload"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		arc := filepath.Join(tmp, "stream.tar")
+		if err := exec.Command("tar", "-cf", arc, "-C", tmp, "stream.txt").Run(); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(arc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+
+		var sb strings.Builder
+		if err := CompressReadTo(f, &sb); err != nil {
+			t.Fatalf("CompressReadTo failed: %v", err)
+		}
+		if strings.TrimSpace(sb.String()) != "streaming writer payload" {
+			t.Errorf("CompressReadTo wrote %q, want %q", sb.String(), "streaming writer payload")
+		}
+	})
+}

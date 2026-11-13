@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -410,62 +412,80 @@ func findToolInfo(tool string) *ToolInfo {
 
 var compressMu = make(chan struct{}, 1)
 
-func CompressRead(f *os.File) ([]byte, error) {
+func CompressReadTo(f *os.File, w io.Writer) error {
 	compressMu <- struct{}{}
 	defer func() { <-compressMu }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	format, ok := ParseFormatFromExt(info.Name())
 	if !ok {
-		return nil, fmt.Errorf("no se puede leer archivo comprimido: %s", info.Name())
+		return fmt.Errorf("no se puede leer archivo comprimido: %s", info.Name())
 	}
 
 	var cmd *exec.Cmd
 
 	switch format {
 	case Gz:
-		cmd = exec.Command("pigz", "-dc", "--", f.Name())
+		cmd = execCommand("pigz", "-dc", "--", f.Name())
 		if !hasTool("pigz") {
-			cmd = exec.Command("gzip", "-dc", "--", f.Name())
+			cmd = execCommand("gzip", "-dc", "--", f.Name())
 		}
 	case Bz2:
 		bin := bzip2Bin()
-		cmd = exec.Command(bin, "-dc", "--", f.Name())
+		cmd = execCommand(bin, "-dc", "--", f.Name())
 	case Xz:
-		cmd = exec.Command("xz", "-dc", "--", f.Name())
+		cmd = execCommand("xz", "-dc", "--", f.Name())
 	case Zst:
-		cmd = exec.Command("zstd", "-dc", "--", f.Name())
+		cmd = execCommand("zstd", "-dc", "--", f.Name())
 	case Lz:
-		cmd = exec.Command("plzip", "-dc", "--", f.Name())
+		bin := "plzip"
+		if !hasTool("plzip") && hasTool("lzip") {
+			bin = "lzip"
+		}
+		cmd = execCommand(bin, "-dc", "--", f.Name())
 	case Lz4:
-		cmd = exec.Command("lz4", "-dc", "--", f.Name())
+		cmd = execCommand("lz4", "-dc", "--", f.Name())
 	case Br:
-		cmd = exec.Command("brotli", "-dc", "--", f.Name())
+		cmd = execCommand("brotli", "-dc", "--", f.Name())
 	case Lrz:
-		cmd = exec.Command("lrzip", "-d", "-k", "-p", ncpuStr(), "-o", "-", "--", f.Name())
+		cmd = execCommand("lrzip", "-d", "-k", "-p", ncpuStr(), "-o", "-", "--", f.Name())
 	case Zip:
-		cmd = exec.Command("unzip", "-p", "--", f.Name())
+		cmd = execCommand("unzip", "-p", "--", f.Name())
 	case SevenZ:
-		cmd = exec.Command(sevenzBin(), "x", "-so", "--", f.Name())
+		cmd = execCommand(sevenzBin(), "x", "-so", "--", f.Name())
 	case Rar:
-		cmd = exec.Command(rarBin(), "p", "--", f.Name())
+		cmd = execCommand(rarBin(), "p", "--", f.Name())
 	case Bz3:
-		cmd = exec.Command("bzip3", "-dc", "--", f.Name())
+		cmd = execCommand("bzip3", "-dc", "--", f.Name())
 	case Tar:
-		cmd = exec.Command("tar", "-xOf", f.Name())
+		cmd = execCommand("tar", "-xO", "-f", safeFlagArg(f.Name()), "--")
 	default:
-		return nil, fmt.Errorf("no se puede leer archivo comprimido: %s", info.Name())
+		return fmt.Errorf("no se puede leer archivo comprimido: %s", info.Name())
 	}
 
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("error leyendo %s: %w", info.Name(), err)
+	cmd.Stdout = w
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		errMsg := strings.TrimSpace(errBuf.String())
+		if errMsg != "" {
+			return fmt.Errorf("error leyendo %s: %w (%s)", info.Name(), err, errMsg)
+		}
+		return fmt.Errorf("error leyendo %s: %w", info.Name(), err)
 	}
-	return out, nil
+	return nil
+}
+
+func CompressRead(f *os.File) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := CompressReadTo(f, &buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func ListCompressed(f *os.File) error {

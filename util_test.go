@@ -3,6 +3,9 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
+	"math"
+	"unicode/utf8"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -1935,6 +1938,195 @@ func TestRunWithProgress_AttachesNullStdin(t *testing.T) {
 	if cmd.Stdin != getNullFile() {
 		t.Errorf("expected cmd.Stdin to be set to getNullFile(), got %v", cmd.Stdin)
 	}
+}
+
+func TestFormatSize_PureGoDeterministic(t *testing.T) {
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		t.Fatalf("FormatSize should not spawn external tool %q", name)
+		return exec.Command("false")
+	}
+
+	tests := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0 B"},
+		{500, "500 B"},
+		{-100, "-100 B"},
+		{1024, "1.0 KiB"},
+		{1536, "1.5 KiB"},
+		{-1024, "-1.0 KiB"},
+		{1048576, "1.0 MiB"},
+		{1073741824, "1.0 GiB"},
+	}
+	for _, tc := range tests {
+		got := FormatSize(tc.bytes)
+		if got != tc.want {
+			t.Errorf("FormatSize(%d) = %q, want exact %q", tc.bytes, got, tc.want)
+		}
+	}
+}
+
+func TestEstimateUncompressedSize_ZipOverflowClamp(t *testing.T) {
+	var raw bytes.Buffer
+	zw := zip.NewWriter(&raw)
+	for _, name := range []string{"a.bin", "b.bin"} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b := raw.Bytes()
+	eocdOff := bytes.LastIndex(b, []byte{0x50, 0x4b, 0x05, 0x06})
+	if eocdOff < 0 {
+		t.Fatal("EOCD not found")
+	}
+	cdSize := int(binary.LittleEndian.Uint32(b[eocdOff+12 : eocdOff+16]))
+	cdOff := int(binary.LittleEndian.Uint32(b[eocdOff+16 : eocdOff+20]))
+
+	var out bytes.Buffer
+	out.Write(b[:cdOff])
+
+	pos := cdOff
+	cdEnd := cdOff + cdSize
+	for pos < cdEnd {
+		if binary.LittleEndian.Uint32(b[pos:pos+4]) != 0x02014b50 {
+			t.Fatalf("bad CD signature at %d", pos)
+		}
+		nameLen := int(binary.LittleEndian.Uint16(b[pos+28 : pos+30]))
+		extraLen := int(binary.LittleEndian.Uint16(b[pos+30 : pos+32]))
+		commentLen := int(binary.LittleEndian.Uint16(b[pos+32 : pos+34]))
+		recLen := 46 + nameLen + extraLen + commentLen
+		rec := append([]byte(nil), b[pos:pos+recLen]...)
+
+		binary.LittleEndian.PutUint32(rec[24:28], 0xFFFFFFFF)
+		binary.LittleEndian.PutUint16(rec[30:32], uint16(extraLen+12))
+
+		var z64Extra [12]byte
+		binary.LittleEndian.PutUint16(z64Extra[0:2], 0x0001)
+		binary.LittleEndian.PutUint16(z64Extra[2:4], 8)
+		binary.LittleEndian.PutUint64(z64Extra[4:12], uint64(math.MaxInt64-10))
+
+		fixedEnd := 46 + nameLen + extraLen
+		out.Write(rec[:fixedEnd])
+		out.Write(z64Extra[:])
+		out.Write(rec[fixedEnd:])
+		pos += recLen
+	}
+
+	newCDSize := out.Len() - cdOff
+	eocd := append([]byte(nil), b[eocdOff:]...)
+	binary.LittleEndian.PutUint32(eocd[12:16], uint32(newCDSize))
+	out.Write(eocd)
+
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "huge64.zip")
+	if err := os.WriteFile(zipPath, out.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("constructed zip64 unreadable: %v", err)
+	}
+	if len(zr.File) != 2 || zr.File[0].UncompressedSize64 != uint64(math.MaxInt64-10) {
+		zr.Close()
+		t.Fatalf("unexpected parsed zip64 sizes: %+v", zr.File)
+	}
+	zr.Close()
+
+	got := EstimateUncompressedSize(zipPath)
+	if got != math.MaxInt64 {
+		t.Errorf("EstimateUncompressedSize(%q) = %d, want clamped math.MaxInt64 (%d)", zipPath, got, int64(math.MaxInt64))
+	}
+}
+
+func TestFileLine_MultibyteUTF8(t *testing.T) {
+	// Byte index 19 splits multi-byte 'ñ' (0xC3 0xB1) in half: "aa" (2 bytes) + 12*'ñ' (24 bytes).
+	fpUTF := &FileProgress{Name: "aa" + strings.Repeat("ñ", 12) + ".iso", Size: 1000}
+	fpUTF.SetStatus("active")
+	fpUTF.Current.Store(500)
+
+	// Short non-truncated multi-byte name tests rune vs byte padding alignment before " [".
+	fpUTFShort := &FileProgress{Name: "año_ñandú.txt", Size: 1000}
+	fpUTFShort.SetStatus("active")
+	fpUTFShort.Current.Store(500)
+
+	fpASCII := &FileProgress{Name: "ascii_normal_file_name_long_ok.iso", Size: 1000}
+	fpASCII.SetStatus("active")
+	fpASCII.Current.Store(500)
+
+	lineUTF := fileLine(fpUTF)
+	lineUTFShort := fileLine(fpUTFShort)
+	lineASCII := fileLine(fpASCII)
+
+	if !utf8.ValidString(lineUTF) {
+		t.Fatalf("fileLine produced invalid UTF-8 string: %q", lineUTF)
+	}
+	barIdxUTF := strings.Index(lineUTFShort, " [")
+	barIdxASCII := strings.Index(lineASCII, " [")
+	if barIdxUTF < 0 || barIdxASCII < 0 {
+		t.Fatalf("missing progress bar bracket in %q / %q", lineUTFShort, lineASCII)
+	}
+	runeColUTF := utf8.RuneCountInString(lineUTFShort[:barIdxUTF])
+	runeColASCII := utf8.RuneCountInString(lineASCII[:barIdxASCII])
+	if runeColUTF != runeColASCII {
+		t.Errorf("UTF-8 display column misaligned: utf=%d runes vs ascii=%d runes (%q vs %q)",
+			runeColUTF, runeColASCII, lineUTFShort, lineASCII)
+	}
+}
+
+func TestGetUniqueName_UnboundedAndSymlinkSafe(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	t.Run("ContinuesPast999", func(t *testing.T) {
+		if err := os.WriteFile("ucol999.txt", []byte("0"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i <= 999; i++ {
+			name := filepath.Join(tmpDir, fmt.Sprintf("ucol999_%d.txt", i))
+			if err := os.WriteFile(name, []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := GetUniqueName("ucol999", "txt")
+		if got == "ucol999_999.txt" {
+			t.Fatalf("GetUniqueName collided with existing ucol999_999.txt")
+		}
+		if got != "ucol999_1000.txt" {
+			t.Errorf("GetUniqueName = %q, want ucol999_1000.txt", got)
+		}
+	})
+
+	t.Run("RespectsDanglingSymlink", func(t *testing.T) {
+		if err := os.Symlink("/nonexistent_crush_target_xyz", "ubrokensym.txt"); err != nil {
+			t.Fatal(err)
+		}
+		got := GetUniqueName("ubrokensym", "txt")
+		if got == "ubrokensym.txt" {
+			t.Fatalf("GetUniqueName returned broken symlink target %q", got)
+		}
+		if got != "ubrokensym_1.txt" {
+			t.Errorf("GetUniqueName = %q, want ubrokensym_1.txt", got)
+		}
+	})
 }
 
 

@@ -34,20 +34,14 @@ var knownShortFlags = map[byte]bool{
 
 var Version = "dev" // set at build time: go build -ldflags="-X main.Version=x.y.z"
 
-// takesValue reports whether a flag token consumes the next argument as its value.
+// flagTakesValue reports whether a flag token consumes the next argument as its value.
 func flagTakesValue(a string) bool {
-	switch {
-	case a == "-f", a == "-F", a == "-formats", a == "--formats", a == "-o", a == "-s", a == "-opts", a == "-i", a == "-completion", a == "--completion", a == "-filter", a == "--filter":
-		return true
-	case a == "-newer" || a == "--newer" || a == "-newer-than" || a == "--newer-than":
-		return true
-	case a == "-bench-size" || a == "--bench-size":
-		return true
-	case a == "-watch" || a == "--watch":
-		return true
-	case a == "-exclude" || strings.HasPrefix(a, "-exclude="):
-		return true
-	case len(a) > 7 && a[:7] == "-exclude":
+	switch a {
+	case "-f", "-F", "-formats", "--formats", "-o", "-s", "-opts", "-i",
+		"-completion", "--completion", "-filter", "--filter", "-find", "--find",
+		"-newer", "--newer", "-newer-than", "--newer-than",
+		"-bench-size", "--bench-size", "-watch", "--watch",
+		"-exclude", "--exclude":
 		return true
 	default:
 		return false
@@ -137,12 +131,22 @@ func reorderArgs(args []string) []string {
 	var out []string
 	var positional []string
 	skip := false
+	sawDoubleDash := false
 	for i := 1; i < len(args); i++ {
 		if skip {
 			skip = false
 			continue
 		}
 		a := args[i]
+		if a == "" {
+			positional = append(positional, a)
+			continue
+		}
+		if a == "--" {
+			sawDoubleDash = true
+			positional = append(positional, args[i+1:]...)
+			break
+		}
 		if len(a) > 2 && a[0] == '-' && a[1] != '-' && !flagTakesValue(a) {
 			// Potential combined short flags: -tkv
 			allKnown := true
@@ -171,6 +175,9 @@ func reorderArgs(args []string) []string {
 	}
 	result := []string{args[0]}
 	result = append(result, out...)
+	if sawDoubleDash {
+		result = append(result, "--")
+	}
 	result = append(result, positional...)
 	return result
 }
@@ -330,6 +337,9 @@ func main() {
 	hasT := *testFlag || *verifyFlag
 	hasR := *readFlag
 	hasConvert := *convertFlag || *recompressFlag
+	hasTree := *treeFlag
+	hasFind := *findFlag != ""
+	hasDiff := *diffFlag
 
 	writeModes := 0
 	for _, m := range []bool{hasC, hasD, hasA, hasConvert} {
@@ -338,7 +348,7 @@ func main() {
 		}
 	}
 	readModes := 0
-	for _, m := range []bool{hasL, hasR} {
+	for _, m := range []bool{hasL, hasR, hasTree, hasFind, hasDiff} {
 		if m {
 			readModes++
 		}
@@ -347,7 +357,7 @@ func main() {
 	conflict := false
 	var conflictFlags []string
 
-	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 || (hasT && (hasL || hasR || hasA || hasConvert)) || (*analyzeFlag && (writeModes > 0 || readModes > 0 || hasT)) {
+	if writeModes > 1 || (writeModes > 0 && readModes > 0) || readModes > 1 || (hasT && (hasL || hasR || hasA || hasConvert || hasTree || hasFind || hasDiff)) || (*analyzeFlag && (writeModes > 0 || readModes > 0 || hasT)) {
 		conflict = true
 	}
 
@@ -356,7 +366,7 @@ func main() {
 			v    bool
 			name string
 		}{
-			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"}, {*analyzeFlag, "--analyze"},
+			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"}, {*analyzeFlag, "--analyze"}, {hasTree, "-tree"}, {hasFind, "-find"}, {hasDiff, "-diff"},
 		} {
 			if f.v {
 				conflictFlags = append(conflictFlags, f.name)
@@ -382,9 +392,9 @@ func main() {
 		os.Exit(1)
 	}
 	if installModeCount > 0 {
-		for _, m := range []bool{hasC, hasD, hasA, hasL, *testFlag, *verifyFlag, hasR, *benchFlag, *watchDir != "", *analyzeFlag} {
+		for _, m := range []bool{hasC, hasD, hasA, hasL, *testFlag, *verifyFlag, hasR, hasConvert, *benchFlag, *watchDir != "", *analyzeFlag, hasTree, hasFind, hasDiff} {
 			if m {
-				WriteError("--install/--install-deps/--uninstall no puede combinarse con -c, -d, -a, -l, -t, -verify, -r, --bench, -watch o --analyze")
+				WriteError("--install/--install-deps/--uninstall no puede combinarse con otros modos de operación")
 				os.Exit(1)
 			}
 		}
@@ -400,7 +410,7 @@ func main() {
 			v    bool
 			name string
 		}{
-			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"}, {*analyzeFlag, "--analyze"},
+			{hasC, "-c"}, {hasD, "-d"}, {hasA, "-a"}, {hasL, "-l"}, {*testFlag, "-t"}, {*verifyFlag, "-verify"}, {hasR, "-r"}, {hasConvert, "-convert"}, {*analyzeFlag, "--analyze"}, {hasTree, "-tree"}, {hasFind, "-find"}, {hasDiff, "-diff"},
 		} {
 			if m.v {
 				WriteError("--bench no se puede combinar con %s", m.name)

@@ -36,17 +36,25 @@ func runInotifyWatcher(ctx context.Context, opts WatcherOptions, processFn func(
 	}
 	defer syscall.InotifyRmWatch(fd, uint32(wd))
 
+	epfd, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
+	if err != nil {
+		return fmt.Errorf("epoll_create1: %w", err)
+	}
+	defer syscall.Close(epfd)
+
+	ev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(fd)}
+	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, fd, &ev); err != nil {
+		return fmt.Errorf("epoll_ctl: %w", err)
+	}
+
 	var buf [4096]byte
+	var events [1]syscall.EpollEvent
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 
-		var rSet syscall.FdSet
-		rSet.Bits[fd/64] |= 1 << (uint(fd) % 64)
-		tv := syscall.Timeval{Sec: 0, Usec: 100000} // 100ms timeout for responsive context cancel
-
-		ready, err := syscall.Select(fd+1, &rSet, nil, nil, &tv)
+		ready, err := syscall.EpollWait(epfd, events[:], 100)
 		if err != nil {
 			if err == syscall.EINTR {
 				continue
@@ -54,7 +62,7 @@ func runInotifyWatcher(ctx context.Context, opts WatcherOptions, processFn func(
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("select: %w", err)
+			return fmt.Errorf("epoll_wait: %w", err)
 		}
 
 		if ready <= 0 {

@@ -113,6 +113,26 @@ func TestReorderArgs(t *testing.T) {
 			args: []string{"crush", "-c", "file.txt", "--newer-than", "ref.tar.gz"},
 			want: []string{"crush", "-c", "--newer-than", "ref.tar.gz", "file.txt"},
 		},
+		{
+			name: "empty argument does not panic",
+			args: []string{"crush", "-c", "", "file.txt"},
+			want: []string{"crush", "-c", "", "file.txt"},
+		},
+		{
+			name: "double dash stops flag reordering and expansion",
+			args: []string{"crush", "-c", "a.txt", "--", "-evil.txt", "-tkv"},
+			want: []string{"crush", "-c", "--", "a.txt", "-evil.txt", "-tkv"},
+		},
+		{
+			name: "find flag with pattern after positional",
+			args: []string{"crush", "archive.tar.gz", "-find", "*.txt"},
+			want: []string{"crush", "-find", "*.txt", "archive.tar.gz"},
+		},
+		{
+			name: "inline exclude=value does not consume next filename",
+			args: []string{"crush", "-c", "pos1.txt", "-exclude=*.log", "pos2.txt", "-k"},
+			want: []string{"crush", "-c", "-exclude=*.log", "-k", "pos1.txt", "pos2.txt"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -912,6 +932,45 @@ func TestMainIncrementalCLI(t *testing.T) {
 	}
 	if _, err := os.Stat(oldInProj); err != nil {
 		t.Errorf("old.txt fue eliminado tras --newer sin -k: %v", err)
+	}
+}
+
+func TestMainModeConflictsCLI(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "crush_bin")
+	cmdBuild := exec.Command("go", "build", "-o", binPath, ".")
+	cmdBuild.Dir = "."
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("go build falló: %v\n%s", err, out)
+	}
+
+	tmpDir := t.TempDir()
+	dummy := filepath.Join(tmpDir, "a.tar.gz")
+	_ = os.WriteFile(dummy, []byte("x"), 0644)
+
+	conflicts := [][]string{
+		{"-c", "-tree", dummy},
+		{"-c", "-diff", dummy, dummy},
+		{"-c", "-find", "*.txt", dummy},
+		{"-tree", "-diff", dummy, dummy},
+		{"-l", "-tree", dummy},
+		{"-t", "-tree", dummy},
+		{"--bench", "-tree", dummy},
+		{"--install", "-diff", dummy},
+	}
+
+	for _, args := range conflicts {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			cmd := exec.Command(binPath, args...)
+			cmd.Stdin = strings.NewReader("")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("crush %v should fail due to mode conflict, succeeded:\n%s", args, out)
+			}
+			outStr := string(out)
+			if !strings.Contains(outStr, "no se pueden combinar") && !strings.Contains(outStr, "no puede combinarse") && !strings.Contains(outStr, "no se puede combinar") {
+				t.Errorf("expected mode conflict error for %v, got:\n%s", args, outStr)
+			}
+		})
 	}
 }
 

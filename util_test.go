@@ -1836,6 +1836,16 @@ func TestParseCutoffTime_Table(t *testing.T) {
 			newerStr:   "fecha-invalida",
 			wantErrSub: "formato de fecha o duración inválido",
 		},
+		{
+			name:       "duración negativa rechazada",
+			newerStr:   "-24h",
+			wantErrSub: "positiva",
+		},
+		{
+			name:       "duración cero rechazada",
+			newerStr:   "0s",
+			wantErrSub: "positiva",
+		},
 	}
 
 	for _, tt := range tests {

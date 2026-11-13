@@ -102,6 +102,91 @@ func checkAndWarnHighEntropy(item string, fmtChoice Format, warned map[string]bo
 	}
 }
 
+func isExcludedItem(name string, exclude []string) bool {
+	base := filepath.Base(name)
+	for _, pat := range exclude {
+		if matched, _ := filepath.Match(pat, base); matched {
+			return true
+		}
+		if matched, _ := filepath.Match(pat, name); matched {
+			return true
+		}
+	}
+	return false
+}
+
+func filterCompressItems(items []string, opts CompressOptions) []string {
+	var filtered []string
+	for _, f := range items {
+		if isExcludedItem(f, opts.Exclude) {
+			if opts.Verbose {
+				WriteLogf("  %sExcluido: %s%s\n", Yellow, f, NC)
+			}
+			continue
+		}
+		if !opts.CutoffTime.IsZero() && !hasNewerFiles(f, opts.CutoffTime, opts.Exclude) {
+			if opts.Verbose {
+				WriteLogf("  %sℹ [omitido] '%s' no contiene cambios posteriores a %s%s\n", Blue, f, opts.CutoffTime.Format("2006-01-02 15:04:05"), NC)
+			}
+			continue
+		}
+		filtered = append(filtered, f)
+	}
+	return filtered
+}
+
+func collectAllNewerFiles(items []string, cutoff time.Time, exclude []string) []string {
+	var collected []string
+	for _, f := range items {
+		if c, err := collectNewerFiles(f, cutoff, exclude); err == nil {
+			collected = append(collected, c...)
+		}
+	}
+	return collected
+}
+
+func append7zExcludes(args, exclude []string) []string {
+	for _, excl := range exclude {
+		args = append(args, "-xr!"+excl)
+	}
+	return args
+}
+
+func appendZipExcludes(args, exclude []string) []string {
+	if len(exclude) == 0 {
+		return args
+	}
+	args = append(args, "-x")
+	for _, excl := range exclude {
+		args = append(args, "*/"+excl+"/*", "*/"+excl, excl)
+	}
+	return args
+}
+
+func appendRarExcludes(args, exclude []string) []string {
+	for _, excl := range exclude {
+		args = append(args, "-x*/"+excl+"/*", "-x*/"+excl, "-x"+excl)
+	}
+	return args
+}
+
+func appendTarFilterFlags(args []string, opts CompressOptions) []string {
+	for _, excl := range opts.Exclude {
+		args = append(args, "--exclude="+excl)
+	}
+	if !opts.CutoffTime.IsZero() {
+		args = append(args, "--newer-mtime="+opts.CutoffTime.Format("2006-01-02 15:04:05"))
+	}
+	return args
+}
+
+func safeFlagArg(p string) string {
+	if strings.HasPrefix(p, "-") {
+		return "./" + p
+	}
+	return p
+}
+
 func hasNewerFiles(item string, cutoff time.Time, exclude []string) bool {
 	if cutoff.IsZero() {
 		return true
@@ -111,7 +196,7 @@ func hasNewerFiles(item string, cutoff time.Time, exclude []string) bool {
 		return false
 	}
 	if !fi.IsDir() {
-		return fi.ModTime().After(cutoff)
+		return !isExcludedItem(item, exclude) && fi.ModTime().After(cutoff)
 	}
 
 	found := false
@@ -142,7 +227,7 @@ func collectNewerFiles(item string, cutoff time.Time, exclude []string) ([]strin
 		return nil, err
 	}
 	if !fi.IsDir() {
-		if cutoff.IsZero() || fi.ModTime().After(cutoff) {
+		if !isExcludedItem(item, exclude) && (cutoff.IsZero() || fi.ModTime().After(cutoff)) {
 			return []string{item}, nil
 		}
 		return nil, nil
@@ -326,34 +411,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		opts.Exclude = append(opts.Exclude, DefaultCleanExcludes...)
 	}
 
-	excludeFunc := func(name string) bool {
-		for _, pat := range opts.Exclude {
-			if matched, _ := filepath.Match(pat, filepath.Base(name)); matched {
-				return true
-			}
-			if matched, _ := filepath.Match(pat, name); matched {
-				return true
-			}
-		}
-		return false
-	}
-
-	var filteredFiles []string
-	for _, f := range files {
-		if excludeFunc(f) {
-			if opts.Verbose {
-				WriteLogf("  %sExcluido: %s%s\n", Yellow, f, NC)
-			}
-			continue
-		}
-		if !opts.CutoffTime.IsZero() && !hasNewerFiles(f, opts.CutoffTime, opts.Exclude) {
-			if opts.Verbose {
-				WriteLogf("  %sℹ [omitido] '%s' no contiene cambios posteriores a %s%s\n", Blue, f, opts.CutoffTime.Format("2006-01-02 15:04:05"), NC)
-			}
-			continue
-		}
-		filteredFiles = append(filteredFiles, f)
-	}
+	filteredFiles := filterCompressItems(files, opts)
 
 	if len(filteredFiles) == 0 {
 		if !opts.CutoffTime.IsZero() {
@@ -691,7 +749,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	WriteLogf("%s=============================%s\n", Green, NC)
 
 	CompressCleanupFiles = files
-	if !opts.KeepOrig && !opts.SkipCleanup {
+	if !opts.KeepOrig && !opts.SkipCleanup && opts.CutoffTime.IsZero() {
 		removed := removeFiles(files, opts.Verbose)
 		if removed > 0 {
 			WriteLogf("  %sArchivos originales eliminados: %d%s\n", Yellow, removed, NC)
@@ -810,13 +868,7 @@ func compressItems(files []string, outPath string, opts CompressOptions) error {
 
 	targetFiles := files
 	if !opts.CutoffTime.IsZero() {
-		var collected []string
-		for _, f := range files {
-			c, err := collectNewerFiles(f, opts.CutoffTime, opts.Exclude)
-			if err == nil {
-				collected = append(collected, c...)
-			}
-		}
+		collected := collectAllNewerFiles(files, opts.CutoffTime, opts.Exclude)
 		if len(collected) == 0 {
 			return nil
 		}
@@ -1326,7 +1378,7 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 			remaining := pendingTasks[t.File].Add(-1)
 			if remaining == 0 {
 				if _, failed := failedFiles.Load(t.File); !failed {
-					if !opts.KeepOrig && !opts.SkipCleanup {
+					if !opts.KeepOrig && !opts.SkipCleanup && opts.CutoffTime.IsZero() {
 						if err := os.RemoveAll(t.File); err == nil {
 							removedMu.Lock()
 							removedCount++
@@ -1450,17 +1502,11 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 	if opts.UseSparse() {
 		tarArgs = append(tarArgs, "--sparse")
 	}
-	for _, excl := range opts.Exclude {
-		tarArgs = append(tarArgs, "--exclude="+excl)
-	}
+	tarArgs = appendTarFilterFlags(tarArgs, opts)
 	if opts.ChunkSize > 0 {
 		tarArgs = append(tarArgs, "--record-size="+fmt.Sprintf("%dK", opts.ChunkSize))
 	}
-	if !opts.CutoffTime.IsZero() {
-		tarArgs = append(tarArgs, "--newer-mtime="+opts.CutoffTime.Format("2006-01-02 15:04:05"))
-	}
-	tarArgs = append(tarArgs, "--", "")
-	tarArgs = tarArgs[:len(tarArgs)-1] // remove trailing --
+	tarArgs = append(tarArgs, "--")
 	tarArgs = append(tarArgs, files...)
 
 	tarCmd := execCommand("tar", tarArgs...)
@@ -1557,13 +1603,13 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
 		}
+		args = append7zExcludes(args, opts.Exclude)
 		optFlags := strings.Fields(opts.CompressionOpts)
 		args = append(args, optFlags...)
-		args = append(args, outPath)
-		args = append(args, "--")
+		args = append(args, safeFlagArg(outPath), "--")
 		args = append(args, files...)
 
-		cmd := exec.Command(sevenz, args...)
+		cmd := execCommand(sevenz, args...)
 
 		if opts.Verbose {
 			WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
@@ -1581,10 +1627,12 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 	if opts.Password != "" {
 		args = append(args, "-P", opts.Password)
 	}
-	args = append(args, outPath)
+	args = append(args, safeFlagArg(outPath))
+	args = appendZipExcludes(args, opts.Exclude)
+	args = append(args, "--")
 	args = append(args, files...)
 
-	cmd := exec.Command("zip", args...)
+	cmd := execCommand("zip", args...)
 	cmd.Stdout = stdoutFor(opts.Progress)
 	cmd.Stderr = stderrFor(opts.Progress)
 
@@ -1648,10 +1696,10 @@ func build7zArgs(files []string, outPath string, opts CompressOptions, precalcSi
 	if opts.Password != "" {
 		args = append(args, "-p"+opts.Password, "-mhe=on")
 	}
+	args = append7zExcludes(args, opts.Exclude)
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
-	args = append(args, outPath)
-	args = append(args, "--")
+	args = append(args, safeFlagArg(outPath), "--")
 	args = append(args, files...)
 	return args
 }
@@ -1668,7 +1716,7 @@ func compress7z(files []string, outPath string, opts CompressOptions, fp *FilePr
 	}
 	args := build7zArgs(files, outPath, opts, fileSize)
 
-	cmd := exec.Command(sevenz, args...)
+	cmd := execCommand(sevenz, args...)
 
 	if opts.Verbose {
 		WriteLogf("  $ %s %s\n", sevenz, strings.Join(args, " "))
@@ -1686,12 +1734,7 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions, fp *
 	if opts.UseSparse() {
 		args = append(args, "--sparse")
 	}
-	for _, excl := range opts.Exclude {
-		args = append(args, "--exclude="+excl)
-	}
-	if !opts.CutoffTime.IsZero() {
-		args = append(args, "--newer-mtime="+opts.CutoffTime.Format("2006-01-02 15:04:05"))
-	}
+	args = appendTarFilterFlags(args, opts)
 	args = append(args, "--")
 	args = append(args, files...)
 
@@ -1716,16 +1759,16 @@ func compressRar(files []string, outPath string, opts CompressOptions, fp *FileP
 	if opts.Password != "" {
 		args = append(args, "-p"+opts.Password)
 	}
+	args = appendRarExcludes(args, opts.Exclude)
 	optFlags := strings.Fields(opts.CompressionOpts)
 	args = append(args, optFlags...)
-	if !opts.KeepOrig {
+	if !opts.KeepOrig && !opts.SkipCleanup && opts.CutoffTime.IsZero() && len(opts.Formats) <= 1 {
 		args = append(args, "-df")
 	}
-	args = append(args, outPath)
-	args = append(args, "--")
+	args = append(args, safeFlagArg(outPath), "--")
 	args = append(args, files...)
 
-	cmd := exec.Command(rar, args...)
+	cmd := execCommand(rar, args...)
 	cmd.Stdout = stdoutFor(opts.Progress)
 	cmd.Stderr = stderrFor(opts.Progress)
 
@@ -1867,6 +1910,25 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		return fmt.Errorf("no se pudo determinar el formato de %s: %w", archive, err)
 	}
 
+	filteredItems := filterCompressItems(items, opts)
+	if len(filteredItems) == 0 {
+		if !opts.CutoffTime.IsZero() {
+			WriteLogf("%sℹ No se encontraron archivos modificados después de %s para agregar.%s\n", Blue, opts.CutoffTime.Format("2006-01-02 15:04:05"), NC)
+			return nil
+		}
+		return fmt.Errorf("todos los archivos fueron excluidos")
+	}
+	items = filteredItems
+
+	containerItems := items
+	if !opts.CutoffTime.IsZero() && (info.Format == Zip || info.Format == SevenZ || info.Format == Rar) {
+		containerItems = collectAllNewerFiles(items, opts.CutoffTime, opts.Exclude)
+		if len(containerItems) == 0 {
+			WriteLogf("%sℹ No se encontraron archivos modificados después de %s para agregar.%s\n", Blue, opts.CutoffTime.Format("2006-01-02 15:04:05"), NC)
+			return nil
+		}
+	}
+
 	if opts.Password != "" {
 		GetPasswordManager().AddSuccessful(opts.Password)
 	}
@@ -1879,9 +1941,10 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 			if opts.Password != "" {
 				args = append(args, "-p"+opts.Password)
 			}
-			args = append(args, archive)
-			args = append(args, items...)
-			cmd := exec.Command(sevenz, args...)
+			args = append7zExcludes(args, opts.Exclude)
+			args = append(args, safeFlagArg(archive), "--")
+			args = append(args, containerItems...)
+			cmd := execCommand(sevenz, args...)
 			cmd.Stdout = stdoutFor(opts.Progress)
 			cmd.Stderr = stderrFor(opts.Progress)
 			if err := augmentErr(cmd, cmd.Run()); err != nil {
@@ -1892,9 +1955,11 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 			if opts.Password != "" {
 				args = append(args, "-P", opts.Password)
 			}
-			args = append(args, archive)
-			args = append(args, items...)
-			cmd := exec.Command("zip", args...)
+			args = append(args, safeFlagArg(archive))
+			args = appendZipExcludes(args, opts.Exclude)
+			args = append(args, "--")
+			args = append(args, containerItems...)
+			cmd := execCommand("zip", args...)
 			cmd.Stdout = stdoutFor(opts.Progress)
 			cmd.Stderr = stderrFor(opts.Progress)
 			if err := augmentErr(cmd, cmd.Run()); err != nil {
@@ -1914,9 +1979,10 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 			args = append(args, "-p"+opts.Password)
 			args = append(args, "-mhe=on")
 		}
-		args = append(args, archive)
-		args = append(args, items...)
-		cmd := exec.Command(sevenz, args...)
+		args = append7zExcludes(args, opts.Exclude)
+		args = append(args, safeFlagArg(archive), "--")
+		args = append(args, containerItems...)
+		cmd := execCommand(sevenz, args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		if err := augmentErr(cmd, cmd.Run()); err != nil {
@@ -1932,9 +1998,10 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
 		}
-		args = append(args, archive)
-		args = append(args, items...)
-		cmd := exec.Command(tool, args...)
+		args = appendRarExcludes(args, opts.Exclude)
+		args = append(args, safeFlagArg(archive), "--")
+		args = append(args, containerItems...)
+		cmd := execCommand(tool, args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
 		if err := augmentErr(cmd, cmd.Run()); err != nil {
@@ -1946,6 +2013,8 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		if opts.UseSparse() {
 			args = append(args, "--sparse")
 		}
+		args = appendTarFilterFlags(args, opts)
+		args = append(args, "--")
 		args = append(args, items...)
 		cmd := execCommand("tar", args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
@@ -1978,6 +2047,8 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		if opts.UseSparse() {
 			tarArgs = append(tarArgs, "--sparse")
 		}
+		tarArgs = appendTarFilterFlags(tarArgs, opts)
+		tarArgs = append(tarArgs, "--")
 		tarArgs = append(tarArgs, items...)
 		tarCmd := execCommand("tar", tarArgs...)
 		tarCmd.Stdout = stdoutFor(opts.Progress)

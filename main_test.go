@@ -893,6 +893,26 @@ func TestMainIncrementalCLI(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outDirRef, "file_old.txt.gz")); err == nil {
 		t.Errorf("file_old.txt.gz no debió existir en out_ref")
 	}
+
+	// 5. --newer sin -k NO debe eliminar archivos origen
+	projNoK := filepath.Join(tmpDir, "proj_nok")
+	_ = os.MkdirAll(projNoK, 0755)
+	oldInProj := filepath.Join(projNoK, "old.txt")
+	newInProj := filepath.Join(projNoK, "new.txt")
+	_ = os.WriteFile(oldInProj, []byte("old"), 0644)
+	_ = os.WriteFile(newInProj, []byte("new"), 0644)
+	_ = os.Chtimes(oldInProj, tOld, tOld)
+	_ = os.Chtimes(newInProj, tNew, tNew)
+
+	outDirNoK := filepath.Join(tmpDir, "out_nok")
+	_ = os.MkdirAll(outDirNoK, 0755)
+	cmdNoK := exec.Command(binPath, "-c", "-f", "gz", "--newer", "24h", "-o", outDirNoK, projNoK)
+	if outNoK, err := cmdNoK.CombinedOutput(); err != nil {
+		t.Fatalf("crush -c --newer sin -k falló: %v\n%s", err, outNoK)
+	}
+	if _, err := os.Stat(oldInProj); err != nil {
+		t.Errorf("old.txt fue eliminado tras --newer sin -k: %v", err)
+	}
 }
 
 

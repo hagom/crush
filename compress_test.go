@@ -2878,6 +2878,208 @@ func TestCompressIncremental_ReferenceFile(t *testing.T) {
 	}
 }
 
+func TestCompressIncremental_PreservesSourcesWithoutKeepOrig(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+	cutoff := now.Add(-24 * time.Hour)
+
+	projDir := filepath.Join(tmpDir, "proj")
+	_ = os.MkdirAll(projDir, 0755)
+	fOld := filepath.Join(projDir, "old.txt")
+	fNew := filepath.Join(projDir, "new.txt")
+	_ = os.WriteFile(fOld, []byte("old baseline"), 0644)
+	_ = os.WriteFile(fNew, []byte("new delta"), 0644)
+	_ = os.Chtimes(fOld, now.Add(-72*time.Hour), now.Add(-72*time.Hour))
+	_ = os.Chtimes(fNew, now.Add(-1*time.Hour), now.Add(-1*time.Hour))
+
+	outDir := filepath.Join(tmpDir, "out")
+	_, err := DoCompress([]string{projDir}, CompressOptions{
+		Format:     Gz,
+		OutputDir:  outDir,
+		KeepOrig:   false,
+		CutoffTime: cutoff,
+	})
+	if err != nil {
+		t.Fatalf("DoCompress incremental failed: %v", err)
+	}
+	if _, err := os.Stat(fOld); err != nil {
+		t.Errorf("source old.txt was deleted on incremental backup without -k: %v", err)
+	}
+	if _, err := os.Stat(fNew); err != nil {
+		t.Errorf("source new.txt was deleted on incremental backup without -k: %v", err)
+	}
+
+	singleOld := filepath.Join(tmpDir, "single_old.txt")
+	singleNew := filepath.Join(tmpDir, "single_new.txt")
+	_ = os.WriteFile(singleOld, []byte("old"), 0644)
+	_ = os.WriteFile(singleNew, []byte("new"), 0644)
+	_ = os.Chtimes(singleOld, now.Add(-72*time.Hour), now.Add(-72*time.Hour))
+	_ = os.Chtimes(singleNew, now.Add(-1*time.Hour), now.Add(-1*time.Hour))
+
+	_, err = DoCompress([]string{singleOld, singleNew}, CompressOptions{
+		Format:     Gz,
+		OutputDir:  outDir,
+		Combine:    true,
+		KeepOrig:   false,
+		CutoffTime: cutoff,
+	})
+	if err != nil {
+		t.Fatalf("DoCompress combined incremental failed: %v", err)
+	}
+	if _, err := os.Stat(singleOld); err != nil {
+		t.Errorf("combined incremental deleted old file without -k: %v", err)
+	}
+	if _, err := os.Stat(singleNew); err != nil {
+		t.Errorf("combined incremental deleted new file without -k: %v", err)
+	}
+}
+
+func TestCompressRar_SkipsDfWhenUnsafeAndUsesExecCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "data.txt")
+	_ = os.WriteFile(src, []byte("rar payload"), 0644)
+	outRar := filepath.Join(tmpDir, "out.rar")
+
+	var captured [][]string
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		captured = append(captured, append([]string{name}, args...))
+		return mockExecCommand("mock-noop")
+	}
+
+	cases := []struct {
+		name string
+		opts CompressOptions
+	}{
+		{"SkipCleanup", CompressOptions{Format: Rar, KeepOrig: false, SkipCleanup: true}},
+		{"MultiFormat", CompressOptions{Format: Rar, Formats: []Format{Rar, Zip}, KeepOrig: false}},
+		{"CutoffTime", CompressOptions{Format: Rar, KeepOrig: false, CutoffTime: time.Now().Add(-time.Hour)}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captured = nil
+			if err := compressRar([]string{src}, outRar, tc.opts, nil); err != nil {
+				t.Fatalf("compressRar failed: %v", err)
+			}
+			if len(captured) == 0 {
+				t.Fatalf("compressRar did not invoke execCommand (likely hardcoded exec.Command)")
+			}
+			for _, arg := range captured[0] {
+				if arg == "-df" {
+					t.Errorf("compressRar passed -df in unsafe mode %s: %v", tc.name, captured[0])
+				}
+			}
+		})
+	}
+}
+
+func TestCompressContainers_RespectExclude(t *testing.T) {
+	for _, fmtType := range []Format{SevenZ, Zip} {
+		t.Run(fmtType.String(), func(t *testing.T) {
+			if fmtType == SevenZ && !hasTool(sevenzBin()) {
+				t.Skip("7z not available")
+			}
+			tmpDir := t.TempDir()
+			proj := filepath.Join(tmpDir, "repo")
+			_ = os.MkdirAll(filepath.Join(proj, ".git"), 0755)
+			_ = os.WriteFile(filepath.Join(proj, "keep.txt"), []byte("keep"), 0644)
+			_ = os.WriteFile(filepath.Join(proj, "debug.log"), []byte("skip log"), 0644)
+			_ = os.WriteFile(filepath.Join(proj, ".git", "config"), []byte("gitcfg"), 0644)
+
+			outDir := filepath.Join(tmpDir, "out")
+			out, err := DoCompress([]string{proj}, CompressOptions{
+				Format:    fmtType,
+				OutputDir: outDir,
+				KeepOrig:  true,
+				Clean:     true,
+				Exclude:   []string{"*.log"},
+			})
+			if err != nil {
+				t.Fatalf("DoCompress %s failed: %v", fmtType, err)
+			}
+			members, err := ListArchiveMembers(out[0], "")
+			if err != nil {
+				t.Fatalf("ListArchiveMembers failed: %v", err)
+			}
+			var paths []string
+			for _, m := range members {
+				paths = append(paths, m.Path)
+			}
+			joined := strings.Join(paths, "\n")
+			if !strings.Contains(joined, "keep.txt") {
+				t.Errorf("%s archive missing keep.txt: %v", fmtType, paths)
+			}
+			if strings.Contains(joined, "debug.log") || strings.Contains(joined, ".git") {
+				t.Errorf("%s archive included excluded files: %v", fmtType, paths)
+			}
+		})
+	}
+}
+
+func TestDoAppend_RespectsExcludeAndCutoff(t *testing.T) {
+	now := time.Now()
+	cutoff := now.Add(-24 * time.Hour)
+
+	for _, fmtType := range []Format{Zip, SevenZ, Gz} {
+		t.Run(fmtType.String(), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			initFile := filepath.Join(tmpDir, "init.txt")
+			_ = os.WriteFile(initFile, []byte("initial"), 0644)
+
+			out, err := DoCompress([]string{initFile}, CompressOptions{
+				Format:    fmtType,
+				OutputDir: tmpDir,
+				Combine:   fmtType == Gz,
+				KeepOrig:  true,
+			})
+			if err != nil {
+				t.Fatalf("initial compress failed: %v", err)
+			}
+			archive := out[0]
+
+			addDir := filepath.Join(tmpDir, "bundle")
+			_ = os.MkdirAll(addDir, 0755)
+			fNewKeep := filepath.Join(addDir, "new.txt")
+			fOldSkip := filepath.Join(addDir, "old.txt")
+			fLogSkip := filepath.Join(addDir, "skip.log")
+			_ = os.WriteFile(fNewKeep, []byte("fresh"), 0644)
+			_ = os.WriteFile(fOldSkip, []byte("ancient"), 0644)
+			_ = os.WriteFile(fLogSkip, []byte("log data"), 0644)
+			_ = os.Chtimes(fOldSkip, now.Add(-72*time.Hour), now.Add(-72*time.Hour))
+			_ = os.Chtimes(fNewKeep, now.Add(-1*time.Hour), now.Add(-1*time.Hour))
+			_ = os.Chtimes(fLogSkip, now.Add(-1*time.Hour), now.Add(-1*time.Hour))
+
+			if err := DoAppend(archive, []string{addDir}, CompressOptions{
+				Exclude:    []string{"*.log"},
+				CutoffTime: cutoff,
+			}); err != nil {
+				t.Fatalf("DoAppend failed: %v", err)
+			}
+
+			members, err := ListArchiveMembers(archive, "")
+			if err != nil {
+				t.Fatalf("ListArchiveMembers failed: %v", err)
+			}
+			var paths []string
+			for _, m := range members {
+				paths = append(paths, m.Path)
+			}
+			joined := strings.Join(paths, "\n")
+			if !strings.Contains(joined, "new.txt") {
+				t.Errorf("%s DoAppend missing new.txt: %v", fmtType, paths)
+			}
+			if strings.Contains(joined, "old.txt") {
+				t.Errorf("%s DoAppend included old.txt despite CutoffTime: %v", fmtType, paths)
+			}
+			if strings.Contains(joined, "skip.log") {
+				t.Errorf("%s DoAppend included skip.log despite Exclude: %v", fmtType, paths)
+			}
+		})
+	}
+}
+
 
 
 

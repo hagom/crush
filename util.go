@@ -2240,6 +2240,9 @@ func ParseCutoffTime(newerStr, newerThanFile string, now time.Time) (time.Time, 
 
 	// Try standard Go duration (e.g. "24h", "30m", "1h30m")
 	if dur, err := time.ParseDuration(trimmed); err == nil {
+		if dur <= 0 {
+			return time.Time{}, fmt.Errorf("la duración para --newer debe ser positiva: %q", newerStr)
+		}
 		return now.Add(-dur), nil
 	}
 

@@ -678,6 +678,7 @@ func main() {
 			Hash:            *hashFlag,
 			ThreadLimit:     effectiveThreads,
 			Clean:           *cleanFlag,
+			Exclude:         exclude,
 			CutoffTime:      cutoffTime,
 			CompressionOpts: *compressionOpts,
 		}
@@ -924,7 +925,7 @@ func main() {
 		if parallel < 2 {
 			parallel = 2
 		}
-		// When -c -t, defer deletion until after the test to prevent data loss
+		// When -c -t or incremental --newer, keep source files to prevent data loss
 		skipCleanup := (*testFlag || *verifyFlag) && !*keepOrig
 		opts := CompressOptions{
 			Format:          formats[0],
@@ -933,7 +934,7 @@ func main() {
 			Verbose:         *verbose,
 			OutputDir:       *outputDir,
 			SplitSize:       *splitSize,
-			KeepOrig:        *keepOrig || skipCleanup,
+			KeepOrig:        *keepOrig || skipCleanup || !cutoffTime.IsZero(),
 			Parallel:        parallel,
 			CompressionOpts: *compressionOpts,
 			Exclude:         exclude,

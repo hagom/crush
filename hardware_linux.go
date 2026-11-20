@@ -30,38 +30,23 @@ func IsRotational(path string) bool {
 
 func isRotationalLinux(absPath, mountinfoFile, sysfsDir string) bool {
 	useCache := (mountinfoFile == defaultMountinfo && sysfsDir == defaultSysfsBlock)
-	if useCache {
-		if val, ok := rotationalCache.Load(absPath); ok {
-			return val.(bool)
-		}
-	}
 
+	// ponytail: cache only by mountPoint so rotationalCache stays O(mounts), never O(paths).
 	mountPoint, devSource := findMountForPath(absPath, mountinfoFile)
 	if mountPoint != "" && useCache {
 		if val, ok := rotationalCache.Load(mountPoint); ok {
-			rotationalCache.Store(absPath, val)
 			return val.(bool)
 		}
 	}
 
-	if devSource == "" || !strings.HasPrefix(devSource, "/dev/") {
-		if useCache {
-			rotationalCache.Store(absPath, false)
-			if mountPoint != "" {
-				rotationalCache.Store(mountPoint, false)
-			}
-		}
-		return false
+	isRot := false
+	if strings.HasPrefix(devSource, "/dev/") {
+		devName := strings.TrimPrefix(devSource, "/dev/")
+		isRot = checkSysfsRotational(devName, sysfsDir)
 	}
 
-	devName := strings.TrimPrefix(devSource, "/dev/")
-	isRot := checkSysfsRotational(devName, sysfsDir)
-
-	if useCache {
-		rotationalCache.Store(absPath, isRot)
-		if mountPoint != "" {
-			rotationalCache.Store(mountPoint, isRot)
-		}
+	if mountPoint != "" && useCache {
+		rotationalCache.Store(mountPoint, isRot)
 	}
 	return isRot
 }

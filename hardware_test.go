@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -112,5 +114,161 @@ func TestIsRotational_LiveHost(t *testing.T) {
 		if r1 != r2 {
 			t.Errorf("IsRotational(%q) resultado inconsistente entre llamadas: %v vs %v", p, r1, r2)
 		}
+	}
+}
+
+func clearRotationalCache() {
+	rotationalCache.Range(func(key, _ any) bool {
+		rotationalCache.Delete(key)
+		return true
+	})
+}
+
+func countRotationalCacheEntries() (int, map[string]bool) {
+	entries := make(map[string]bool)
+	rotationalCache.Range(func(key, value any) bool {
+		entries[key.(string)] = value.(bool)
+		return true
+	})
+	return len(entries), entries
+}
+
+func TestIsRotationalLinux_CachesOnlyByMountPoint(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	devicesDir := filepath.Join(tmpDir, "devices")
+	sysfsDir := filepath.Join(tmpDir, "sys_class_block")
+	if err := os.MkdirAll(sysfsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	makeBlockDev := func(disk, part, rot string) string {
+		devDir := filepath.Join(devicesDir, disk)
+		if err := os.MkdirAll(filepath.Join(devDir, "queue"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		rotFile := filepath.Join(devDir, "queue", "rotational")
+		if err := os.WriteFile(rotFile, []byte(rot+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		target := devDir
+		name := disk
+		if part != "" {
+			target = filepath.Join(devDir, part)
+			if err := os.MkdirAll(target, 0755); err != nil {
+				t.Fatal(err)
+			}
+			name = part
+		}
+		if err := os.Symlink(target, filepath.Join(sysfsDir, name)); err != nil {
+			t.Fatal(err)
+		}
+		return rotFile
+	}
+
+	hddRotFile := makeBlockDev("sda", "sda1", "1")
+	makeBlockDev("nvme0n1", "nvme0n1p1", "0")
+
+	mountinfoPath := filepath.Join(tmpDir, "mountinfo")
+	mountinfoContent := `31 35 0:27 / /run rw,nosuid,nodev,noexec,relatime shared:5 - tmpfs tmpfs rw
+62 35 0:50 / /mnt/ssd rw,noatime shared:115 - ext4 /dev/nvme0n1p1 rw
+179 35 0:48 / /mnt/hdd rw,noatime shared:352 - ext4 /dev/sda1 rw
+`
+	if err := os.WriteFile(mountinfoPath, []byte(mountinfoContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origMountinfo := defaultMountinfo
+	origSysfs := defaultSysfsBlock
+	defaultMountinfo = mountinfoPath
+	defaultSysfsBlock = sysfsDir
+	clearRotationalCache()
+	t.Cleanup(func() {
+		defaultMountinfo = origMountinfo
+		defaultSysfsBlock = origSysfs
+		clearRotationalCache()
+	})
+
+	tests := []struct {
+		name      string
+		paths     []string
+		wantRot   bool
+		wantMount string
+	}{
+		{
+			name:      "many paths under HDD mount",
+			paths:     []string{"/mnt/hdd/a.txt", "/mnt/hdd/sub/b.bin", "/mnt/hdd/sub/deep/c.tar", "/mnt/hdd/other/d.log"},
+			wantRot:   true,
+			wantMount: "/mnt/hdd",
+		},
+		{
+			name:      "many paths under SSD mount",
+			paths:     []string{"/mnt/ssd/x.txt", "/mnt/ssd/dir/y.go", "/mnt/ssd/dir/z.json"},
+			wantRot:   false,
+			wantMount: "/mnt/ssd",
+		},
+		{
+			name:      "non-dev tmpfs mount",
+			paths:     []string{"/run/a.sock", "/run/user/1000/b.pid"},
+			wantRot:   false,
+			wantMount: "/run",
+		},
+		{
+			name:      "paths outside known mounts",
+			paths:     []string{"/unmounted/file1", "/unmounted/dir/file2"},
+			wantRot:   false,
+			wantMount: "",
+		},
+	}
+
+	wantCachedMounts := make(map[string]bool)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, p := range tc.paths {
+				got := isRotationalLinux(p, defaultMountinfo, defaultSysfsBlock)
+				if got != tc.wantRot {
+					t.Errorf("isRotationalLinux(%q) = %v, want %v", p, got, tc.wantRot)
+				}
+				if _, ok := rotationalCache.Load(p); ok {
+					t.Errorf("rotationalCache must not store individual path %q", p)
+				}
+			}
+			if tc.wantMount != "" {
+				wantCachedMounts[tc.wantMount] = tc.wantRot
+			}
+		})
+	}
+
+	gotCount, gotEntries := countRotationalCacheEntries()
+	if gotCount != len(wantCachedMounts) {
+		t.Fatalf("rotationalCache has %d entries (%v), want %d (%v)", gotCount, gotEntries, len(wantCachedMounts), wantCachedMounts)
+	}
+	for mount, wantVal := range wantCachedMounts {
+		gotVal, ok := gotEntries[mount]
+		if !ok || gotVal != wantVal {
+			t.Errorf("rotationalCache[%q] = (%v, %v), want (%v, true)", mount, gotVal, ok, wantVal)
+		}
+	}
+
+	if err := os.Remove(hddRotFile); err != nil {
+		t.Fatal(err)
+	}
+	const numConcurrent = 32
+	var wg sync.WaitGroup
+	for i := 0; i < numConcurrent; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			p := fmt.Sprintf("/mnt/hdd/batch/file_%d.dat", idx)
+			if !isRotationalLinux(p, defaultMountinfo, defaultSysfsBlock) {
+				t.Errorf("isRotationalLinux(%q) = false, want cached true", p)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	afterCount, afterEntries := countRotationalCacheEntries()
+	if afterCount != len(wantCachedMounts) {
+		t.Errorf("after %d distinct paths, rotationalCache grew to %d entries (%v), want %d", numConcurrent, afterCount, afterEntries, len(wantCachedMounts))
 	}
 }

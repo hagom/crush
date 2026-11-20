@@ -8,9 +8,6 @@ import (
 	"strings"
 )
 
-// DoList lista de forma visual y legible para humanos el contenido
-// de un archivo comprimido, formateando tamaños métricos, permisos,
-// fecha/hora y nombre, junto con resumen de compresión.
 func DoList(archivePath string, password string, out io.Writer) error {
 	if out == nil {
 		out = os.Stdout
@@ -29,62 +26,95 @@ func DoList(archivePath string, password string, out io.Writer) error {
 		return fmt.Errorf("detectando formato de %s: %w", archivePath, err)
 	}
 
-	members, err := ListArchiveMembers(archivePath, password)
-	if err != nil {
-		return err
-	}
-
-	return RenderListTable(archivePath, members, info, fi, out)
-}
-
-// RenderListTable formatea e imprime la tabla de listado en formato human-readable.
-func RenderListTable(archivePath string, members []ArchiveMember, info FormatInfo, fi os.FileInfo, out io.Writer) error {
-	base := filepath.Base(archivePath)
-	compSizeStr := FormatSize(fi.Size())
-	formatName := info.Format.String()
-
-	// Encabezado
-	fmt.Fprintf(out, "\n%s=== Contenido: %s (%s, %s) ===%s\n\n", Bold, base, formatName, compSizeStr, NC)
-	fmt.Fprintf(out, "  %-12s %10s  %-16s  %s\n", "Permisos", "Tamaño", "Fecha / Hora", "Nombre")
-	fmt.Fprintf(out, "  %s\n", strings.Repeat("─", 78))
-
 	var totalUncompressed int64
 	var fileCount, dirCount int
+	headerWritten := false
 
-	for _, m := range members {
-		modeStr := "-rw-r--r--"
+	err = IterArchiveMembers(archivePath, password, func(m ArchiveMember) error {
+		if !headerWritten {
+			writeListHeader(out, archivePath, info, fi)
+			headerWritten = true
+		}
 		if m.IsDir {
-			modeStr = "drwxr-xr-x"
 			dirCount++
 		} else {
 			fileCount++
 			totalUncompressed += m.Size
 		}
-		if m.Mode != 0 {
-			modeStr = m.Mode.String()
-		}
-
-		sizeStr := "-"
-		if !m.IsDir {
-			sizeStr = FormatSize(m.Size)
-		}
-
-		dateStr := "                "
-		if !m.Modified.IsZero() {
-			dateStr = m.Modified.Format("2006-01-02 15:04")
-		}
-
-		displayPath := m.Path
-		if m.IsDir {
-			displayPath = Blue + Bold + m.Path + NC
-		}
-
-		fmt.Fprintf(out, "  %-12s %10s  %-16s  %s\n", modeStr, sizeStr, dateStr, displayPath)
+		writeListRow(out, m)
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
+	if !headerWritten {
+		writeListHeader(out, archivePath, info, fi)
+	}
+	writeListFooter(out, fileCount, dirCount, totalUncompressed, fi.Size())
+	return nil
+}
+
+func RenderListTable(archivePath string, members []ArchiveMember, info FormatInfo, fi os.FileInfo, out io.Writer) error {
+	writeListHeader(out, archivePath, info, fi)
+
+	var totalUncompressed int64
+	var fileCount, dirCount int
+
+	for _, m := range members {
+		if m.IsDir {
+			dirCount++
+		} else {
+			fileCount++
+			totalUncompressed += m.Size
+		}
+		writeListRow(out, m)
+	}
+
+	writeListFooter(out, fileCount, dirCount, totalUncompressed, fi.Size())
+	return nil
+}
+
+func writeListHeader(out io.Writer, archivePath string, info FormatInfo, fi os.FileInfo) {
+	base := filepath.Base(archivePath)
+	compSizeStr := FormatSize(fi.Size())
+	formatName := info.Format.String()
+
+	fmt.Fprintf(out, "\n%s=== Contenido: %s (%s, %s) ===%s\n\n", Bold, base, formatName, compSizeStr, NC)
+	fmt.Fprintf(out, "  %-12s %10s  %-16s  %s\n", "Permisos", "Tamaño", "Fecha / Hora", "Nombre")
+	fmt.Fprintf(out, "  %s\n", strings.Repeat("─", 78))
+}
+
+func writeListRow(out io.Writer, m ArchiveMember) {
+	modeStr := "-rw-r--r--"
+	if m.IsDir {
+		modeStr = "drwxr-xr-x"
+	}
+	if m.Mode != 0 {
+		modeStr = m.Mode.String()
+	}
+
+	sizeStr := "-"
+	if !m.IsDir {
+		sizeStr = FormatSize(m.Size)
+	}
+
+	dateStr := "                "
+	if !m.Modified.IsZero() {
+		dateStr = m.Modified.Format("2006-01-02 15:04")
+	}
+
+	displayPath := m.Path
+	if m.IsDir {
+		displayPath = Blue + Bold + m.Path + NC
+	}
+
+	fmt.Fprintf(out, "  %-12s %10s  %-16s  %s\n", modeStr, sizeStr, dateStr, displayPath)
+}
+
+func writeListFooter(out io.Writer, fileCount, dirCount int, totalUncompressed, compSize int64) {
 	fmt.Fprintf(out, "  %s\n", strings.Repeat("─", 78))
 
-	// Resumen de pie
 	var summaryParts []string
 	if fileCount == 1 {
 		summaryParts = append(summaryParts, "1 archivo")
@@ -101,16 +131,14 @@ func RenderListTable(archivePath string, members []ArchiveMember, info FormatInf
 
 	ratioStr := ""
 	if totalUncompressed > 0 {
-		savings := float64(totalUncompressed-fi.Size()) / float64(totalUncompressed) * 100
+		savings := float64(totalUncompressed-compSize) / float64(totalUncompressed) * 100
 		if savings > 0 {
 			ratioStr = fmt.Sprintf(" (Ahorro: %.1f%%)", savings)
 		} else {
-			ratioStr = fmt.Sprintf(" (Ratio: %.1f%%)", float64(fi.Size())/float64(totalUncompressed)*100)
+			ratioStr = fmt.Sprintf(" (Ratio: %.1f%%)", float64(compSize)/float64(totalUncompressed)*100)
 		}
 	}
 
 	fmt.Fprintf(out, "  %s%s | Total sin comprimir: %s%s%s\n\n",
 		Green+Bold, strings.Join(summaryParts, ", "), FormatSize(totalUncompressed), ratioStr, NC)
-
-	return nil
 }

@@ -40,16 +40,10 @@ func DoFind(pattern string, files []string, password string, out io.Writer) (int
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			members, err := ListArchiveMembers(path, password)
-			if err != nil {
-				results[idx] = findResult{archive: path, err: err}
-				return
-			}
-
 			var matches []ArchiveMember
-			for _, m := range members {
+			err := IterArchiveMembers(path, password, func(m ArchiveMember) error {
 				if m.IsDir {
-					continue
+					return nil
 				}
 				mPathLower := strings.ToLower(m.Path)
 				baseLower := strings.ToLower(filepath.Base(m.Path))
@@ -66,6 +60,11 @@ func DoFind(pattern string, files []string, password string, out io.Writer) (int
 				if matched {
 					matches = append(matches, m)
 				}
+				return nil
+			})
+			if err != nil {
+				results[idx] = findResult{archive: path, err: err}
+				return
 			}
 			results[idx] = findResult{archive: path, matches: matches}
 		}(i, file)

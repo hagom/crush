@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,5 +106,150 @@ func TestDoList_Errors(t *testing.T) {
 	var buf2 bytes.Buffer
 	if err := DoList(tmpDir, "", &buf2); err == nil || !strings.Contains(err.Error(), "es un directorio") {
 		t.Errorf("esperado error 'es un directorio', obtenido: %v", err)
+	}
+
+	// 3. Formato desconocido no escribe encabezado huérfano
+	unknown := filepath.Join(tmpDir, "data.unknown")
+	_ = os.WriteFile(unknown, []byte("x"), 0644)
+	var buf3 bytes.Buffer
+	if err := DoList(unknown, "", &buf3); err == nil {
+		t.Errorf("esperado error por formato desconocido")
+	}
+	if buf3.Len() != 0 {
+		t.Errorf("no debía escribir salida en error de formato, escribió: %q", buf3.String())
+	}
+}
+
+func TestDoList_MatchesRenderListTable(t *testing.T) {
+	tmpDir := t.TempDir()
+	mod := time.Date(2026, 6, 15, 9, 30, 0, 0, time.UTC)
+
+	tarPath := filepath.Join(tmpDir, "multi.tar")
+	{
+		f, _ := os.Create(tarPath)
+		tw := tar.NewWriter(f)
+		_ = tw.WriteHeader(&tar.Header{Name: "src/", Typeflag: tar.TypeDir, Mode: 0755, ModTime: mod})
+		_ = tw.WriteHeader(&tar.Header{Name: "src/a.txt", Typeflag: tar.TypeReg, Mode: 0644, Size: 2048, ModTime: mod})
+		_, _ = tw.Write(bytes.Repeat([]byte("x"), 2048))
+		_ = tw.WriteHeader(&tar.Header{Name: "src/b.txt", Typeflag: tar.TypeReg, Mode: 0644, Size: 512, ModTime: mod})
+		_, _ = tw.Write(bytes.Repeat([]byte("y"), 512))
+		_ = tw.Close()
+		_ = f.Close()
+	}
+
+	emptyTar := filepath.Join(tmpDir, "empty.tar")
+	{
+		f, _ := os.Create(emptyTar)
+		tw := tar.NewWriter(f)
+		_ = tw.Close()
+		_ = f.Close()
+	}
+
+	tarGzPath := filepath.Join(tmpDir, "bundle.tar.gz")
+	{
+		f, _ := os.Create(tarGzPath)
+		gw := gzip.NewWriter(f)
+		tw := tar.NewWriter(gw)
+		_ = tw.WriteHeader(&tar.Header{Name: "README.md", Typeflag: tar.TypeReg, Mode: 0644, Size: 100, ModTime: mod})
+		_, _ = tw.Write(bytes.Repeat([]byte("z"), 100))
+		_ = tw.Close()
+		_ = gw.Close()
+		_ = f.Close()
+	}
+
+	zipPath := filepath.Join(tmpDir, "pack.zip")
+	{
+		f, _ := os.Create(zipPath)
+		zw := zip.NewWriter(f)
+		w, _ := zw.Create("note.txt")
+		_, _ = w.Write([]byte("hello zip"))
+		_ = zw.Close()
+		_ = f.Close()
+	}
+
+	gzPath := filepath.Join(tmpDir, "single.log.gz")
+	{
+		f, _ := os.Create(gzPath)
+		gw := gzip.NewWriter(f)
+		_, _ = gw.Write([]byte("single stream body"))
+		_ = gw.Close()
+		_ = f.Close()
+	}
+
+	cases := []string{tarPath, emptyTar, tarGzPath, zipPath, gzPath}
+	for _, p := range cases {
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			fi, err := os.Stat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := DetectFormat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			members, err := ListArchiveMembers(p, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var want bytes.Buffer
+			if err := RenderListTable(p, members, info, fi, &want); err != nil {
+				t.Fatal(err)
+			}
+
+			var got bytes.Buffer
+			if err := DoList(p, "", &got); err != nil {
+				t.Fatalf("DoList(%s) failed: %v", p, err)
+			}
+
+			if got.String() != want.String() {
+				t.Errorf("DoList output differs from RenderListTable:\ngot:\n%s\nwant:\n%s", got.String(), want.String())
+			}
+		})
+	}
+}
+
+type streamingGateWriter struct {
+	buf      bytes.Buffer
+	gateFile string
+	opened   bool
+}
+
+func (w *streamingGateWriter) Write(p []byte) (int, error) {
+	n, err := w.buf.Write(p)
+	if !w.opened && strings.Contains(w.buf.String(), "first.txt") {
+		w.opened = true
+		_ = os.WriteFile(w.gateFile, []byte("ok"), 0644)
+	}
+	return n, err
+}
+
+func TestDoList_StreamsRowsIncrementally(t *testing.T) {
+	origExec := execCommand
+	origLook := lookPath
+	defer func() {
+		execCommand = origExec
+		lookPath = origLook
+	}()
+	lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+	tmpDir := t.TempDir()
+	fake7z := filepath.Join(tmpDir, "stream.7z")
+	if err := os.WriteFile(fake7z, []byte("fake7z"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gateFile := filepath.Join(tmpDir, "gate")
+
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return streamListMockCmd("7z-slt-gate", gateFile)
+	}
+
+	spy := &streamingGateWriter{gateFile: gateFile}
+	if err := DoList(fake7z, "", spy); err != nil {
+		t.Fatalf("DoList failed: %v", err)
+	}
+	out := spy.buf.String()
+	if strings.Contains(out, "buffered_timeout.txt") || !strings.Contains(out, "second.txt") {
+		t.Fatalf("DoList buffered entire archive instead of streaming rows incrementally:\n%s", out)
 	}
 }

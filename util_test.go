@@ -2656,6 +2656,427 @@ func TestGetMemLimit_TTLCache(t *testing.T) {
 	})
 }
 
+func TestLimitedBuffer_AndAugmentErr(t *testing.T) {
+	tests := []struct {
+		name          string
+		maxBytes      int
+		writes        []string
+		wantSubstr    string
+		wantTruncated bool
+		wantExact     string
+		wantLen       int
+	}{
+		{
+			name:      "empty writes",
+			maxBytes:  16,
+			writes:    []string{""},
+			wantExact: "",
+			wantLen:   0,
+		},
+		{
+			name:      "under limit preserves full output",
+			maxBytes:  32,
+			writes:    []string{"hello ", "world"},
+			wantExact: "hello world",
+			wantLen:   11,
+		},
+		{
+			name:      "exact limit single write not truncated",
+			maxBytes:  10,
+			writes:    []string{"0123456789"},
+			wantExact: "0123456789",
+			wantLen:   10,
+		},
+		{
+			name:      "exact limit across multiple writes not truncated",
+			maxBytes:  10,
+			writes:    []string{"012345", "6789"},
+			wantExact: "0123456789",
+			wantLen:   10,
+		},
+		{
+			name:          "single oversized write retains tail and marks truncated",
+			maxBytes:      10,
+			writes:        []string{"prefix-ignored-TAIL123456"},
+			wantSubstr:    "TAIL123456",
+			wantTruncated: true,
+			wantLen:       10,
+		},
+		{
+			name:          "incremental overflow keeps latest bytes",
+			maxBytes:      12,
+			writes:        []string{"aaaa", "bbbb", "cccc", "fatal: boom!"},
+			wantSubstr:    "fatal: boom!",
+			wantTruncated: true,
+			wantLen:       12,
+		},
+		{
+			name:          "large flood stays O(1) capped at 32 KiB",
+			maxBytes:      maxStderrBytes,
+			writes:        []string{strings.Repeat("x", 100*1024), "FATAL_END_MARKER"},
+			wantSubstr:    "FATAL_END_MARKER",
+			wantTruncated: true,
+			wantLen:       maxStderrBytes,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lb := newLimitedBuffer(tt.maxBytes)
+			for _, chunk := range tt.writes {
+				n, err := lb.Write([]byte(chunk))
+				if err != nil {
+					t.Fatalf("Write error: %v", err)
+				}
+				if n != len(chunk) {
+					t.Fatalf("Write returned n=%d, want %d", n, len(chunk))
+				}
+			}
+			if lb.Len() != tt.wantLen {
+				t.Errorf("Len() = %d, want %d", lb.Len(), tt.wantLen)
+			}
+			if cap(lb.buf) > tt.maxBytes {
+				t.Errorf("backing slice cap = %d exceeds maxBytes %d", cap(lb.buf), tt.maxBytes)
+			}
+			got := lb.String()
+			if tt.wantTruncated {
+				if !strings.Contains(got, "truncated") {
+					t.Errorf("expected truncation marker in %q", got)
+				}
+				if !strings.Contains(got, tt.wantSubstr) {
+					t.Errorf("expected tail %q in %q", tt.wantSubstr, got)
+				}
+			} else if got != tt.wantExact {
+				t.Errorf("String() = %q, want %q", got, tt.wantExact)
+			}
+		})
+	}
+
+	t.Run("concurrent writes race safety", func(t *testing.T) {
+		lb := newLimitedBuffer(1024)
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				payload := bytes.Repeat([]byte("a"), 256)
+				for j := 0; j < 20; j++ {
+					_, _ = lb.Write(payload)
+				}
+			}()
+		}
+		wg.Wait()
+		if lb.Len() != 1024 {
+			t.Errorf("concurrent Len() = %d, want 1024", lb.Len())
+		}
+	})
+
+	t.Run("stderrFor and augmentErr", func(t *testing.T) {
+		if w := stderrFor(nil); w != os.Stderr {
+			t.Errorf("stderrFor(nil) = %T, want os.Stderr", w)
+		}
+		pt := NewProgressTracker(100, 1)
+		w := stderrFor(pt)
+		lb, ok := w.(*limitedBuffer)
+		if !ok {
+			t.Fatalf("stderrFor(pt) = %T, want *limitedBuffer", w)
+		}
+		_, _ = lb.Write([]byte(strings.Repeat("noise\n", 10000)))
+		_, _ = lb.Write([]byte("corrupt archive header\n"))
+
+		baseErr := fmt.Errorf("exit status 1")
+		cmd := &exec.Cmd{Stderr: lb}
+		got := augmentErr(cmd, baseErr)
+		if got == nil || !strings.Contains(got.Error(), "corrupt archive header") {
+			t.Errorf("augmentErr(limitedBuffer) = %v, want stderr tail", got)
+		}
+		if len(got.Error()) > maxStderrBytes+256 {
+			t.Errorf("augmentErr output too large: %d bytes", len(got.Error()))
+		}
+		if gotNil := augmentErr(cmd, nil); gotNil != nil {
+			t.Errorf("augmentErr(cmd, nil) = %v, want nil", gotNil)
+		}
+
+		bb := bytes.NewBufferString("legacy buffer error\n")
+		cmdLegacy := &exec.Cmd{Stderr: bb}
+		gotLegacy := augmentErr(cmdLegacy, baseErr)
+		if gotLegacy == nil || !strings.Contains(gotLegacy.Error(), "legacy buffer error") {
+			t.Errorf("augmentErr(*bytes.Buffer) = %v, want compatibility", gotLegacy)
+		}
+
+		cmdEmpty := &exec.Cmd{Stderr: newLimitedBuffer(64)}
+		if gotEmpty := augmentErr(cmdEmpty, baseErr); gotEmpty != baseErr {
+			t.Errorf("augmentErr(empty limitedBuffer) = %v, want original err", gotEmpty)
+		}
+	})
+}
+
+func TestLogBuf_CapAndShrink(t *testing.T) {
+	var flushed bytes.Buffer
+	restore := setOutputWriters(nil, &flushed)
+	defer restore()
+
+	defer func() {
+		loggingActive.Store(false)
+		logMu.Lock()
+		logBuf = bytes.Buffer{}
+		logBufTruncated = false
+		logMu.Unlock()
+	}()
+
+	t.Run("caps growth at 1 MiB and shrinks backing array on Stop", func(t *testing.T) {
+		pt := NewProgressTracker(100, 1)
+		pt.writer = io.Discard
+		pt.stderrIsTTY = true
+		pt.Start()
+
+		chunk := strings.Repeat("á", 4096) + "\n"
+		for i := 0; i < 300; i++ {
+			WriteLog(chunk)
+		}
+		WriteWarning("final warning after cap")
+
+		logMu.Lock()
+		gotLen := logBuf.Len()
+		gotStr := logBuf.String()
+		logMu.Unlock()
+
+		if gotLen > maxLogBufBytes {
+			t.Errorf("logBuf.Len() = %d exceeds cap %d", gotLen, maxLogBufBytes)
+		}
+		if !strings.Contains(gotStr, "truncated") {
+			t.Errorf("expected truncation notice in capped logBuf")
+		}
+		if !utf8.ValidString(gotStr) {
+			t.Errorf("capped logBuf contains invalid UTF-8")
+		}
+
+		pt.Stop()
+
+		logMu.Lock()
+		afterLen := logBuf.Len()
+		afterCap := logBuf.Cap()
+		logMu.Unlock()
+
+		if afterLen != 0 {
+			t.Errorf("post-Stop logBuf.Len() = %d, want 0", afterLen)
+		}
+		if afterCap > shrinkLogBufBytes {
+			t.Errorf("post-Stop logBuf.Cap() = %d, want <= %d", afterCap, shrinkLogBufBytes)
+		}
+		if flushed.Len() == 0 {
+			t.Errorf("expected Stop to flush buffered logs")
+		}
+	})
+
+	t.Run("shrinks backing array on Suspend and accepts fresh writes after Reset", func(t *testing.T) {
+		flushed.Reset()
+		pt := NewProgressTracker(100, 1)
+		pt.writer = io.Discard
+		pt.stderrIsTTY = true
+		pt.Start()
+		defer pt.Stop()
+
+		big := strings.Repeat("Z", 200*1024)
+		WriteLog(big)
+
+		pt.Suspend(func() {
+			logMu.Lock()
+			capDuringSuspend := logBuf.Cap()
+			lenDuringSuspend := logBuf.Len()
+			logMu.Unlock()
+			if lenDuringSuspend != 0 {
+				t.Errorf("during Suspend logBuf.Len() = %d, want 0", lenDuringSuspend)
+			}
+			if capDuringSuspend > shrinkLogBufBytes {
+				t.Errorf("during Suspend logBuf.Cap() = %d, want <= %d", capDuringSuspend, shrinkLogBufBytes)
+			}
+		})
+
+		for i := 0; i < 20; i++ {
+			WriteLog(strings.Repeat("Q", 100*1024))
+		}
+		logMu.Lock()
+		logBuf.Reset()
+		logMu.Unlock()
+
+		WriteLog("after direct reset")
+		logMu.Lock()
+		got := logBuf.String()
+		logMu.Unlock()
+		if got != "after direct reset" {
+			t.Errorf("post-Reset WriteLog = %q, want %q", got, "after direct reset")
+		}
+	})
+}
+
+type recordingReader struct {
+	data      []byte
+	offset    int
+	maxBufLen int
+}
+
+func (r *recordingReader) Read(p []byte) (int, error) {
+	if len(p) > r.maxBufLen {
+		r.maxBufLen = len(p)
+	}
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	return n, nil
+}
+
+func TestSplicePipe_FallbackPoolReuse(t *testing.T) {
+	bp, ok := spliceBufPool.Get().(*[]byte)
+	if !ok || bp == nil {
+		t.Fatalf("spliceBufPool.Get() did not return *[]byte")
+	}
+	if len(*bp) != defaultPipeCapacity {
+		t.Fatalf("pooled buffer len = %d, want %d", len(*bp), defaultPipeCapacity)
+	}
+	spliceBufPool.Put(bp)
+
+	origNew := spliceBufPool.New
+	var allocMu sync.Mutex
+	allocs := 0
+	spliceBufPool.New = func() any {
+		allocMu.Lock()
+		allocs++
+		allocMu.Unlock()
+		b := make([]byte, defaultPipeCapacity)
+		return &b
+	}
+	defer func() { spliceBufPool.New = origNew }()
+
+	const calls = 50
+	payload := bytes.Repeat([]byte("pool-reuse-check-"), 1024)
+	for i := 0; i < calls; i++ {
+		src := &recordingReader{data: payload}
+		var dst bytes.Buffer
+		n, err := splicePipe(src, struct{ io.Writer }{&dst})
+		if err != nil {
+			t.Fatalf("call %d splicePipe error: %v", i, err)
+		}
+		if n != int64(len(payload)) || !bytes.Equal(dst.Bytes(), payload) {
+			t.Fatalf("call %d payload mismatch: n=%d want %d", i, n, len(payload))
+		}
+		if src.maxBufLen != defaultPipeCapacity {
+			t.Fatalf("call %d buffer len = %d, want %d", i, src.maxBufLen, defaultPipeCapacity)
+		}
+	}
+
+	if allocs >= calls {
+		t.Errorf("expected pooled buffer reuse across %d calls, got %d allocations", calls, allocs)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			msg := bytes.Repeat([]byte{byte('A' + id)}, 65536)
+			var dst bytes.Buffer
+			n, err := splicePipe(bytes.NewReader(msg), &dst)
+			if err != nil || n != int64(len(msg)) || !bytes.Equal(dst.Bytes(), msg) {
+				t.Errorf("concurrent worker %d failed: n=%d err=%v", id, n, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestReservedNames_BoundedAndRelease(t *testing.T) {
+	uniqueNameMu.Lock()
+	origReserved := reservedNames
+	origSeq := reservedSeq
+	reservedNames = make(map[string]uint64)
+	reservedSeq = 0
+	uniqueNameMu.Unlock()
+	defer func() {
+		uniqueNameMu.Lock()
+		reservedNames = origReserved
+		reservedSeq = origSeq
+		uniqueNameMu.Unlock()
+	}()
+
+	tmpDir := t.TempDir()
+
+	t.Run("ReleaseReservedName frees name for reuse", func(t *testing.T) {
+		base := filepath.Join(tmpDir, "rel_item")
+		first := GetUniqueName(base, "txt")
+		if first != base+".txt" {
+			t.Fatalf("first = %q, want %q", first, base+".txt")
+		}
+		second := GetUniqueName(base, "txt")
+		if second != base+"_1.txt" {
+			t.Fatalf("second = %q, want %q", second, base+"_1.txt")
+		}
+		ReleaseReservedName(first)
+		third := GetUniqueName(base, "txt")
+		if third != first {
+			t.Errorf("after ReleaseReservedName, got %q, want %q", third, first)
+		}
+	})
+
+	t.Run("prunes entries that already exist on disk", func(t *testing.T) {
+		uniqueNameMu.Lock()
+		reservedNames = make(map[string]uint64)
+		reservedSeq = 0
+		uniqueNameMu.Unlock()
+
+		onDisk := filepath.Join(tmpDir, "created_0.txt")
+		if err := os.WriteFile(onDisk, []byte("ok"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		uniqueNameMu.Lock()
+		reservedSeq++
+		reservedNames[onDisk] = reservedSeq
+		uniqueNameMu.Unlock()
+
+		for i := 0; i < maxReservedNames+10; i++ {
+			_ = GetUniqueName(filepath.Join(tmpDir, fmt.Sprintf("diskprune_%d", i)), "tar")
+		}
+
+		uniqueNameMu.Lock()
+		_, stillInMap := reservedNames[onDisk]
+		count := len(reservedNames)
+		uniqueNameMu.Unlock()
+
+		if stillInMap {
+			t.Errorf("expected existing-on-disk entry %q to be pruned from reservedNames", onDisk)
+		}
+		if count > maxReservedNames {
+			t.Errorf("len(reservedNames) = %d exceeds cap %d", count, maxReservedNames)
+		}
+	})
+
+	t.Run("evicts oldest stale entries and keeps map bounded", func(t *testing.T) {
+		uniqueNameMu.Lock()
+		reservedNames = make(map[string]uint64)
+		reservedSeq = 0
+		uniqueNameMu.Unlock()
+
+		var last string
+		for i := 0; i < maxReservedNames+500; i++ {
+			last = GetUniqueName(filepath.Join(tmpDir, fmt.Sprintf("watch_%d", i)), "zst")
+		}
+
+		uniqueNameMu.Lock()
+		count := len(reservedNames)
+		_, lastPresent := reservedNames[last]
+		uniqueNameMu.Unlock()
+
+		if count > maxReservedNames {
+			t.Errorf("len(reservedNames) = %d exceeds max %d", count, maxReservedNames)
+		}
+		if !lastPresent {
+			t.Errorf("most recent reservation %q was prematurely evicted", last)
+		}
+	})
+}
+
 
 
 

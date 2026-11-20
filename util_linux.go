@@ -74,8 +74,7 @@ func splicePipe(r io.Reader, w io.Writer) (int64, error) {
 	rfd, okR := extractFd(r)
 	wfd, okW := extractFd(w)
 	if !okR || !okW {
-		buf := make([]byte, 1024*1024)
-		return io.CopyBuffer(w, r, buf)
+		return copyWithSplicePool(w, r)
 	}
 
 	var total int64
@@ -87,8 +86,7 @@ func splicePipe(r io.Reader, w io.Writer) (int64, error) {
 				continue
 			}
 			if total == 0 && (errno == syscall.ENOSYS || errno == syscall.EINVAL) {
-				buf := make([]byte, 1024*1024)
-				return io.CopyBuffer(w, r, buf)
+				return copyWithSplicePool(w, r)
 			}
 			return total, errno
 		}

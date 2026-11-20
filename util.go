@@ -38,9 +38,10 @@ var (
 	nullFile     *os.File
 	nullFileOnce sync.Once
 
-	logBuf         bytes.Buffer
-	logMu          sync.Mutex
-	loggingActive  atomic.Bool
+	logBuf          bytes.Buffer
+	logBufTruncated bool
+	logMu           sync.Mutex
+	loggingActive   atomic.Bool
 
 	activeProgressTracker atomic.Pointer[ProgressTracker]
 
@@ -971,9 +972,12 @@ func EstimateUncompressedSize(file string) int64 {
 
 // --- Filename ---
 
+const maxReservedNames = 4096
+
 var (
 	uniqueNameMu  sync.Mutex
-	reservedNames = make(map[string]bool)
+	reservedNames = make(map[string]uint64)
+	reservedSeq   uint64
 )
 
 func safeFlagArg(p string) string {
@@ -999,8 +1003,48 @@ func resolveThreadCap(f Format, sizeBytes int64) int {
 	return resolveThreadCapForBudget(f, sizeBytes, getMemLimit())
 }
 
+func ReleaseReservedName(name string) {
+	uniqueNameMu.Lock()
+	delete(reservedNames, name)
+	uniqueNameMu.Unlock()
+}
+
+func reserveNameLocked(name string) {
+	reservedSeq++
+	reservedNames[name] = reservedSeq
+	if len(reservedNames) > maxReservedNames {
+		pruneReservedNamesLocked()
+	}
+}
+
+func pruneReservedNamesLocked() {
+	for k := range reservedNames {
+		if _, err := os.Lstat(k); err == nil {
+			delete(reservedNames, k)
+		}
+	}
+	if len(reservedNames) <= maxReservedNames {
+		return
+	}
+	type entry struct {
+		name string
+		seq  uint64
+	}
+	entries := make([]entry, 0, len(reservedNames))
+	for k, seq := range reservedNames {
+		entries = append(entries, entry{name: k, seq: seq})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].seq < entries[j].seq
+	})
+	target := maxReservedNames / 2
+	for i := 0; i < len(entries)-target; i++ {
+		delete(reservedNames, entries[i].name)
+	}
+}
+
 func isNameAvailable(name string) bool {
-	if reservedNames[name] {
+	if _, ok := reservedNames[name]; ok {
 		return false
 	}
 	_, err := os.Lstat(name)
@@ -1016,13 +1060,13 @@ func GetUniqueName(base, ext string) string {
 	}
 	name := base + "." + ext
 	if isNameAvailable(name) {
-		reservedNames[name] = true
+		reserveNameLocked(name)
 		return name
 	}
 	for counter := 1; ; counter++ {
 		name = fmt.Sprintf("%s_%d.%s", base, counter, ext)
 		if isNameAvailable(name) {
-			reservedNames[name] = true
+			reserveNameLocked(name)
 			return name
 		}
 	}
@@ -1084,11 +1128,52 @@ func appendToLogFile(s string) {
 	logMu.Unlock()
 }
 
+const (
+	maxLogBufBytes    = 1024 * 1024
+	shrinkLogBufBytes = 64 * 1024
+	logBufTruncNotice = "\n... [log buffer truncated]\n"
+)
+
+func appendToLogBuf(s string) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	if logBuf.Len() == 0 {
+		logBufTruncated = false
+	}
+	if logBufTruncated {
+		return
+	}
+	limit := maxLogBufBytes - len(logBufTruncNotice)
+	if logBuf.Len()+len(s) <= limit {
+		logBuf.WriteString(s)
+		return
+	}
+	if rem := limit - logBuf.Len(); rem > 0 {
+		for rem > 0 && rem < len(s) && !utf8.RuneStart(s[rem]) {
+			rem--
+		}
+		logBuf.WriteString(s[:rem])
+	}
+	logBuf.WriteString(logBufTruncNotice)
+	logBufTruncated = true
+}
+
+func flushLogBuf() {
+	logMu.Lock()
+	if logBuf.Len() > 0 {
+		_, _ = lockedStderr.Write(logBuf.Bytes())
+		logBuf.Reset()
+	}
+	if logBuf.Cap() > shrinkLogBufBytes {
+		logBuf = bytes.Buffer{}
+	}
+	logBufTruncated = false
+	logMu.Unlock()
+}
+
 func WriteLog(s string) {
 	if loggingActive.Load() {
-		logMu.Lock()
-		logBuf.WriteString(s)
-		logMu.Unlock()
+		appendToLogBuf(s)
 	} else {
 		lockedStderr.Write([]byte(s))
 	}
@@ -1174,9 +1259,7 @@ func formatConsoleMsg(format string, a []any, prefixes ...string) string {
 
 func writeStderrFormatted(out string) {
 	if loggingActive.Load() {
-		logMu.Lock()
-		logBuf.WriteString(out)
-		logMu.Unlock()
+		appendToLogBuf(out)
 	} else {
 		lockedStderr.Write([]byte(out))
 	}
@@ -1264,20 +1347,99 @@ func stdoutFor(pt *ProgressTracker) io.Writer {
 	return getNullFile()
 }
 
+const maxStderrBytes = 32 * 1024
+
+type limitedBuffer struct {
+	mu        sync.Mutex
+	max       int
+	buf       []byte
+	truncated bool
+}
+
+func newLimitedBuffer(maxBytes int) *limitedBuffer {
+	if maxBytes <= 0 {
+		maxBytes = maxStderrBytes
+	}
+	return &limitedBuffer{max: maxBytes}
+}
+
+func (lb *limitedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	n := len(p)
+	if n == 0 {
+		return 0, nil
+	}
+	if n >= lb.max {
+		if n > lb.max || len(lb.buf) > 0 {
+			lb.truncated = true
+		}
+		if cap(lb.buf) < lb.max {
+			lb.buf = make([]byte, lb.max)
+		} else {
+			lb.buf = lb.buf[:lb.max]
+		}
+		copy(lb.buf, p[n-lb.max:])
+		return n, nil
+	}
+	if len(lb.buf)+n > lb.max {
+		excess := len(lb.buf) + n - lb.max
+		copy(lb.buf, lb.buf[excess:])
+		lb.buf = lb.buf[:len(lb.buf)-excess]
+		lb.truncated = true
+	}
+	if cap(lb.buf) < len(lb.buf)+n {
+		newCap := max(cap(lb.buf)*2, len(lb.buf)+n)
+		if newCap > lb.max {
+			newCap = lb.max
+		}
+		grown := make([]byte, len(lb.buf), newCap)
+		copy(grown, lb.buf)
+		lb.buf = grown
+	}
+	lb.buf = append(lb.buf, p...)
+	return n, nil
+}
+
+func (lb *limitedBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	if len(lb.buf) == 0 {
+		return ""
+	}
+	if lb.truncated {
+		return "... [truncated]\n" + string(lb.buf)
+	}
+	return string(lb.buf)
+}
+
+func (lb *limitedBuffer) Len() int {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return len(lb.buf)
+}
+
 func stderrFor(pt *ProgressTracker) io.Writer {
 	if pt == nil {
 		return os.Stderr
 	}
-	return &bytes.Buffer{}
+	return newLimitedBuffer(maxStderrBytes)
 }
 
 func augmentErr(cmd *exec.Cmd, err error) error {
 	if err == nil {
 		return nil
 	}
-	if b, ok := cmd.Stderr.(*bytes.Buffer); ok {
-		if s := strings.TrimSpace(b.String()); s != "" {
-			return fmt.Errorf("%w: %s", err, s)
+	if cmd != nil && cmd.Stderr != nil {
+		switch b := cmd.Stderr.(type) {
+		case *limitedBuffer:
+			if s := strings.TrimSpace(b.String()); s != "" {
+				return fmt.Errorf("%w: %s", err, s)
+			}
+		case *bytes.Buffer:
+			if s := strings.TrimSpace(b.String()); s != "" {
+				return fmt.Errorf("%w: %s", err, s)
+			}
 		}
 	}
 	return err
@@ -1528,12 +1690,7 @@ func (pt *ProgressTracker) Stop() {
 		io.WriteString(pt.out(), "\033[?25h")
 	}
 	pt.renderMu.Unlock()
-	logMu.Lock()
-	if logBuf.Len() > 0 {
-		os.Stderr.Write(logBuf.Bytes())
-		logBuf.Reset()
-	}
-	logMu.Unlock()
+	flushLogBuf()
 	if pt.stderrIsTTY {
 		pt.renderFinal()
 	}
@@ -1554,12 +1711,7 @@ func (pt *ProgressTracker) Suspend(fn func()) {
 	}
 
 	prevLogging := loggingActive.Swap(false)
-	logMu.Lock()
-	if logBuf.Len() > 0 {
-		os.Stderr.Write(logBuf.Bytes())
-		logBuf.Reset()
-	}
-	logMu.Unlock()
+	flushLogBuf()
 
 	defer func() {
 		loggingActive.Store(prevLogging)
@@ -1882,6 +2034,19 @@ func (lw *lockedWriter) Write(p []byte) (int, error) {
 }
 
 const defaultPipeCapacity = 1048576 // 1 MiB
+
+var spliceBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, defaultPipeCapacity)
+		return &b
+	},
+}
+
+func copyWithSplicePool(w io.Writer, r io.Reader) (int64, error) {
+	bp := spliceBufPool.Get().(*[]byte)
+	defer spliceBufPool.Put(bp)
+	return io.CopyBuffer(w, r, *bp)
+}
 
 func setPipeCapacity(r io.Reader, w io.Writer, size int) {
 	if size <= 0 {

@@ -19,6 +19,5 @@ func disableTerminalEchoOS(fd uintptr) (func(), error) {
 }
 
 func splicePipe(r io.Reader, w io.Writer) (int64, error) {
-	buf := make([]byte, 1024*1024)
-	return io.CopyBuffer(w, r, buf)
+	return copyWithSplicePool(w, r)
 }

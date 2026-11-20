@@ -365,3 +365,93 @@ func TestDoConvertNoForceRejectsBrokenSymlink(t *testing.T) {
 		t.Errorf("broken symlink target %s should not have been created", danglingTarget)
 	}
 }
+
+func TestBuildDecompressCmdForFile_MemorySafeFlags(t *testing.T) {
+	origMem := getMemLimit
+	defer func() { getMemLimit = origMem }()
+	getMemLimit = func() int { return 800 }
+
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "archive.dat")
+	if err := os.WriteFile(src, []byte("small archive"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		info     FormatInfo
+		threads  int
+		budgetMB int
+		wantArgs []string
+	}{
+		{
+			name:     "xz decompression applies thread cap and --memlimit-mt-decompress",
+			info:     FormatInfo{Format: Xz, Tool: "xz"},
+			threads:  16,
+			budgetMB: 800,
+			wantArgs: []string{"-dc", "-T1", "--memlimit-mt-decompress=800MiB"},
+		},
+		{
+			name:     "lrzip decompression applies thread cap and -m in hundreds of MB",
+			info:     FormatInfo{Format: Lrz, Tool: "lrzip"},
+			threads:  16,
+			budgetMB: 800,
+			wantArgs: []string{"-d", "-p", "1", "-o", "-", "-m", "8"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := buildDecompressCmdForFileWithMem(src, tt.info, tt.threads, tt.budgetMB)
+			for _, w := range tt.wantArgs {
+				if !containsArg(cmd.Args, w) {
+					t.Errorf("args = %v, missing %q", cmd.Args, w)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertStreamPipe_SplitsMemoryBudgetBetweenStages(t *testing.T) {
+	origMem := getMemLimit
+	defer func() { getMemLimit = origMem }()
+	getMemLimit = func() int { return 1024 } // 2 concurrent stages -> 512MB per stage
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	var xzDecompArgs, zstCompArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		switch name {
+		case "xz":
+			xzDecompArgs = append([]string(nil), args...)
+			return mockExecCommand("mock-noop")
+		case "zstd":
+			zstCompArgs = append([]string(nil), args...)
+			return mockExecCommand("mock-noop")
+		}
+		return exec.Command(name, args...)
+	}
+
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "archive.tar.xz")
+	if err := os.WriteFile(src, []byte("compressed content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(tmpDir, "archive.tar.zst")
+
+	err := convertStreamPipe(src, out, FormatInfo{Format: Xz, Tool: "xz", IsTar: true}, Zst, ConvertOptions{
+		ThreadLimit: 16,
+	})
+	if err != nil {
+		t.Fatalf("convertStreamPipe failed: %v", err)
+	}
+
+	if !containsArg(xzDecompArgs, "--memlimit-mt-decompress=512MiB") || !containsArg(xzDecompArgs, "-T1") {
+		t.Errorf("decompressor stage expected 512MiB budget and -T1, got %v", xzDecompArgs)
+	}
+	if !containsArg(zstCompArgs, "-19") || containsArg(zstCompArgs, "--ultra") || !containsArg(zstCompArgs, "-T1") {
+		t.Errorf("compressor stage expected 512MiB budget (zstd -19 without --ultra and -T1), got %v", zstCompArgs)
+	}
+}
+

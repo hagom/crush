@@ -3529,6 +3529,42 @@ func TestCompressAutoFormat_SinglePassInspectAutoFormat(t *testing.T) {
 	})
 }
 
+func TestDoAppend_EnforcesThreadCapAndMemoryBudget(t *testing.T) {
+	origMem := getMemLimit
+	defer func() { getMemLimit = origMem }()
+	getMemLimit = func() int { return 1024 }
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	var sevenzArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == sevenzBin() {
+			sevenzArgs = append([]string(nil), args...)
+			return mockExecCommand("mock-noop")
+		}
+		return exec.Command(name, args...)
+	}
+
+	tmpDir := t.TempDir()
+	archive := filepath.Join(tmpDir, "bundle.7z")
+	if err := os.WriteFile(archive, []byte("existing archive"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	item := filepath.Join(tmpDir, "item.txt")
+	if err := os.WriteFile(item, []byte("small item"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := DoAppend(archive, []string{item}, CompressOptions{ThreadLimit: 32}); err != nil {
+		t.Fatalf("DoAppend 7z failed: %v", err)
+	}
+	if !containsArg(sevenzArgs, "-mmt=1") {
+		t.Errorf("DoAppend on tiny 7z payload should clamp threads to -mmt=1, got %v", sevenzArgs)
+	}
+}
+
+
 
 
 

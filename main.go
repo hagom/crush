@@ -679,14 +679,12 @@ func main() {
 		}
 		targetArchive := files[0]
 		itemsToAdd := files[1:]
-		effectiveThreads := NCPU()
 		opts := CompressOptions{
 			Password:        cliPassword,
 			Sparse:          sparseEnabled,
 			NoSparse:        !sparseEnabled,
 			Verbose:         *verbose,
 			Hash:            *hashFlag,
-			ThreadLimit:     effectiveThreads,
 			Clean:           *cleanFlag,
 			Exclude:         exclude,
 			CutoffTime:      cutoffTime,
@@ -778,13 +776,12 @@ func main() {
 			convOutDir = ""
 		}
 		opts := ConvertOptions{
-			OutputDir:   convOutDir,
-			KeepOrig:    *keepOrig,
-			Force:       *force,
-			Verbose:     *verbose,
-			Password:    cliPassword,
-			Hash:        *hashFlag,
-			ThreadLimit: NCPU(),
+			OutputDir: convOutDir,
+			KeepOrig:  *keepOrig,
+			Force:     *force,
+			Verbose:   *verbose,
+			Password:  cliPassword,
+			Hash:      *hashFlag,
 		}
 		if err := DoConvert(files, targetFmt, opts); err != nil {
 			WriteError("%v", err)

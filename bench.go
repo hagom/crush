@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -10,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -266,22 +266,30 @@ func runFormatCompression(f Format, tool, datasetPath, compFile string) error {
 		return err
 	}
 
+	var datasetSize int64
+	if fi, err := os.Stat(datasetAbs); err == nil {
+		datasetSize = fi.Size()
+	}
+	th := resolveThreadCap(f, datasetSize)
+	thStr := threadStr(th)
+	memMB := getMemLimit()
+
 	if f == Zip {
 		if hasTool(sevenzBin()) {
-			cmd := exec.Command(sevenzBin(), "a", "-tzip", "-mx=9", "-mmt="+ncpuStr(), compFileAbs, filepath.Base(datasetAbs))
+			cmd := execCommand(sevenzBin(), "a", "-tzip", "-mx=9", "-mmt="+thStr, safeFlagArg(compFileAbs), "--", filepath.Base(datasetAbs))
 			cmd.Dir = filepath.Dir(datasetAbs)
 			cmd.Stdout = io.Discard
-			var stderrBuf bytes.Buffer
-			cmd.Stderr = &stderrBuf
+			stderrBuf := newLimitedBuffer(maxStderrBytes)
+			cmd.Stderr = stderrBuf
 			if err := cmd.Run(); err != nil {
 				return fmt.Errorf("%w: %s", err, stderrBuf.String())
 			}
 			return nil
 		}
-		cmd := exec.Command("zip", "-q", "-r", "-9", compFileAbs, filepath.Base(datasetAbs))
+		cmd := execCommand("zip", "-q", "-r", "-9", safeFlagArg(compFileAbs), "--", filepath.Base(datasetAbs))
 		cmd.Dir = filepath.Dir(datasetAbs)
-		var stderrBuf bytes.Buffer
-		cmd.Stderr = &stderrBuf
+		stderrBuf := newLimitedBuffer(maxStderrBytes)
+		cmd.Stderr = stderrBuf
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("%w: %s", err, stderrBuf.String())
 		}
@@ -289,11 +297,12 @@ func runFormatCompression(f Format, tool, datasetPath, compFile string) error {
 	}
 
 	if f == SevenZ {
-		cmd := exec.Command(sevenzBin(), "a", "-mx=9", "-md=128m", "-ms=on", "-mmt="+ncpuStr(), compFileAbs, filepath.Base(datasetAbs))
+		md := adaptive7zDictForBudget(datasetSize, th, memMB)
+		cmd := execCommand(sevenzBin(), "a", "-mx=9", md, "-ms=on", "-mmt="+thStr, safeFlagArg(compFileAbs), "--", filepath.Base(datasetAbs))
 		cmd.Dir = filepath.Dir(datasetAbs)
 		cmd.Stdout = io.Discard
-		var stderrBuf bytes.Buffer
-		cmd.Stderr = &stderrBuf
+		stderrBuf := newLimitedBuffer(maxStderrBytes)
+		cmd.Stderr = stderrBuf
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("%w: %s", err, stderrBuf.String())
 		}
@@ -315,33 +324,57 @@ func runFormatCompression(f Format, tool, datasetPath, compFile string) error {
 	var cmd *exec.Cmd
 	switch f {
 	case Gz:
-		cmd = exec.Command(tool, "-c")
+		if tool == "pigz" {
+			cmd = execCommand(tool, "-c", "-p", thStr)
+		} else {
+			cmd = execCommand(tool, "-c")
+		}
 	case Bz2:
-		cmd = exec.Command(tool, "-c")
+		if tool == "lbzip2" {
+			cmd = execCommand(tool, "-c", "-n", thStr)
+		} else if tool == "pbzip2" {
+			cmd = execCommand(tool, "-c", "-p"+thStr)
+		} else {
+			cmd = execCommand(tool, "-c")
+		}
 	case Xz:
-		cmd = exec.Command("xz", "-c", "-T0")
+		args := []string{"-c", "-T" + thStr}
+		if memMB > 0 {
+			args = append(args, "--memlimit-compress="+strconv.Itoa(max(128, memMB))+"MiB")
+		}
+		cmd = execCommand("xz", args...)
 	case Zst:
-		cmd = exec.Command("zstd", "-c", "-T0")
+		cmd = execCommand("zstd", "-c", "-T"+thStr)
 	case Lz4:
-		cmd = exec.Command("lz4", "-c")
+		if lz4SupportsThreads() {
+			cmd = execCommand("lz4", "-c", "-T"+thStr)
+		} else {
+			cmd = execCommand("lz4", "-c")
+		}
 	case Br:
-		cmd = exec.Command("brotli", "-c")
+		cmd = execCommand("brotli", "-c")
 	case Lz:
 		if tool == "plzip" {
-			cmd = exec.Command("plzip", "-c", "--threads="+ncpuStr())
+			cmd = execCommand("plzip", "-c", "--threads="+thStr)
 		} else {
-			cmd = exec.Command("lzip", "-c")
+			cmd = execCommand("lzip", "-c")
 		}
 	case Bz3:
-		cmd = exec.Command("bzip3", "-c", "-j"+ncpuStr())
+		blockSize := "64"
+		if memMB > 0 && memMB < 512 {
+			blockSize = "16"
+		} else if memMB > 0 && memMB < 1024 {
+			blockSize = "32"
+		}
+		cmd = execCommand("bzip3", "-c", "-b", blockSize, "-j"+thStr)
 	default:
 		return fmt.Errorf("formato no soportado en bench: %s", f)
 	}
 
 	cmd.Stdin = inF
 	cmd.Stdout = outF
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	stderrBuf := newLimitedBuffer(maxStderrBytes)
+	cmd.Stderr = stderrBuf
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%w: %s", err, stderrBuf.String())
@@ -363,21 +396,29 @@ func runFormatDecompression(f Format, tool, compFile, decompFile, extractDir str
 		return err
 	}
 
+	var compSize int64
+	if fi, err := os.Stat(compFileAbs); err == nil {
+		compSize = fi.Size()
+	}
+	th := resolveThreadCap(f, compSize)
+	thStr := threadStr(th)
+	memMB := getMemLimit()
+
 	if f == Zip {
 		_ = os.MkdirAll(extractDirAbs, 0755)
 		if hasTool(sevenzBin()) {
-			cmd := exec.Command(sevenzBin(), "x", "-tzip", "-y", "-mmt="+ncpuStr(), "-o"+extractDirAbs, compFileAbs)
+			cmd := execCommand(sevenzBin(), "x", "-tzip", "-y", "-mmt="+thStr, "-o"+extractDirAbs, "--", compFileAbs)
 			cmd.Stdout = io.Discard
-			var stderrBuf bytes.Buffer
-			cmd.Stderr = &stderrBuf
+			stderrBuf := newLimitedBuffer(maxStderrBytes)
+			cmd.Stderr = stderrBuf
 			if err := cmd.Run(); err != nil {
 				return fmt.Errorf("%w: %s", err, stderrBuf.String())
 			}
 			return nil
 		}
-		cmd := exec.Command("unzip", "-q", "-o", compFileAbs, "-d", extractDirAbs)
-		var stderrBuf bytes.Buffer
-		cmd.Stderr = &stderrBuf
+		cmd := execCommand("unzip", "-q", "-o", safeFlagArg(compFileAbs), "-d", safeFlagArg(extractDirAbs))
+		stderrBuf := newLimitedBuffer(maxStderrBytes)
+		cmd.Stderr = stderrBuf
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("%w: %s", err, stderrBuf.String())
 		}
@@ -386,10 +427,10 @@ func runFormatDecompression(f Format, tool, compFile, decompFile, extractDir str
 
 	if f == SevenZ {
 		_ = os.MkdirAll(extractDirAbs, 0755)
-		cmd := exec.Command(sevenzBin(), "x", "-y", "-mmt="+ncpuStr(), "-o"+extractDirAbs, compFileAbs)
+		cmd := execCommand(sevenzBin(), "x", "-y", "-mmt="+thStr, "-o"+extractDirAbs, "--", compFileAbs)
 		cmd.Stdout = io.Discard
-		var stderrBuf bytes.Buffer
-		cmd.Stderr = &stderrBuf
+		stderrBuf := newLimitedBuffer(maxStderrBytes)
+		cmd.Stderr = stderrBuf
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("%w: %s", err, stderrBuf.String())
 		}
@@ -411,33 +452,51 @@ func runFormatDecompression(f Format, tool, compFile, decompFile, extractDir str
 	var cmd *exec.Cmd
 	switch f {
 	case Gz:
-		cmd = exec.Command(tool, "-dc")
+		if tool == "pigz" {
+			cmd = execCommand(tool, "-dc", "-p", thStr)
+		} else {
+			cmd = execCommand(tool, "-dc")
+		}
 	case Bz2:
-		cmd = exec.Command(tool, "-dc")
+		if tool == "lbzip2" {
+			cmd = execCommand(tool, "-dc", "-n", thStr)
+		} else if tool == "pbzip2" {
+			cmd = execCommand(tool, "-dc", "-p"+thStr)
+		} else {
+			cmd = execCommand(tool, "-dc")
+		}
 	case Xz:
-		cmd = exec.Command("xz", "-dc", "-T0")
+		args := []string{"-dc", "-T" + thStr}
+		if memMB > 0 {
+			args = append(args, "--memlimit-mt-decompress="+strconv.Itoa(max(65, memMB))+"MiB")
+		}
+		cmd = execCommand("xz", args...)
 	case Zst:
-		cmd = exec.Command("zstd", "-dc", "-T0")
+		cmd = execCommand("zstd", "-dc", "-T"+thStr)
 	case Lz4:
-		cmd = exec.Command("lz4", "-dc")
+		if lz4SupportsThreads() {
+			cmd = execCommand("lz4", "-dc", "-T"+thStr)
+		} else {
+			cmd = execCommand("lz4", "-dc")
+		}
 	case Br:
-		cmd = exec.Command("brotli", "-dc")
+		cmd = execCommand("brotli", "-dc")
 	case Lz:
 		if tool == "plzip" {
-			cmd = exec.Command("plzip", "-dc", "--threads="+ncpuStr())
+			cmd = execCommand("plzip", "-dc", "--threads="+thStr)
 		} else {
-			cmd = exec.Command("lzip", "-dc")
+			cmd = execCommand("lzip", "-dc")
 		}
 	case Bz3:
-		cmd = exec.Command("bzip3", "-dc", "-j"+ncpuStr())
+		cmd = execCommand("bzip3", "-dc", "-j"+thStr)
 	default:
 		return fmt.Errorf("formato no soportado en bench: %s", f)
 	}
 
 	cmd.Stdin = inF
 	cmd.Stdout = outF
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	stderrBuf := newLimitedBuffer(maxStderrBytes)
+	cmd.Stderr = stderrBuf
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%w: %s", err, stderrBuf.String())

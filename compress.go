@@ -2007,6 +2007,17 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		GetPasswordManager().AddSuccessful(opts.Password)
 	}
 
+	totalSize := totalFileSize(items)
+	if info.IsTar && info.IsStream() {
+		totalSize += fi.Size()
+	}
+	if opts.MemBudgetMB <= 0 {
+		opts.MemBudgetMB = getMemLimit()
+	}
+	if cap := resolveThreadCapForBudget(info.Format, totalSize, opts.MemBudgetMB); opts.ThreadLimit <= 0 || cap < opts.ThreadLimit {
+		opts.ThreadLimit = cap
+	}
+
 	switch {
 	case info.Format == Zip:
 		sevenz := sevenzBin()
@@ -2105,7 +2116,7 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		tmpTarPath := tmpTar.Name()
 		defer os.Remove(tmpTarPath)
 
-		decompCmd, closer := pipeCmdFor(info, archive)
+		decompCmd, closer := pipeCmdFor(info, archive, opts.ThreadLimit)
 		if closer != nil {
 			defer closer.Close()
 		}

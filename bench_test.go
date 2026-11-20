@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -275,3 +276,91 @@ func BenchmarkCompressLz4(b *testing.B) {
 func BenchmarkCompressBr(b *testing.B) {
 	benchmarkFormat(b, Br)
 }
+
+func TestBench_MemorySafeFlagsAndBoundedStderr(t *testing.T) {
+	origMem := getMemLimit
+	defer func() { getMemLimit = origMem }()
+	getMemLimit = func() int { return 1024 }
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	tmpDir := t.TempDir()
+	dataset := filepath.Join(tmpDir, "small.dat")
+	if err := os.WriteFile(dataset, []byte(strings.Repeat("bench payload ", 200)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	compFile := filepath.Join(tmpDir, "out.bin")
+	if err := os.WriteFile(compFile, []byte("compressed placeholder"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	decompFile := filepath.Join(tmpDir, "out.decomp")
+	extractDir := filepath.Join(tmpDir, "extract")
+
+	var capturedName string
+	var capturedArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		capturedName = name
+		capturedArgs = append([]string(nil), args...)
+		return mockExecCommand("mock-noop")
+	}
+
+	t.Run("7z compression uses adaptive7zDict and resolveThreadCap", func(t *testing.T) {
+		capturedName = ""
+		capturedArgs = nil
+		if err := runFormatCompression(SevenZ, sevenzBin(), dataset, compFile); err != nil {
+			t.Fatalf("runFormatCompression(SevenZ) failed: %v", err)
+		}
+		if capturedName != sevenzBin() {
+			t.Fatalf("expected %s via execCommand, got %q", sevenzBin(), capturedName)
+		}
+		if !containsArg(capturedArgs, "-md=16m") || containsArg(capturedArgs, "-md=128m") {
+			t.Errorf("expected adaptive -md=16m for small dataset, got %v", capturedArgs)
+		}
+		if !containsArg(capturedArgs, "-mmt=1") {
+			t.Errorf("expected memory/size-capped -mmt=1, got %v", capturedArgs)
+		}
+	})
+
+	t.Run("xz compression uses resolveThreadCap and --memlimit-compress", func(t *testing.T) {
+		capturedName = ""
+		capturedArgs = nil
+		if err := runFormatCompression(Xz, "xz", dataset, compFile); err != nil {
+			t.Fatalf("runFormatCompression(Xz) failed: %v", err)
+		}
+		if !containsArg(capturedArgs, "-T1") || containsArg(capturedArgs, "-T0") {
+			t.Errorf("expected -T1 (not -T0) for xz bench compression, got %v", capturedArgs)
+		}
+		if !containsArg(capturedArgs, "--memlimit-compress=1024MiB") {
+			t.Errorf("expected --memlimit-compress=1024MiB, got %v", capturedArgs)
+		}
+	})
+
+	t.Run("xz decompression uses resolveThreadCap and --memlimit-mt-decompress", func(t *testing.T) {
+		capturedName = ""
+		capturedArgs = nil
+		if err := runFormatDecompression(Xz, "xz", compFile, decompFile, extractDir); err != nil {
+			t.Fatalf("runFormatDecompression(Xz) failed: %v", err)
+		}
+		if !containsArg(capturedArgs, "-T1") || containsArg(capturedArgs, "-T0") {
+			t.Errorf("expected -T1 (not -T0) for xz bench decompression, got %v", capturedArgs)
+		}
+		if !containsArg(capturedArgs, "--memlimit-mt-decompress=1024MiB") {
+			t.Errorf("expected --memlimit-mt-decompress=1024MiB, got %v", capturedArgs)
+		}
+	})
+
+	t.Run("stderr is bounded via limitedBuffer on failure", func(t *testing.T) {
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return exec.Command("sh", "-c", "head -c 131072 /dev/zero | tr '\\0' 'E' >&2; exit 1")
+		}
+		err := runFormatCompression(Gz, "pigz", dataset, compFile)
+		if err == nil {
+			t.Fatal("expected error from failing command, got nil")
+		}
+		if len(err.Error()) > maxStderrBytes+512 {
+			t.Errorf("error message length %d exceeds bounded buffer limit (%d)", len(err.Error()), maxStderrBytes)
+		}
+	})
+}
+

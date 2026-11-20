@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -71,11 +72,21 @@ func targetPathForConvert(srcFile string, srcFormat, targetFormat Format, outDir
 }
 
 func buildDecompressCmdForFile(srcFile string, info FormatInfo, threadLimit int) *exec.Cmd {
-	threads := threadLimit
-	if threads <= 0 {
-		threads = NCPU()
+	return buildDecompressCmdForFileWithMem(srcFile, info, threadLimit, getMemLimit())
+}
+
+func buildDecompressCmdForFileWithMem(srcFile string, info FormatInfo, threadLimit int, memBudgetMB int) *exec.Cmd {
+	budget := effectiveMemBudget(memBudgetMB)
+	var srcSize int64
+	if fi, err := os.Stat(srcFile); err == nil {
+		srcSize = fi.Size()
 	}
-	tStr := fmt.Sprintf("%d", threads)
+	capThreads := resolveThreadCapForBudget(info.Format, srcSize, budget)
+	threads := threadLimit
+	if threads <= 0 || threads > capThreads {
+		threads = capThreads
+	}
+	tStr := strconv.Itoa(threads)
 
 	switch info.Format {
 	case Gz:
@@ -84,7 +95,12 @@ func buildDecompressCmdForFile(srcFile string, info FormatInfo, threadLimit int)
 		}
 		return execCommand("gzip", "-dc", "--", srcFile)
 	case Xz:
-		return execCommand("xz", "-dc", "-T"+tStr, "--", srcFile)
+		args := []string{"-dc", "-T" + tStr}
+		if budget > 0 {
+			args = append(args, fmt.Sprintf("--memlimit-mt-decompress=%dMiB", max(65, budget)))
+		}
+		args = append(args, "--", srcFile)
+		return execCommand("xz", args...)
 	case Bz2:
 		bin := bzip2Bin()
 		if bin == "lbzip2" {
@@ -103,7 +119,12 @@ func buildDecompressCmdForFile(srcFile string, info FormatInfo, threadLimit int)
 		}
 		return execCommand("lzip", "-dc", "--", srcFile)
 	case Lrz:
-		return execCommand("lrzip", "-d", "-p", tStr, "-o", "-", "--", srcFile)
+		args := []string{"-d", "-p", tStr, "-o", "-"}
+		if budget > 0 {
+			args = append(args, "-m", strconv.Itoa(max(1, budget/100)))
+		}
+		args = append(args, "--", srcFile)
+		return execCommand("lrzip", args...)
 	case Lz4:
 		args := []string{"-dc"}
 		if lz4SupportsThreads() {
@@ -125,8 +146,18 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 	}
 	defer outFile.Close()
 
+	var srcSize int64
+	if fi, err := os.Stat(srcFile); err == nil {
+		srcSize = fi.Size()
+	}
+	memTotal := getMemLimit()
+
 	if targetFormat == Tar {
-		decompCmd := buildDecompressCmdForFile(srcFile, srcInfo, opts.ThreadLimit)
+		decompThreads := resolveThreadCapForBudget(srcInfo.Format, srcSize, memTotal)
+		if opts.ThreadLimit > 0 && opts.ThreadLimit < decompThreads {
+			decompThreads = opts.ThreadLimit
+		}
+		decompCmd := buildDecompressCmdForFileWithMem(srcFile, srcInfo, decompThreads, memTotal)
 		decompCmd.Stdout = outFile
 		decompCmd.Stderr = os.Stderr
 		if err := decompCmd.Run(); err != nil {
@@ -146,7 +177,11 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		}
 		defer inFile.Close()
 
-		compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: opts.ThreadLimit})
+		compThreads := resolveThreadCapForBudget(targetFormat, srcSize, memTotal)
+		if opts.ThreadLimit > 0 && opts.ThreadLimit < compThreads {
+			compThreads = opts.ThreadLimit
+		}
+		compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: compThreads, MemBudgetMB: memTotal})
 		compCmd.Stdin = inFile
 		compCmd.Stdout = outFile
 		compCmd.Stderr = os.Stderr
@@ -158,13 +193,26 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		return nil
 	}
 
+	stageBudget := 0
+	if memTotal > 0 {
+		stageBudget = max(128, memTotal/2)
+	}
+	decompThreads := resolveThreadCapForBudget(srcInfo.Format, srcSize, stageBudget)
+	if opts.ThreadLimit > 0 && opts.ThreadLimit < decompThreads {
+		decompThreads = opts.ThreadLimit
+	}
+	compThreads := resolveThreadCapForBudget(targetFormat, srcSize, stageBudget)
+	if opts.ThreadLimit > 0 && opts.ThreadLimit < compThreads {
+		compThreads = opts.ThreadLimit
+	}
+
 	pr, pw := io.Pipe()
 
-	decompCmd := buildDecompressCmdForFile(srcFile, srcInfo, opts.ThreadLimit)
+	decompCmd := buildDecompressCmdForFileWithMem(srcFile, srcInfo, decompThreads, stageBudget)
 	decompCmd.Stdout = pw
 	decompCmd.Stderr = os.Stderr
 
-	compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: opts.ThreadLimit})
+	compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: compThreads, MemBudgetMB: stageBudget})
 	compCmd.Stdin = pr
 	compCmd.Stdout = outFile
 	compCmd.Stderr = os.Stderr
@@ -222,6 +270,13 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		return fmt.Errorf("extrayendo archivo para conversión: %w", err)
 	}
 
+	dirSize, _ := GetDirSize(tmpDir)
+	memTotal := getMemLimit()
+	compThreads := resolveThreadCapForBudget(targetFormat, dirSize, memTotal)
+	if opts.ThreadLimit > 0 && opts.ThreadLimit < compThreads {
+		compThreads = opts.ThreadLimit
+	}
+
 	if targetFormat.IsStream() || targetFormat == Tar {
 		if targetFormat == Tar {
 			cmd := execCommand("tar", "-cf", outPath, "-C", tmpDir, ".")
@@ -239,7 +294,7 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		defer outFile.Close()
 
 		tarCmd := execCommand("tar", "-cf", "-", "-C", tmpDir, ".")
-		compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: opts.ThreadLimit})
+		compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: compThreads, MemBudgetMB: memTotal})
 
 		pr, pw := io.Pipe()
 		tarCmd.Stdout = pw
@@ -291,7 +346,7 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 			return nil
 		}
 		if hasTool("7z") {
-			args := []string{"a", "-tzip"}
+			args := []string{"a", "-tzip", "-mmt=" + threadStr(compThreads)}
 			if opts.Password != "" {
 				args = append(args, "-p"+opts.Password)
 			}
@@ -307,7 +362,8 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		return fmt.Errorf("no hay herramienta disponible para crear zip")
 	case SevenZ:
 		bin := sevenzBin()
-		args := []string{"a"}
+		md := adaptive7zDictForBudget(dirSize, compThreads, memTotal)
+		args := []string{"a", md, "-mmt=" + threadStr(compThreads)}
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password, "-mhe=on")
 		}
@@ -321,7 +377,7 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		return nil
 	case Rar:
 		bin := rarBin()
-		args := []string{"a"}
+		args := []string{"a", "-mt" + threadStr(compThreads)}
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
 		}

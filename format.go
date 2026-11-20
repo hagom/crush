@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type Format int
@@ -152,62 +153,64 @@ var textOrCodeExts = map[string]bool{
 	".tar": true,
 }
 
-func DetectAutoFormat(path string) Format {
-	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
-		if hasTool(sevenzBin()) {
-			return SevenZ
-		}
-		if hasTool("zstd") {
-			return Zst
-		}
-		return Gz
-	}
+const (
+	headerSampleSize     = 65536
+	minHighEntropySample = 4096
+	highEntropyThreshold = 7.90
+)
 
-	lower := strings.ToLower(path)
-	for _, entry := range knownTarSuffixes {
-		if strings.HasSuffix(lower, entry.suffix) {
-			return Zst
-		}
-	}
+var headerSamplePool = sync.Pool{
+	New: func() any {
+		b := make([]byte, headerSampleSize)
+		return &b
+	},
+}
 
+func dirAutoFormat() Format {
+	if hasTool(sevenzBin()) {
+		return SevenZ
+	}
+	if hasTool("zstd") {
+		return Zst
+	}
+	return Gz
+}
+
+func highEntropyAutoFormat() Format {
+	if hasTool("lz4") {
+		return Lz4
+	}
+	if hasTool("zstd") {
+		return Zst
+	}
+	return Gz
+}
+
+func detectFormatByExt(path string) (Format, bool) {
+	if HasTarSuffix(path) {
+		return Zst, true
+	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if mediaOrCompressedExts[ext] {
-		return Zst
+		return Zst, true
 	}
 	if textOrCodeExts[ext] {
-		return Xz
+		return Xz, true
 	}
+	return 0, false
+}
 
-	f, err := os.Open(path)
-	if err != nil {
+func classifyHeaderSample(sample []byte, highEntropy bool) Format {
+	if len(sample) == 0 {
 		return Zst
 	}
-	defer f.Close()
-
-	buf := make([]byte, 65536)
-	n, err := io.ReadFull(f, buf)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return Zst
-	}
-	if n == 0 {
-		return Zst
-	}
-	sample := buf[:n]
-
-	// Si tiene alta entropía (>= 7.90 b/B en muestra >= 4 KiB), son datos pre-comprimidos o cifrados
-	if len(sample) >= 4096 && CalculateShannonEntropy(sample) >= 7.90 {
-		if hasTool("lz4") {
-			return Lz4
-		}
-		if hasTool("zstd") {
-			return Zst
-		}
-		return Gz
+	if highEntropy {
+		return highEntropyAutoFormat()
 	}
 
 	nullCount := 0
 	controlCount := 0
-	checkLimit := n
+	checkLimit := len(sample)
 	if checkLimit > 512 {
 		checkLimit = 512
 	}
@@ -223,6 +226,68 @@ func DetectAutoFormat(path string) Format {
 		return Zst
 	}
 	return Xz
+}
+
+func inspectFileHeader(path string, classify, checkEntropy bool) (Format, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Zst, false
+	}
+	defer f.Close()
+
+	bufPtr := headerSamplePool.Get().(*[]byte)
+	defer headerSamplePool.Put(bufPtr)
+
+	n, err := io.ReadFull(f, *bufPtr)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return Zst, false
+	}
+	sample := (*bufPtr)[:n]
+	highEntropy := false
+	if checkEntropy && n >= minHighEntropySample {
+		highEntropy = CalculateShannonEntropy(sample) >= highEntropyThreshold
+	}
+	if !classify {
+		return Zst, highEntropy
+	}
+	return classifyHeaderSample(sample, highEntropy), highEntropy
+}
+
+func InspectAutoFormat(path string) (Format, bool) {
+	fi, statErr := os.Stat(path)
+	if statErr == nil && fi.IsDir() {
+		return dirAutoFormat(), false
+	}
+
+	extFmt, hasExtFmt := detectFormatByExt(path)
+	if statErr != nil {
+		if hasExtFmt {
+			return extFmt, false
+		}
+		return Zst, false
+	}
+
+	canBeHighEntropy := fi.Mode().IsRegular() && fi.Size() >= minHighEntropySample
+	if hasExtFmt && !canBeHighEntropy {
+		return extFmt, false
+	}
+
+	sampleFmt, highEntropy := inspectFileHeader(path, !hasExtFmt, canBeHighEntropy)
+	if hasExtFmt {
+		return extFmt, highEntropy
+	}
+	return sampleFmt, highEntropy
+}
+
+func DetectAutoFormat(path string) Format {
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return dirAutoFormat()
+	}
+	if extFmt, ok := detectFormatByExt(path); ok {
+		return extFmt
+	}
+	sampleFmt, _ := inspectFileHeader(path, true, true)
+	return sampleFmt
 }
 
 // CalculateShannonEntropy calcula la entropía de Shannon en bits por byte (0.00 a 8.00)
@@ -250,24 +315,11 @@ func CalculateShannonEntropy(data []byte) float64 {
 // (>= 7.90 bits/byte en muestras de al menos 4096 bytes), lo que indica datos ya comprimidos o cifrados.
 func IsHighEntropyFile(path string) bool {
 	fi, err := os.Stat(path)
-	if err != nil || fi.IsDir() || fi.Size() < 4096 {
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() < minHighEntropySample {
 		return false
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	buf := make([]byte, 65536)
-	n, err := io.ReadFull(f, buf)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return false
-	}
-	if n < 4096 {
-		return false
-	}
-	return CalculateShannonEntropy(buf[:n]) >= 7.90
+	_, highEntropy := inspectFileHeader(path, false, true)
+	return highEntropy
 }
 
 func ParseFormat(s string) (Format, error) {

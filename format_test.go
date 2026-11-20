@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -721,5 +722,189 @@ func TestParseFormatFromExt_StrictDots(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInspectAutoFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	writeFile := func(name string, data []byte) string {
+		p := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(p, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	makeText := func(n int) []byte {
+		pattern := []byte("Structured plain text log line for entropy testing.\n")
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = pattern[i%len(pattern)]
+		}
+		return b
+	}
+
+	makeLowEntropyBin := func(n int) []byte {
+		b := make([]byte, n)
+		copy(b, []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00})
+		return b
+	}
+
+	makeHighEntropy := func(n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte((i*1664525 + 1013904223) & 0xFF)
+		}
+		return b
+	}
+
+	wantDirFmt := Gz
+	if hasTool(sevenzBin()) {
+		wantDirFmt = SevenZ
+	} else if hasTool("zstd") {
+		wantDirFmt = Zst
+	}
+
+	wantHighEntropyFmt := Gz
+	if hasTool("lz4") {
+		wantHighEntropyFmt = Lz4
+	} else if hasTool("zstd") {
+		wantHighEntropyFmt = Zst
+	}
+
+	emptyFile := writeFile("empty_noext", nil)
+	smallText := writeFile("small_text", []byte("hello world\nsecond line\n"))
+	smallBin := writeFile("small_bin", makeLowEntropyBin(512))
+	smallMp4 := writeFile("small.mp4", makeHighEntropy(1024))
+	largeText := writeFile("large_text", makeText(65536))
+	largeBin := writeFile("large_bin", makeLowEntropyBin(65536))
+	largeRandom := writeFile("large_random", makeHighEntropy(65536))
+	highEntropyMp4 := writeFile("movie.mp4", makeHighEntropy(65536))
+	lowEntropyMp4 := writeFile("zeros.mp4", makeLowEntropyBin(65536))
+	highEntropyZip := writeFile("pack.zip", makeHighEntropy(65536))
+	lowEntropyTxt := writeFile("notes.txt", makeText(65536))
+	highEntropyTxt := writeFile("encrypted.txt", makeHighEntropy(65536))
+	highEntropyTarGz := writeFile("bundle.tar.gz", makeHighEntropy(65536))
+
+	ctrlData := make([]byte, 512)
+	for i := range ctrlData {
+		if i%5 == 0 {
+			ctrlData[i] = 0x07
+		} else {
+			ctrlData[i] = 'a'
+		}
+	}
+	ctrlBin := writeFile("ctrl_noext", ctrlData)
+
+	symlinkRandom := filepath.Join(tmpDir, "link_random")
+	if err := os.Symlink(largeRandom, symlinkRandom); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name            string
+		path            string
+		wantFmt         Format
+		wantHighEntropy bool
+	}{
+		{"directory", tmpDir, wantDirFmt, false},
+		{"nonexistent media ext", filepath.Join(tmpDir, "missing.mp4"), Zst, false},
+		{"nonexistent tar.gz ext", filepath.Join(tmpDir, "missing.tar.gz"), Zst, false},
+		{"nonexistent text ext", filepath.Join(tmpDir, "missing.json"), Xz, false},
+		{"nonexistent unknown ext", filepath.Join(tmpDir, "missing_noext"), Zst, false},
+		{"empty file without ext", emptyFile, Zst, false},
+		{"small text under 4KiB", smallText, Xz, false},
+		{"small binary under 4KiB", smallBin, Zst, false},
+		{"control-heavy binary without nulls", ctrlBin, Zst, false},
+		{"small mp4 under 4KiB", smallMp4, Zst, false},
+		{"large plain text without ext", largeText, Xz, false},
+		{"large low-entropy binary without ext", largeBin, Zst, false},
+		{"large high-entropy without ext", largeRandom, wantHighEntropyFmt, true},
+		{"symlink to high-entropy file", symlinkRandom, wantHighEntropyFmt, true},
+		{"large high-entropy mp4", highEntropyMp4, Zst, true},
+		{"large low-entropy mp4", lowEntropyMp4, Zst, false},
+		{"large high-entropy zip", highEntropyZip, Zst, true},
+		{"large low-entropy txt", lowEntropyTxt, Xz, false},
+		{"large high-entropy txt", highEntropyTxt, Xz, true},
+		{"large high-entropy tar.gz", highEntropyTarGz, Zst, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFmt, gotHigh := InspectAutoFormat(tc.path)
+			if gotFmt != tc.wantFmt || gotHigh != tc.wantHighEntropy {
+				t.Errorf("InspectAutoFormat(%q) = (%v, %v), want (%v, %v)",
+					tc.path, gotFmt, gotHigh, tc.wantFmt, tc.wantHighEntropy)
+			}
+			if wantDetect := DetectAutoFormat(tc.path); gotFmt != wantDetect {
+				t.Errorf("InspectAutoFormat(%q) format = %v, DetectAutoFormat = %v", tc.path, gotFmt, wantDetect)
+			}
+			if wantEntropy := IsHighEntropyFile(tc.path); gotHigh != wantEntropy {
+				t.Errorf("InspectAutoFormat(%q) highEntropy = %v, IsHighEntropyFile = %v", tc.path, gotHigh, wantEntropy)
+			}
+		})
+	}
+}
+
+func TestInspectAutoFormat_PooledBufferSafetyAndConcurrency(t *testing.T) {
+	bufPtr, ok := headerSamplePool.Get().(*[]byte)
+	if !ok || bufPtr == nil || len(*bufPtr) != headerSampleSize {
+		t.Fatalf("headerSamplePool yielded invalid buffer: ok=%v ptr=%v", ok, bufPtr)
+	}
+	headerSamplePool.Put(bufPtr)
+
+	tmpDir := t.TempDir()
+
+	rndData := make([]byte, 65536)
+	for i := range rndData {
+		rndData[i] = byte((i*1664525 + 1013904223) & 0xFF)
+	}
+	rndFile := filepath.Join(tmpDir, "rnd_noext")
+	if err := os.WriteFile(rndFile, rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tinyText := filepath.Join(tmpDir, "tiny_noext")
+	if err := os.WriteFile(tinyText, []byte("plain ascii text\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	emptyFile := filepath.Join(tmpDir, "empty_noext")
+	if err := os.WriteFile(emptyFile, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wantRndFmt := Gz
+	if hasTool("lz4") {
+		wantRndFmt = Lz4
+	} else if hasTool("zstd") {
+		wantRndFmt = Zst
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				if f, high := InspectAutoFormat(rndFile); f != wantRndFmt || !high {
+					t.Errorf("rndFile: got (%v, %v), want (%v, true)", f, high, wantRndFmt)
+				}
+				if f, high := InspectAutoFormat(tinyText); f != Xz || high {
+					t.Errorf("tinyText after rndFile: got (%v, %v), want (Xz, false)", f, high)
+				}
+				if f, high := InspectAutoFormat(emptyFile); f != Zst || high {
+					t.Errorf("emptyFile after tinyText: got (%v, %v), want (Zst, false)", f, high)
+				}
+				if f := DetectAutoFormat(tinyText); f != Xz {
+					t.Errorf("DetectAutoFormat(tinyText) = %v, want Xz", f)
+				}
+				if !IsHighEntropyFile(rndFile) {
+					t.Errorf("IsHighEntropyFile(rndFile) = false, want true")
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 

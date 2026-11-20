@@ -18,6 +18,80 @@ const (
 	WatchModeDecompress
 )
 
+const (
+	defaultIgnoredTTL = 60 * time.Second
+	defaultIgnoredCap = 1024
+)
+
+type ttlSet struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+	ttl     time.Duration
+	maxCap  int
+	now     func() time.Time
+}
+
+func newTTLSet(ttl time.Duration, maxCap int) *ttlSet {
+	if ttl <= 0 {
+		ttl = defaultIgnoredTTL
+	}
+	if maxCap <= 0 {
+		maxCap = defaultIgnoredCap
+	}
+	return &ttlSet{
+		entries: make(map[string]time.Time),
+		ttl:     ttl,
+		maxCap:  maxCap,
+		now:     time.Now,
+	}
+}
+
+func (s *ttlSet) pruneLocked(now time.Time) {
+	for k, exp := range s.entries {
+		if !now.Before(exp) {
+			delete(s.entries, k)
+		}
+	}
+}
+
+func (s *ttlSet) Add(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	s.pruneLocked(now)
+	if _, exists := s.entries[key]; !exists {
+		for len(s.entries) >= s.maxCap {
+			var oldestKey string
+			var oldestExp time.Time
+			first := true
+			for k, exp := range s.entries {
+				if first || exp.Before(oldestExp) || (exp.Equal(oldestExp) && k < oldestKey) {
+					oldestKey = k
+					oldestExp = exp
+					first = false
+				}
+			}
+			delete(s.entries, oldestKey)
+		}
+	}
+	s.entries[key] = now.Add(s.ttl)
+}
+
+func (s *ttlSet) Contains(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	s.pruneLocked(now)
+	_, ok := s.entries[key]
+	return ok
+}
+
+func (s *ttlSet) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
+}
+
 type WatcherOptions struct {
 	Dir            string
 	Mode           WatcherMode
@@ -44,7 +118,7 @@ func RunWatcher(ctx context.Context, opts WatcherOptions) error {
 		opts.PollInterval = 1 * time.Second
 	}
 
-	var ignoredOutputs sync.Map
+	ignoredOutputs := newTTLSet(defaultIgnoredTTL, defaultIgnoredCap)
 	var inProgress sync.Map
 
 	processFn := func(fullPath string) error {
@@ -55,7 +129,7 @@ func RunWatcher(ctx context.Context, opts WatcherOptions) error {
 		if strings.HasSuffix(base, ".tmp") || strings.HasSuffix(base, ".crush_tmp") || strings.Contains(base, ".part") {
 			return nil
 		}
-		if _, ok := ignoredOutputs.Load(base); ok {
+		if ignoredOutputs.Contains(base) {
 			return nil
 		}
 		if _, loaded := inProgress.LoadOrStore(fullPath, true); loaded {
@@ -84,9 +158,9 @@ func RunWatcher(ctx context.Context, opts WatcherOptions) error {
 				return err
 			}
 			for _, out := range outPaths {
-				ignoredOutputs.Store(filepath.Base(out), true)
+				ignoredOutputs.Add(filepath.Base(out))
 				for _, part := range globSplitParts(out) {
-					ignoredOutputs.Store(filepath.Base(part), true)
+					ignoredOutputs.Add(filepath.Base(part))
 				}
 			}
 			WriteSuccess("[Watcher] Compresión finalizada: %s", fullPath)

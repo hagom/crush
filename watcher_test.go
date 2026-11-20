@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -411,5 +412,214 @@ func TestWatcher_CLI_Flags(t *testing.T) {
 				t.Errorf("salida = %q, no contiene %q", string(out), tt.wantStderr)
 			}
 		})
+	}
+}
+
+func TestTTLSet_ExpirationAndDefaults(t *testing.T) {
+	baseTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name         string
+		ttl          time.Duration
+		maxCap       int
+		advance      time.Duration
+		wantContains bool
+		wantLen      int
+	}{
+		{
+			name:         "present before expiry",
+			ttl:          10 * time.Second,
+			maxCap:       16,
+			advance:      9 * time.Second,
+			wantContains: true,
+			wantLen:      1,
+		},
+		{
+			name:         "expired at exact boundary",
+			ttl:          10 * time.Second,
+			maxCap:       16,
+			advance:      10 * time.Second,
+			wantContains: false,
+			wantLen:      0,
+		},
+		{
+			name:         "expired after boundary",
+			ttl:          10 * time.Second,
+			maxCap:       16,
+			advance:      25 * time.Second,
+			wantContains: false,
+			wantLen:      0,
+		},
+		{
+			name:         "non-positive defaults apply",
+			ttl:          0,
+			maxCap:       0,
+			advance:      defaultIgnoredTTL - time.Second,
+			wantContains: true,
+			wantLen:      1,
+		},
+		{
+			name:         "non-positive defaults expire at default TTL",
+			ttl:          -5 * time.Second,
+			maxCap:       -1,
+			advance:      defaultIgnoredTTL,
+			wantContains: false,
+			wantLen:      0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			now := baseTime
+			s := newTTLSet(tc.ttl, tc.maxCap)
+			s.now = func() time.Time { return now }
+
+			if s.Contains("missing.gz") {
+				t.Fatalf("empty set should not contain missing.gz")
+			}
+
+			s.Add("output.tar.gz")
+			now = now.Add(tc.advance)
+
+			if got := s.Contains("output.tar.gz"); got != tc.wantContains {
+				t.Errorf("Contains = %v, want %v", got, tc.wantContains)
+			}
+			if got := s.Len(); got != tc.wantLen {
+				t.Errorf("Len = %d, want %d", got, tc.wantLen)
+			}
+		})
+	}
+}
+
+func TestTTLSet_MaxCapEviction(t *testing.T) {
+	baseTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		maxCap     int
+		inserts    int
+		wantKept   []string
+		wantEvict  []string
+	}{
+		{
+			name:      "cap 1 keeps only newest",
+			maxCap:    1,
+			inserts:   4,
+			wantKept:  []string{"f3.gz"},
+			wantEvict: []string{"f0.gz", "f1.gz", "f2.gz"},
+		},
+		{
+			name:      "cap 3 evicts oldest entries",
+			maxCap:    3,
+			inserts:   6,
+			wantKept:  []string{"f3.gz", "f4.gz", "f5.gz"},
+			wantEvict: []string{"f0.gz", "f1.gz", "f2.gz"},
+		},
+		{
+			name:      "cap 10 bounds burst",
+			maxCap:    10,
+			inserts:   25,
+			wantKept:  []string{"f15.gz", "f20.gz", "f24.gz"},
+			wantEvict: []string{"f0.gz", "f14.gz"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			now := baseTime
+			s := newTTLSet(60*time.Second, tc.maxCap)
+			s.now = func() time.Time { return now }
+
+			for i := 0; i < tc.inserts; i++ {
+				s.Add(fmt.Sprintf("f%d.gz", i))
+				now = now.Add(time.Second)
+				if s.Len() > tc.maxCap {
+					t.Fatalf("Len = %d exceeded maxCap %d at insert %d", s.Len(), tc.maxCap, i)
+				}
+			}
+
+			for _, k := range tc.wantKept {
+				if !s.Contains(k) {
+					t.Errorf("expected %q to remain in set", k)
+				}
+			}
+			for _, k := range tc.wantEvict {
+				if s.Contains(k) {
+					t.Errorf("expected %q to be evicted", k)
+				}
+			}
+		})
+	}
+
+	t.Run("refresh existing entry updates eviction order", func(t *testing.T) {
+		now := baseTime
+		s := newTTLSet(60*time.Second, 2)
+		s.now = func() time.Time { return now }
+
+		s.Add("a.gz")
+		now = now.Add(time.Second)
+		s.Add("b.gz")
+		now = now.Add(time.Second)
+		s.Add("a.gz")
+		now = now.Add(time.Second)
+		s.Add("c.gz")
+
+		if s.Len() != 2 {
+			t.Fatalf("Len = %d, want 2", s.Len())
+		}
+		if s.Contains("b.gz") {
+			t.Errorf("expected b.gz to be evicted after a.gz was refreshed")
+		}
+		if !s.Contains("a.gz") || !s.Contains("c.gz") {
+			t.Errorf("expected a.gz and c.gz to remain")
+		}
+	})
+
+	t.Run("expired entries pruned before evicting live entries", func(t *testing.T) {
+		now := baseTime
+		s := newTTLSet(10*time.Second, 2)
+		s.now = func() time.Time { return now }
+
+		s.Add("old.gz")
+		now = now.Add(5 * time.Second)
+		s.Add("live.gz")
+		now = now.Add(6 * time.Second)
+		s.Add("new.gz")
+
+		if s.Len() != 2 {
+			t.Fatalf("Len = %d, want 2", s.Len())
+		}
+		if s.Contains("old.gz") {
+			t.Errorf("expected expired old.gz to be pruned")
+		}
+		if !s.Contains("live.gz") || !s.Contains("new.gz") {
+			t.Errorf("expected live.gz and new.gz to remain")
+		}
+	})
+}
+
+func TestTTLSet_Concurrency(t *testing.T) {
+	const maxCap = 32
+	s := newTTLSet(20*time.Millisecond, maxCap)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				key := fmt.Sprintf("w%d_f%d.gz", id, i)
+				s.Add(key)
+				_ = s.Contains(key)
+				if n := s.Len(); n > maxCap {
+					t.Errorf("Len = %d exceeded maxCap %d", n, maxCap)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	if n := s.Len(); n > maxCap {
+		t.Fatalf("final Len = %d exceeded maxCap %d", n, maxCap)
 	}
 }

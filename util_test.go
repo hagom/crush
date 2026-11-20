@@ -2129,6 +2129,273 @@ func TestGetUniqueName_UnboundedAndSymlinkSafe(t *testing.T) {
 	})
 }
 
+func TestGetMemLimit_CgroupAndHost(t *testing.T) {
+	origProc := procMeminfoPath
+	origV2Max := cgroupV2MemMax
+	origV2Curr := cgroupV2MemCurr
+	origV1Lim := cgroupV1MemLimit
+	origV1Use := cgroupV1MemUsage
+	origExec := execCommand
+	defer func() {
+		procMeminfoPath = origProc
+		cgroupV2MemMax = origV2Max
+		cgroupV2MemCurr = origV2Curr
+		cgroupV1MemLimit = origV1Lim
+		cgroupV1MemUsage = origV1Use
+		execCommand = origExec
+		resetMemLimitCache()
+	}()
+
+	const mib = 1024 * 1024
+
+	tests := []struct {
+		name     string
+		meminfo  string
+		freeMock string
+		v2Max    string
+		v2Curr   string
+		v1Limit  string
+		v1Usage  string
+		wantMB   int
+	}{
+		{
+			name:     "host proc/meminfo only",
+			meminfo:  "MemTotal:       16777216 kB\nMemAvailable:    2097152 kB\n",
+			freeMock: "free-fail",
+			wantMB:   1433,
+		},
+		{
+			name:     "cgroup v2 max is unlimited string, falls back to host",
+			meminfo:  "MemAvailable:    2097152 kB\n",
+			freeMock: "free-fail",
+			v2Max:    "max\n",
+			v2Curr:   "104857600\n",
+			wantMB:   1433,
+		},
+		{
+			name:     "cgroup v2 tighter than host",
+			meminfo:  "MemAvailable:   16777216 kB\n",
+			freeMock: "free-fail",
+			v2Max:    fmt.Sprintf("%d\n", 1024*mib),
+			v2Curr:   fmt.Sprintf("%d\n", 256*mib),
+			wantMB:   537,
+		},
+		{
+			name:     "host tighter than cgroup v2 takes min",
+			meminfo:  "MemAvailable:     524288 kB\n",
+			freeMock: "free-fail",
+			v2Max:    fmt.Sprintf("%d\n", 4096*mib),
+			v2Curr:   "0\n",
+			wantMB:   358,
+		},
+		{
+			name:     "cgroup v2 saturated clamps to 1 MiB (not fallback 1024)",
+			meminfo:  "MemAvailable:   16777216 kB\n",
+			freeMock: "free-fail",
+			v2Max:    fmt.Sprintf("%d\n", 512*mib),
+			v2Curr:   fmt.Sprintf("%d\n", 600*mib),
+			wantMB:   1,
+		},
+		{
+			name:     "cgroup v2 tiny positive remaining clamps to min 1 MiB",
+			meminfo:  "MemAvailable:   16777216 kB\n",
+			freeMock: "free-fail",
+			v2Max:    fmt.Sprintf("%d\n", 10*mib),
+			v2Curr:   fmt.Sprintf("%d\n", 10*mib-512*1024),
+			wantMB:   1,
+		},
+		{
+			name:     "cgroup v2 without memory.current uses memory.max",
+			meminfo:  "MemAvailable:   16777216 kB\n",
+			freeMock: "free-fail",
+			v2Max:    fmt.Sprintf("%d\n", 1000*mib),
+			wantMB:   700,
+		},
+		{
+			name:     "cgroup v1 tighter than host",
+			meminfo:  "MemAvailable:   16777216 kB\n",
+			freeMock: "free-fail",
+			v1Limit:  fmt.Sprintf("%d\n", 512*mib),
+			v1Usage:  fmt.Sprintf("%d\n", 128*mib),
+			wantMB:   268,
+		},
+		{
+			name:     "cgroup v1 unlimited sentinel ignored",
+			meminfo:  "MemAvailable:    2097152 kB\n",
+			freeMock: "free-fail",
+			v1Limit:  "9223372036854771712\n",
+			v1Usage:  "104857600\n",
+			wantMB:   1433,
+		},
+		{
+			name:     "cgroup v1 saturated clamps to 1 MiB",
+			meminfo:  "MemAvailable:   16777216 kB\n",
+			freeMock: "free-fail",
+			v1Limit:  fmt.Sprintf("%d\n", 256*mib),
+			v1Usage:  fmt.Sprintf("%d\n", 300*mib),
+			wantMB:   1,
+		},
+		{
+			name:     "cgroup v2 only when host sources unavailable",
+			freeMock: "free-fail",
+			v2Max:    fmt.Sprintf("%d\n", 1000*mib),
+			v2Curr:   fmt.Sprintf("%d\n", 200*mib),
+			wantMB:   560,
+		},
+		{
+			name:     "free -k fallback when proc/meminfo missing and no cgroup",
+			freeMock: "free",
+			wantMB:   5734,
+		},
+		{
+			name:     "fallback 1024 when neither host nor cgroup yields a value",
+			freeMock: "free-fail",
+			wantMB:   1024,
+		},
+		{
+			name:     "malformed cgroup files ignored in favor of host",
+			meminfo:  "MemAvailable:    1048576 kB\n",
+			freeMock: "free-fail",
+			v2Max:    "not-a-number\n",
+			v1Limit:  "-500\n",
+			wantMB:   716,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			writeOpt := func(name, content string) string {
+				p := filepath.Join(tmp, name)
+				if content != "" {
+					if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return p
+			}
+
+			procMeminfoPath = writeOpt("meminfo", tt.meminfo)
+			cgroupV2MemMax = writeOpt("memory.max", tt.v2Max)
+			cgroupV2MemCurr = writeOpt("memory.current", tt.v2Curr)
+			cgroupV1MemLimit = writeOpt("memory.limit_in_bytes", tt.v1Limit)
+			cgroupV1MemUsage = writeOpt("memory.usage_in_bytes", tt.v1Usage)
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				return mockExecCommand(tt.freeMock, args...)
+			}
+			resetMemLimitCache()
+
+			got := GetMemLimit()
+			if got != tt.wantMB {
+				t.Errorf("GetMemLimit() = %d, want %d", got, tt.wantMB)
+			}
+		})
+	}
+}
+
+func TestGetMemLimit_TTLCache(t *testing.T) {
+	origProc := procMeminfoPath
+	origV2Max := cgroupV2MemMax
+	origV2Curr := cgroupV2MemCurr
+	origV1Lim := cgroupV1MemLimit
+	origV1Use := cgroupV1MemUsage
+	origExec := execCommand
+	origNow := memNow
+	defer func() {
+		procMeminfoPath = origProc
+		cgroupV2MemMax = origV2Max
+		cgroupV2MemCurr = origV2Curr
+		cgroupV1MemLimit = origV1Lim
+		cgroupV1MemUsage = origV1Use
+		execCommand = origExec
+		memNow = origNow
+		resetMemLimitCache()
+	}()
+
+	tmp := t.TempDir()
+	cgroupV2MemMax = filepath.Join(tmp, "missing_v2_max")
+	cgroupV2MemCurr = filepath.Join(tmp, "missing_v2_curr")
+	cgroupV1MemLimit = filepath.Join(tmp, "missing_v1_lim")
+	cgroupV1MemUsage = filepath.Join(tmp, "missing_v1_use")
+
+	var mu sync.Mutex
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	memNow = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+
+	t.Run("caches value within TTL and refreshes on expiry or reset", func(t *testing.T) {
+		memPath := filepath.Join(tmp, "meminfo")
+		procMeminfoPath = memPath
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return mockExecCommand("free-fail", args...)
+		}
+
+		if err := os.WriteFile(memPath, []byte("MemAvailable:    2097152 kB\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		resetMemLimitCache()
+		if got := GetMemLimit(); got != 1433 {
+			t.Fatalf("initial GetMemLimit() = %d, want 1433", got)
+		}
+
+		if err := os.WriteFile(memPath, []byte("MemAvailable:    4194304 kB\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		now = now.Add(memCacheTTL / 2)
+		mu.Unlock()
+		if got := GetMemLimit(); got != 1433 {
+			t.Fatalf("within-TTL GetMemLimit() = %d, want cached 1433", got)
+		}
+
+		mu.Lock()
+		now = now.Add(memCacheTTL)
+		mu.Unlock()
+		if got := GetMemLimit(); got != 2867 {
+			t.Fatalf("post-TTL GetMemLimit() = %d, want refreshed 2867", got)
+		}
+
+		if err := os.WriteFile(memPath, []byte("MemAvailable:    1048576 kB\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		resetMemLimitCache()
+		if got := GetMemLimit(); got != 716 {
+			t.Fatalf("post-reset GetMemLimit() = %d, want 716", got)
+		}
+	})
+
+	t.Run("coalesces concurrent probes without repeated free forks", func(t *testing.T) {
+		procMeminfoPath = filepath.Join(tmp, "missing_meminfo")
+		freeCalls := 0
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			mu.Lock()
+			freeCalls++
+			mu.Unlock()
+			return mockExecCommand("free", args...)
+		}
+		resetMemLimitCache()
+
+		var wg sync.WaitGroup
+		for i := 0; i < 16; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if got := GetMemLimit(); got != 5734 {
+					t.Errorf("GetMemLimit() = %d, want 5734", got)
+				}
+			}()
+		}
+		wg.Wait()
+
+		if freeCalls != 1 {
+			t.Fatalf("expected 1 probe across 16 concurrent callers, got %d", freeCalls)
+		}
+	})
+}
+
 
 
 

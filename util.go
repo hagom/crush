@@ -393,35 +393,137 @@ func lz4SupportsThreads() bool {
 
 // --- Memory ---
 
-var getMemLimit = GetMemLimit
+const (
+	cgroupUnlimitedBytes = int64(1) << 60
+	defaultMemLimitMB    = 1024
+)
+
+var (
+	getMemLimit = GetMemLimit
+
+	procMeminfoPath  = "/proc/meminfo"
+	cgroupV2MemMax   = "/sys/fs/cgroup/memory.max"
+	cgroupV2MemCurr  = "/sys/fs/cgroup/memory.current"
+	cgroupV1MemLimit = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+	cgroupV1MemUsage = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+
+	memCacheMu    sync.Mutex
+	memCacheVal   int
+	memCacheAt    time.Time
+	memCacheValid bool
+	memCacheTTL   = 250 * time.Millisecond
+	memNow        = time.Now
+)
+
+func resetMemLimitCache() {
+	memCacheMu.Lock()
+	memCacheValid = false
+	memCacheVal = 0
+	memCacheAt = time.Time{}
+	memCacheMu.Unlock()
+}
 
 func GetMemLimit() int {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err == nil {
+	memCacheMu.Lock()
+	defer memCacheMu.Unlock()
+
+	now := memNow()
+	if memCacheValid {
+		if elapsed := now.Sub(memCacheAt); elapsed >= 0 && elapsed < memCacheTTL {
+			return memCacheVal
+		}
+	}
+
+	val := probeMemLimitMB()
+	memCacheVal = val
+	memCacheAt = now
+	memCacheValid = true
+	return val
+}
+
+func probeMemLimitMB() int {
+	hostBytes, hostOK := readHostMemAvailBytes()
+	cgBytes, cgOK := readCgroupMemAvailBytes()
+
+	var availBytes int64
+	switch {
+	case hostOK && cgOK:
+		availBytes = min(hostBytes, cgBytes)
+	case hostOK:
+		availBytes = hostBytes
+	case cgOK:
+		availBytes = cgBytes
+	default:
+		return defaultMemLimitMB
+	}
+
+	mb := int((availBytes / 1024) * 70 / 100 / 1024)
+	if mb < 1 {
+		return 1
+	}
+	return mb
+}
+
+func readHostMemAvailBytes() (int64, bool) {
+	if data, err := os.ReadFile(procMeminfoPath); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			if strings.HasPrefix(line, "MemAvailable:") {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
-					if kb, err := strconv.Atoi(fields[1]); err == nil && kb > 0 {
-						return kb * 70 / 100 / 1024
+					if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil && kb > 0 && kb <= math.MaxInt64/1024 {
+						return kb * 1024, true
 					}
 				}
 			}
 		}
 	}
-
-	if mb := getMemFromFree(); mb > 0 {
-		return mb
-	}
-
-	return 1024
+	return getMemAvailBytesFromFree()
 }
 
-func getMemFromFree() int {
+func readInt64File(path string) (int64, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "" || s == "max" {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+func readCgroupPair(limitPath, usagePath string) (int64, bool) {
+	limit, ok := readInt64File(limitPath)
+	if !ok || limit <= 0 || limit >= cgroupUnlimitedBytes {
+		return 0, false
+	}
+	usage, ok := readInt64File(usagePath)
+	if !ok || usage < 0 {
+		return limit, true
+	}
+	rem := limit - usage
+	if rem < 0 {
+		rem = 0
+	}
+	return rem, true
+}
+
+func readCgroupMemAvailBytes() (int64, bool) {
+	if rem, ok := readCgroupPair(cgroupV2MemMax, cgroupV2MemCurr); ok {
+		return rem, true
+	}
+	return readCgroupPair(cgroupV1MemLimit, cgroupV1MemUsage)
+}
+
+func getMemAvailBytesFromFree() (int64, bool) {
 	cmd := execCommand("free", "-k")
 	out, err := cmd.Output()
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
 	for scanner.Scan() {
@@ -429,11 +531,18 @@ func getMemFromFree() int {
 		if strings.HasPrefix(line, "Mem:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 7 {
-				if avail, err := strconv.Atoi(fields[6]); err == nil && avail > 0 {
-					return avail * 70 / 100 / 1024
+				if avail, err := strconv.ParseInt(fields[6], 10, 64); err == nil && avail > 0 && avail <= math.MaxInt64/1024 {
+					return avail * 1024, true
 				}
 			}
 		}
+	}
+	return 0, false
+}
+
+func getMemFromFree() int {
+	if b, ok := getMemAvailBytesFromFree(); ok && b > 0 {
+		return int((b / 1024) * 70 / 100 / 1024)
 	}
 	return 0
 }

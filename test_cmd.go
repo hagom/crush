@@ -2,11 +2,62 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
+
+const maxTestDiagBytes = 32 * 1024
+
+type cappedDiagBuffer struct {
+	mu        sync.Mutex
+	buf       []byte
+	max       int
+	truncated bool
+}
+
+func newCappedDiagBuffer(max int) *cappedDiagBuffer {
+	if max <= 0 {
+		max = maxTestDiagBytes
+	}
+	return &cappedDiagBuffer{max: max}
+}
+
+func (b *cappedDiagBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	origLen := len(p)
+	if origLen == 0 {
+		return 0, nil
+	}
+	if len(b.buf)+origLen > b.max {
+		b.truncated = true
+	}
+	if origLen >= b.max {
+		if cap(b.buf) < b.max {
+			b.buf = make([]byte, b.max)
+		} else {
+			b.buf = b.buf[:b.max]
+		}
+		copy(b.buf, p[origLen-b.max:])
+		return origLen, nil
+	}
+	if overflow := len(b.buf) + origLen - b.max; overflow > 0 {
+		copy(b.buf, b.buf[overflow:])
+		b.buf = b.buf[:len(b.buf)-overflow]
+	}
+	b.buf = append(b.buf, p...)
+	return origLen, nil
+}
+
+func (b *cappedDiagBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}
 
 type TestOptions struct {
 	Verbose  bool
@@ -128,76 +179,72 @@ func TestFile(file string, opts TestOptions) (string, error) {
 }
 
 func testArchiveIntegrity(file string, opts TestOptions) (string, error) {
-	if info, err := DetectFormat(file); err == nil && info.IsContainer() {
+	info, err := DetectFormat(file)
+	if err != nil {
+		return "", err
+	}
+	if info.IsContainer() {
 		if p, err := GetPasswordManager().ResolvePassword(file, info.Format, opts.Password); err == nil && p != "" {
 			opts.Password = p
 		}
 	}
 
-	ext := strings.ToLower(file)
+	var fileSize int64
+	if fi, err := os.Stat(file); err == nil {
+		fileSize = fi.Size()
+	}
 
-	switch {
-	case strings.HasSuffix(ext, ".tar.gz") || strings.HasSuffix(ext, ".tgz"):
+	switch info.Format {
+	case Gz:
 		if hasTool("pigz") {
 			return testWith(file, "pigz", "-t", "--", file)
 		}
 		return testWith(file, "gzip", "-t", "--", file)
 
-	case strings.HasSuffix(ext, ".tar.xz") || strings.HasSuffix(ext, ".txz"):
-		return testWith(file, "xz", "-t", "-T0", "--", file)
-
-	case strings.HasSuffix(ext, ".tar.bz2") || strings.HasSuffix(ext, ".tbz2"):
-		return testWith(file, bzip2Bin(), "-t", "--", file)
-
-	case strings.HasSuffix(ext, ".tar.bz3"):
-		return testWith(file, "bzip3", "-t", "-j", ncpuStr(), "--", file)
-
-	case strings.HasSuffix(ext, ".tar.zst") || strings.HasSuffix(ext, ".tzst"):
-		return testWith(file, "zstd", "-t", "-T0", "--", file)
-
-	case strings.HasSuffix(ext, ".tar.lz") || strings.HasSuffix(ext, ".tlz"):
-		return testWith(file, "plzip", "-t", "--threads="+ncpuStr(), "--", file)
-
-	case strings.HasSuffix(ext, ".tar.lrz"):
-		return testWith(file, "lrzip", "-t", "-p", ncpuStr(), "--", file)
-
-	case strings.HasSuffix(ext, ".tar.lz4"):
-		return testWith(file, "lz4", "-t", "--", file)
-
-	case strings.HasSuffix(ext, ".tar.br"):
-		return testWith(file, "brotli", "-t", "--", file)
-
-	case strings.HasSuffix(ext, ".tar"):
-		return testWith(file, "tar", "-tf", safeFlagArg(file), "--")
-
-	case strings.HasSuffix(ext, ".gz"):
-		if hasTool("pigz") {
-			return testWith(file, "pigz", "-t", "--", file)
+	case Xz:
+		thStr := threadStr(resolveThreadCap(Xz, fileSize))
+		memMB := getMemLimit()
+		if memMB < 65 {
+			memMB = 65
 		}
-		return testWith(file, "gzip", "-t", "--", file)
+		return testWith(file, "xz", "-t", "-T"+thStr, fmt.Sprintf("--memlimit-mt-decompress=%dMiB", memMB), "--", file)
 
-	case strings.HasSuffix(ext, ".xz"):
-		return testWith(file, "xz", "-t", "--", file)
-
-	case strings.HasSuffix(ext, ".bz2"):
+	case Bz2:
 		return testWith(file, bzip2Bin(), "-t", "--", file)
 
-	case strings.HasSuffix(ext, ".bz3"):
-		return testWith(file, "bzip3", "-t", "--", file)
+	case Bz3:
+		thStr := threadStr(resolveThreadCap(Bz3, fileSize))
+		return testWith(file, "bzip3", "-t", "-j", thStr, "--", file)
 
-	case strings.HasSuffix(ext, ".zst"):
-		return testWith(file, "zstd", "-t", "--", file)
+	case Zst:
+		thStr := threadStr(resolveThreadCap(Zst, fileSize))
+		return testWith(file, "zstd", "-t", "-T"+thStr, "--", file)
 
-	case strings.HasSuffix(ext, ".lz"):
+	case Lz:
 		if hasTool("plzip") {
-			return testWith(file, "plzip", "-t", "--", file)
+			thStr := threadStr(resolveThreadCap(Lz, fileSize))
+			return testWith(file, "plzip", "-t", "--threads="+thStr, "--", file)
 		}
 		return testWith(file, "lzip", "-t", "--", file)
 
-	case strings.HasSuffix(ext, ".lrz"):
-		return testWith(file, "lrzip", "-t", "--", file)
+	case Lrz:
+		thStr := threadStr(resolveThreadCap(Lrz, fileSize))
+		lrzMem := getMemLimit() / 100
+		if lrzMem < 1 {
+			lrzMem = 1
+		}
+		return testWith(file, "lrzip", "-t", "-p", thStr, "-m", strconv.Itoa(lrzMem), "--", file)
 
-	case strings.HasSuffix(ext, ".zip"):
+	case Lz4:
+		return testWith(file, "lz4", "-t", "--", file)
+
+	case Br:
+		return testWith(file, "brotli", "-t", "--", file)
+
+	case Tar:
+		return testWith(file, "tar", "-tf", safeFlagArg(file), "--")
+
+	case Zip:
 		if opts.Password != "" {
 			if hasTool(sevenzBin()) {
 				return testWith(file, sevenzBin(), "t", "-p"+opts.Password, "--", file)
@@ -206,7 +253,7 @@ func testArchiveIntegrity(file string, opts TestOptions) (string, error) {
 		}
 		return testWith(file, "unzip", "-t", "--", file)
 
-	case strings.HasSuffix(ext, ".7z"):
+	case SevenZ:
 		args := []string{"t"}
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
@@ -214,19 +261,13 @@ func testArchiveIntegrity(file string, opts TestOptions) (string, error) {
 		args = append(args, "--", file)
 		return testWith(file, sevenzBin(), args...)
 
-	case strings.HasSuffix(ext, ".rar"):
+	case Rar:
 		args := []string{"t"}
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
 		}
 		args = append(args, "--", file)
 		return testWith(file, rarBin(), args...)
-
-	case strings.HasSuffix(ext, ".lz4"):
-		return testWith(file, "lz4", "-t", "--", file)
-
-	case strings.HasSuffix(ext, ".br"):
-		return testWith(file, "brotli", "-t", "--", file)
 
 	default:
 		return "", fmt.Errorf("formato no reconocido: %s", file)
@@ -238,10 +279,16 @@ func testWith(file, tool string, args ...string) (string, error) {
 		return "WARNING", nil
 	}
 	cmd := execCommand(tool, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// Return combined output for diagnostics
-		outStr := strings.TrimSpace(string(out))
+	diagBuf := newCappedDiagBuffer(maxTestDiagBytes)
+	if tool == "tar" {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = diagBuf
+	} else {
+		cmd.Stdout = diagBuf
+		cmd.Stderr = diagBuf
+	}
+	if err := cmd.Run(); err != nil {
+		outStr := strings.TrimSpace(diagBuf.String())
 		if outStr != "" {
 			return "FAIL", fmt.Errorf("%s: %s", outStr, err)
 		}

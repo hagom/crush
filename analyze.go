@@ -14,6 +14,13 @@ import (
 	"time"
 )
 
+var (
+	analyzeWalkDir              = filepath.WalkDir
+	analyzeFileFunc             = analyzeFileWithSize
+	analyzeIsTerminal           = isTerminal
+	analyzeStderr     io.Writer = os.Stderr
+)
+
 // FileAnalysis almacena las métricas individuales de análisis de un archivo regular.
 type FileAnalysis struct {
 	Path           string  // Ruta del archivo
@@ -144,11 +151,12 @@ func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
 			chunkTail = fullSample[n1+n2 : n1+n2+n3]
 		}
 
+		hMid := CalculateShannonEntropy(chunkMid)
+
 		// Puerta del cuerpo dominante: en archivos grandes (>= 192 KiB), si el cuerpo central
 		// es de alta entropía (ruido/video/cifrado), el archivo es incompresible con independencia
 		// de cuántos metadatos o ceros contenga la cabecera.
 		if len(chunkMid) >= 4096 && size >= int64(sampleBufferSize*2) {
-			hMid := CalculateShannonEntropy(chunkMid)
 			if hMid >= 7.85 || (mediaOrCompressedExts[ext] && hMid >= 7.20) {
 				res.SampleBytes = int64(len(sample))
 				res.Entropy = hMid
@@ -169,7 +177,6 @@ func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
 		}
 
 		hHead := h1
-		hMid := CalculateShannonEntropy(chunkMid)
 		hTail := hMid
 		if len(chunkTail) > 0 {
 			hTail = CalculateShannonEntropy(chunkTail)
@@ -372,12 +379,12 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 
 	if !fi.IsDir() {
 		// Análisis de un solo archivo
-		if isTerminal() {
-			fmt.Fprintf(os.Stderr, "%s🔍 Analizando '%s'...%s\r", Yellow, displayTarget, NC)
+		if analyzeIsTerminal() {
+			fmt.Fprintf(analyzeStderr, "%s🔍 Analizando '%s'...%s\r", Yellow, displayTarget, NC)
 		}
-		analysis, err := analyzeFileWithSize(target, fi.Size())
-		if isTerminal() {
-			fmt.Fprintf(os.Stderr, "\r\033[K")
+		analysis, err := analyzeFileFunc(target, fi.Size())
+		if analyzeIsTerminal() {
+			fmt.Fprintf(analyzeStderr, "\r\033[K")
 		}
 		if err != nil {
 			return fmt.Errorf("analizando %s: %w", displayTarget, err)
@@ -414,96 +421,10 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		return nil
 	}
 
-	// Análisis de directorio recursivo
 	type walkItem struct {
 		absPath string
 		relPath string
 		size    int64
-	}
-
-	var items []walkItem
-	var totalWalkBytes int64
-	dirCount := 0
-	unreadableCount := 0
-
-	if isTerminal() {
-		fmt.Fprintf(os.Stderr, "%s🔍 Escaneando archivos en '%s'...%s\r", Yellow, displayTarget, NC)
-	}
-
-	err = filepath.WalkDir(target, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			unreadableCount++
-			return nil
-		}
-
-		isDir := d.IsDir()
-		rel, relErr := filepath.Rel(target, path)
-		if relErr != nil {
-			rel = path
-		}
-
-		if path == target {
-			return nil
-		}
-
-		if isPathExcluded(rel, isDir, excludes) || isPathExcluded(path, isDir, excludes) {
-			if isDir {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Ignorar symlinks para evitar bucles o falsos duplicados
-		if d.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-
-		if isDir {
-			dirCount++
-			return nil
-		}
-
-		// Solo archivos regulares
-		if !d.Type().IsRegular() {
-			return nil
-		}
-
-		info, statErr := d.Info()
-		if statErr != nil {
-			unreadableCount++
-			return nil
-		}
-
-		items = append(items, walkItem{
-			absPath: path,
-			relPath: rel,
-			size:    info.Size(),
-		})
-		totalWalkBytes += info.Size()
-		return nil
-	})
-
-	if isTerminal() {
-		fmt.Fprintf(os.Stderr, "\r\033[K")
-	}
-
-	if err != nil {
-		return fmt.Errorf("recorriendo %s: %w", target, err)
-	}
-
-	// Análisis concurrente de los archivos recolectados mediante pool acotado de workers.
-	// En --analyze se procesan micro-muestras de 32 KiB; mantener hasta 32 workers permite
-	// que la cola NCQ del almacenamiento (tanto SSD/NVMe como HDD SATA con queue_depth=32)
-	// despache decenas de miles de archivos a máxima velocidad.
-	workers := NCPU()
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > 32 {
-		workers = 32
-	}
-	if workers > len(items) && len(items) > 0 {
-		workers = len(items)
 	}
 
 	type fileResult struct {
@@ -512,24 +433,44 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		err      error
 	}
 
-	workChan := make(chan walkItem, workers*2)
-	resChan := make(chan fileResult, workers*2)
-	var wg sync.WaitGroup
-
-	var apt *analyzeProgressTracker
-	if isTerminal() && len(items) > 0 {
-		fmt.Fprintf(os.Stderr, "%s🔍 Analizando compresibilidad en '%s' (%s en %s)...%s\n",
-			Yellow, displayTarget, FormatSize(totalWalkBytes), FormatNumber(len(items))+" archivos", NC)
-		apt = newAnalyzeProgressTracker(len(items))
-		apt.Start()
+	// Análisis concurrente en streaming mediante pool acotado de workers (1..min(NCPU(), 32)).
+	// En --analyze se procesan micro-muestras de 32 KiB; mantener hasta 32 workers permite
+	// que la cola NCQ del almacenamiento (tanto SSD/NVMe como HDD SATA con queue_depth=32)
+	// despache decenas de miles de archivos sin acumular las rutas en RAM.
+	workers := NCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 32 {
+		workers = 32
 	}
 
+	workChan := make(chan walkItem, workers*4)
+	resChan := make(chan fileResult, workers*4)
+
+	var apt *analyzeProgressTracker
+	stopProgress := func() {}
+	if analyzeIsTerminal() {
+		fmt.Fprintf(analyzeStderr, "%s🔍 Analizando compresibilidad en '%s'...%s\n", Yellow, displayTarget, NC)
+		apt = newAnalyzeProgressTracker()
+		apt.Start()
+		var cleanupOnce sync.Once
+		stopProgress = func() {
+			cleanupOnce.Do(func() {
+				apt.Stop()
+				fmt.Fprintf(analyzeStderr, "\033[1A\r\033[K")
+			})
+		}
+		defer stopProgress()
+	}
+
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for item := range workChan {
-				an, aErr := analyzeFileWithSize(item.absPath, item.size)
+				an, aErr := analyzeFileFunc(item.absPath, item.size)
 				if apt != nil {
 					apt.Incr()
 					apt.AddBytes(an.SampleBytes)
@@ -548,11 +489,74 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		close(resChan)
 	}()
 
+	var dirCount atomic.Int64
+	var unreadableCount atomic.Int64
+	walkErrCh := make(chan error, 1)
+
 	go func() {
-		for _, it := range items {
-			workChan <- it
-		}
-		close(workChan)
+		defer func() {
+			if apt != nil {
+				apt.MarkWalkDone()
+			}
+			close(workChan)
+		}()
+		walkErrCh <- analyzeWalkDir(target, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				unreadableCount.Add(1)
+				return nil
+			}
+
+			if path == target {
+				return nil
+			}
+
+			isDir := d.IsDir()
+			rel, relErr := filepath.Rel(target, path)
+			if relErr != nil {
+				rel = path
+			}
+
+			if isPathExcluded(rel, isDir, excludes) || isPathExcluded(path, isDir, excludes) {
+				if isDir {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			// Ignorar symlinks para evitar bucles o falsos duplicados
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+
+			if isDir {
+				dirCount.Add(1)
+				return nil
+			}
+
+			// Solo archivos regulares
+			if !d.Type().IsRegular() {
+				return nil
+			}
+
+			info, statErr := d.Info()
+			if statErr != nil {
+				unreadableCount.Add(1)
+				return nil
+			}
+
+			sz := info.Size()
+			if apt != nil {
+				apt.AddDiscovered(1)
+				apt.AddDiscoveredBytes(sz)
+			}
+
+			workChan <- walkItem{
+				absPath: path,
+				relPath: rel,
+				size:    sz,
+			}
+			return nil
+		})
 	}()
 
 	// Agrupación por entrada de primer nivel bajo target
@@ -573,14 +577,12 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 
 	for res := range resChan {
 		if res.err != nil {
-			unreadableCount++
+			unreadableCount.Add(1)
 			continue
 		}
 
 		an := res.analysis
-		parts := strings.Split(filepath.ToSlash(res.relPath), "/")
-		topKey := parts[0]
-		isSubDir := len(parts) > 1
+		topKey, _, isSubDir := strings.Cut(filepath.ToSlash(res.relPath), "/")
 
 		g, ok := groups[topKey]
 		if !ok {
@@ -613,16 +615,17 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		}
 	}
 
-	if apt != nil {
-		apt.Stop()
-		fmt.Fprintf(os.Stderr, "\033[1A\r\033[K")
+	stopProgress()
+
+	if walkErr := <-walkErrCh; walkErr != nil {
+		return fmt.Errorf("recorriendo %s: %w", target, walkErr)
 	}
 
 	// Construcción de entradas y resumen
 	var entries []EntryReport
 	summary := AnalyzeSummary{
-		TotalDirs:       dirCount,
-		UnreadableCount: unreadableCount,
+		TotalDirs:       int(dirCount.Load()),
+		UnreadableCount: int(unreadableCount.Load()),
 	}
 
 	for _, g := range groups {
@@ -1061,44 +1064,73 @@ func probeDeflateRatio(sample []byte) float64 {
 }
 
 type analyzeProgressTracker struct {
-	totalFiles int
-	filesDone  atomic.Int64
-	bytesRead  atomic.Int64
-	startTime  time.Time
-	ticker     *time.Ticker
-	done       chan struct{}
-	stopped    chan struct{}
-	isTTY      bool
+	discovered      atomic.Int64
+	discoveredBytes atomic.Int64
+	walkDone        atomic.Bool
+	filesDone       atomic.Int64
+	bytesRead       atomic.Int64
+	startTime       time.Time
+	tickInterval    time.Duration
+	done            chan struct{}
+	stopped         chan struct{}
+	started         atomic.Bool
+	stopOnce        sync.Once
+	isTTY           bool
+	out             io.Writer
 }
 
-func newAnalyzeProgressTracker(totalFiles int) *analyzeProgressTracker {
+func newAnalyzeProgressTracker() *analyzeProgressTracker {
 	return &analyzeProgressTracker{
-		totalFiles: totalFiles,
-		startTime:  time.Now(),
-		done:       make(chan struct{}),
-		stopped:    make(chan struct{}),
-		isTTY:      isTerminal(),
+		startTime:    time.Now(),
+		tickInterval: 100 * time.Millisecond,
+		done:         make(chan struct{}),
+		stopped:      make(chan struct{}),
+		isTTY:        analyzeIsTerminal(),
+		out:          analyzeStderr,
 	}
+}
+
+func (apt *analyzeProgressTracker) writer() io.Writer {
+	if apt.out != nil {
+		return apt.out
+	}
+	return os.Stderr
 }
 
 func (apt *analyzeProgressTracker) Start() {
-	if !apt.isTTY || apt.totalFiles <= 0 {
+	if !apt.isTTY || !apt.started.CompareAndSwap(false, true) {
 		return
 	}
-	io.WriteString(os.Stderr, "\033[?25l")
-	apt.ticker = time.NewTicker(100 * time.Millisecond)
+	io.WriteString(apt.writer(), "\033[?25l")
+	interval := apt.tickInterval
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
 	go func() {
 		defer close(apt.stopped)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-apt.ticker.C:
+			case <-ticker.C:
 				apt.render()
 			case <-apt.done:
-				apt.ticker.Stop()
 				return
 			}
 		}
 	}()
+}
+
+func (apt *analyzeProgressTracker) AddDiscovered(n int64) {
+	apt.discovered.Add(n)
+}
+
+func (apt *analyzeProgressTracker) AddDiscoveredBytes(n int64) {
+	apt.discoveredBytes.Add(n)
+}
+
+func (apt *analyzeProgressTracker) MarkWalkDone() {
+	apt.walkDone.Store(true)
 }
 
 func (apt *analyzeProgressTracker) Incr() {
@@ -1109,21 +1141,14 @@ func (apt *analyzeProgressTracker) AddBytes(n int64) {
 	apt.bytesRead.Add(n)
 }
 
-func (apt *analyzeProgressTracker) render() {
-	if !apt.isTTY {
-		return
-	}
+func (apt *analyzeProgressTracker) formatProgress() string {
 	done := apt.filesDone.Load()
+	discovered := apt.discovered.Load()
+	if discovered < done {
+		discovered = done
+	}
 	bytesRead := apt.bytesRead.Load()
 	elapsed := time.Since(apt.startTime)
-
-	pct := 0.0
-	if apt.totalFiles > 0 {
-		pct = float64(done) * 100.0 / float64(apt.totalFiles)
-		if pct > 100.0 {
-			pct = 100.0
-		}
-	}
 
 	var speedStr string
 	if elapsed.Seconds() > 0.1 && bytesRead > 0 {
@@ -1133,9 +1158,26 @@ func (apt *analyzeProgressTracker) render() {
 		speedStr = "iniciando..."
 	}
 
+	if !apt.walkDone.Load() {
+		if discBytes := apt.discoveredBytes.Load(); discBytes > 0 {
+			return fmt.Sprintf("\rEscaneando... %s/%s (%s)  %s leídos  %s\033[K",
+				FormatNumber(int(done)), FormatNumber(int(discovered)), FormatSize(discBytes), FormatSize(bytesRead), speedStr)
+		}
+		return fmt.Sprintf("\rEscaneando... %s/%s  %s leídos  %s\033[K",
+			FormatNumber(int(done)), FormatNumber(int(discovered)), FormatSize(bytesRead), speedStr)
+	}
+
+	pct := 0.0
+	if discovered > 0 {
+		pct = float64(done) * 100.0 / float64(discovered)
+		if pct > 100.0 {
+			pct = 100.0
+		}
+	}
+
 	var etaStr string
-	if done < int64(apt.totalFiles) {
-		if eta := formatETA(elapsed, done, int64(apt.totalFiles)); eta != "" && eta != "--:--" {
+	if done < discovered {
+		if eta := formatETA(elapsed, done, discovered); eta != "" && eta != "--:--" {
 			if eta == "0s" {
 				eta = "<1s"
 			}
@@ -1144,15 +1186,24 @@ func (apt *analyzeProgressTracker) render() {
 	}
 
 	bar := makeBar(pct, 20)
-	fmt.Fprintf(os.Stderr, "\r[%s] %5.1f%%  %s/%s  %s%s\033[K",
-		bar, pct, FormatNumber(int(done)), FormatNumber(apt.totalFiles), speedStr, etaStr)
+	return fmt.Sprintf("\r[%s] %5.1f%%  %s/%s  %s%s\033[K",
+		bar, pct, FormatNumber(int(done)), FormatNumber(int(discovered)), speedStr, etaStr)
+}
+
+func (apt *analyzeProgressTracker) render() {
+	if !apt.isTTY {
+		return
+	}
+	io.WriteString(apt.writer(), apt.formatProgress())
 }
 
 func (apt *analyzeProgressTracker) Stop() {
-	if !apt.isTTY || apt.totalFiles <= 0 {
-		return
-	}
-	close(apt.done)
-	<-apt.stopped
-	io.WriteString(os.Stderr, "\r\033[K\033[?25h")
+	apt.stopOnce.Do(func() {
+		if !apt.started.Load() {
+			return
+		}
+		close(apt.done)
+		<-apt.stopped
+		io.WriteString(apt.writer(), "\r\033[K\033[?25h")
+	})
 }

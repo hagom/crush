@@ -2,11 +2,17 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSampleFile_SmallMediumLarge(t *testing.T) {
@@ -384,9 +390,11 @@ func TestFormatNumber(t *testing.T) {
 }
 
 func TestAnalyzeProgressTracker_AccuratePercentageAndETA(t *testing.T) {
-	apt := newAnalyzeProgressTracker(41481)
-	if apt.totalFiles != 41481 {
-		t.Fatalf("totalFiles = %d, want 41481", apt.totalFiles)
+	apt := newAnalyzeProgressTracker()
+	apt.AddDiscovered(41481)
+	apt.MarkWalkDone()
+	if got := apt.discovered.Load(); got != 41481 {
+		t.Fatalf("discovered = %d, want 41481", got)
 	}
 
 	// 1. Simular 41367 archivos procesados
@@ -399,12 +407,16 @@ func TestAnalyzeProgressTracker_AccuratePercentageAndETA(t *testing.T) {
 		t.Fatalf("done = %d, want 41367", done)
 	}
 
-	pct := float64(done) * 100.0 / float64(apt.totalFiles)
+	pct := float64(done) * 100.0 / float64(apt.discovered.Load())
 	if pct >= 100.0 {
 		t.Errorf("pct debió ser < 100%% cuando aún faltan archivos, got %f", pct)
 	}
 	if pct < 99.7 || pct > 99.8 {
 		t.Errorf("pct esperado ~99.72%%, got %f", pct)
+	}
+	line := apt.formatProgress()
+	if !strings.Contains(line, "99.7%") || !strings.Contains(line, "41,367/41,481") {
+		t.Errorf("formatProgress() = %q, esperaba 99.7%% y 41,367/41,481", line)
 	}
 }
 
@@ -554,6 +566,713 @@ func TestAnalyzeFile_HeaderContamination_IncompressibleBody(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFile_LargeAndMediumBoundaryFiles(t *testing.T) {
+	tmpDir := t.TempDir()
 
+	rnd := rand.New(rand.NewSource(2026))
+	randMid := make([]byte, 140*1024)
+	rnd.Read(randMid)
 
+	cases := []struct {
+		name             string
+		filename         string
+		data             []byte
+		wantCompressible bool
+		wantCompLevel    string
+		wantSampleBytes  int64
+	}{
+		{
+			name:             "large_compressible_ge_192KiB",
+			filename:         "large_text.log",
+			data:             bytes.Repeat([]byte("2026-11-20 INFO worker processed batch item successfully\n"), 5000),
+			wantCompressible: true,
+			wantCompLevel:    "Alta",
+			wantSampleBytes:  int64(sampleBufferSize),
+		},
+		{
+			name:             "medium_compressible_between_96KiB_and_192KiB",
+			filename:         "medium_text.txt",
+			data:             bytes.Repeat([]byte("medium compressible record payload 0123456789\n"), 3200),
+			wantCompressible: true,
+			wantCompLevel:    "Alta",
+			wantSampleBytes:  int64(sampleBufferSize),
+		},
+		{
+			name:             "medium_incompressible_between_96KiB_and_192KiB",
+			filename:         "medium_rand.bin",
+			data:             randMid,
+			wantCompressible: false,
+			wantCompLevel:    "Nula",
+			wantSampleBytes:  int64(sampleChunkSize),
+		},
+	}
 
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(tmpDir, tc.filename)
+			if err := os.WriteFile(p, tc.data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := AnalyzeFile(p)
+			if err != nil {
+				t.Fatalf("AnalyzeFile(%s) error: %v", tc.filename, err)
+			}
+			if got.Compressible != tc.wantCompressible {
+				t.Errorf("Compressible = %v, want %v", got.Compressible, tc.wantCompressible)
+			}
+			if got.CompLevel != tc.wantCompLevel {
+				t.Errorf("CompLevel = %q, want %q", got.CompLevel, tc.wantCompLevel)
+			}
+			if got.SampleBytes != tc.wantSampleBytes {
+				t.Errorf("SampleBytes = %d, want %d", got.SampleBytes, tc.wantSampleBytes)
+			}
+			if tc.wantCompressible && (got.Entropy <= 0 || got.Entropy >= 7.85) {
+				t.Errorf("Entropy = %.2f, expected in (0, 7.85)", got.Entropy)
+			}
+		})
+	}
+}
+
+func TestDoAnalyze_StreamingCases(t *testing.T) {
+	txtPayload := bytes.Repeat([]byte("streaming test compressible text payload line\n"), 120)
+
+	cases := []struct {
+		name           string
+		setup          func(t *testing.T, root string) string
+		opts           AnalyzeOptions
+		wantErr        bool
+		wantErrSubstr  string
+		wantContains   []string
+		wantNotContain []string
+	}{
+		{
+			name: "nested_dirs",
+			setup: func(t *testing.T, root string) string {
+				deep := filepath.Join(root, "alpha", "beta", "gamma")
+				if err := os.MkdirAll(deep, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(deep, "deep.txt"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "alpha", "mid.txt"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "root.txt"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			},
+			wantContains: []string{"alpha/", "root.txt", "3 archivos en 3 directorios"},
+		},
+		{
+			name: "empty_dir",
+			setup: func(t *testing.T, root string) string {
+				return root
+			},
+			wantContains: []string{"No se encontraron archivos para analizar."},
+		},
+		{
+			name: "only_empty_subdirs",
+			setup: func(t *testing.T, root string) string {
+				if err := os.MkdirAll(filepath.Join(root, "empty1", "empty2"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			},
+			wantContains: []string{"No se encontraron archivos para analizar."},
+		},
+		{
+			name: "excluded_dirs_and_files",
+			setup: func(t *testing.T, root string) string {
+				for _, d := range []string{"keep", "skip_dir", ".git"} {
+					if err := os.MkdirAll(filepath.Join(root, d), 0755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(root, "keep", "ok.txt"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "keep", "drop.tmp"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "skip_dir", "hidden.txt"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, ".git", "config"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			},
+			opts: AnalyzeOptions{
+				Clean:   true,
+				Exclude: []string{"skip_dir", "*.tmp"},
+				Verbose: true,
+			},
+			wantContains:   []string{"keep/", "ok.txt", "1 archivo en 1 directorio"},
+			wantNotContain: []string{"skip_dir", "hidden.txt", "drop.tmp", ".git"},
+		},
+		{
+			name: "symlinks_ignored_including_cycle",
+			setup: func(t *testing.T, root string) string {
+				sub := filepath.Join(root, "real")
+				if err := os.MkdirAll(sub, 0755); err != nil {
+					t.Fatal(err)
+				}
+				realFile := filepath.Join(sub, "actual.txt")
+				if err := os.WriteFile(realFile, txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(realFile, filepath.Join(root, "link_file.txt")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(root, filepath.Join(sub, "loop_link")); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			},
+			opts:           AnalyzeOptions{Verbose: true},
+			wantContains:   []string{"real/", "actual.txt", "1 archivo en 1 directorio"},
+			wantNotContain: []string{"link_file.txt", "loop_link"},
+		},
+		{
+			name: "verbose_mode_breakdown",
+			setup: func(t *testing.T, root string) string {
+				sub := filepath.Join(root, "docs")
+				if err := os.MkdirAll(sub, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(sub, "guide.md"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(sub, "notes.txt"), bytes.Repeat(txtPayload, 2), 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "top.sql"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			},
+			opts:         AnalyzeOptions{Verbose: true},
+			wantContains: []string{"docs/", "└─ guide.md", "└─ notes.txt", "top.sql", "└─ top.sql"},
+		},
+		{
+			name: "path_with_dotdot",
+			setup: func(t *testing.T, root string) string {
+				if err := os.MkdirAll(filepath.Join(root, "sub"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(root, "real_target")
+				if err := os.MkdirAll(target, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(target, "clean.txt"), txtPayload, 0644); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(root, "sub", "..", "real_target")
+			},
+			wantContains: []string{"clean.txt", "1 archivo en 0 directorios"},
+		},
+		{
+			name: "nonexistent_target",
+			setup: func(t *testing.T, root string) string {
+				return filepath.Join(root, "does-not-exist")
+			},
+			wantErr:       true,
+			wantErrSubstr: "accediendo a",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			target := tc.setup(t, root)
+			var buf bytes.Buffer
+			err := DoAnalyze([]string{target}, tc.opts, &buf)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("esperaba error, obtuve nil")
+				}
+				if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
+					t.Errorf("error = %q, esperaba contener %q", err.Error(), tc.wantErrSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DoAnalyze error inesperado: %v", err)
+			}
+			out := buf.String()
+			for _, want := range tc.wantContains {
+				if !strings.Contains(out, want) {
+					t.Errorf("salida no contiene %q:\n%s", want, out)
+				}
+			}
+			for _, forbid := range tc.wantNotContain {
+				if strings.Contains(out, forbid) {
+					t.Errorf("salida no debía contener %q:\n%s", forbid, out)
+				}
+			}
+		})
+	}
+}
+
+func TestDoAnalyze_UnreadableEntries(t *testing.T) {
+	t.Run("walk_and_worker_errors_counted_without_race", func(t *testing.T) {
+		root := t.TempDir()
+		goodPath := filepath.Join(root, "good.txt")
+		badPath := filepath.Join(root, "bad.txt")
+		payload := bytes.Repeat([]byte("unreadable test compressible line\n"), 100)
+		if err := os.WriteFile(goodPath, payload, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(badPath, payload, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		origWalk := analyzeWalkDir
+		origAnalyze := analyzeFileFunc
+		t.Cleanup(func() {
+			analyzeWalkDir = origWalk
+			analyzeFileFunc = origAnalyze
+		})
+
+		analyzeWalkDir = func(r string, fn fs.WalkDirFunc) error {
+			// Simular una entrada ilegible reportada por WalkDir
+			if err := fn(filepath.Join(r, "denied_dir"), nil, os.ErrPermission); err != nil {
+				return err
+			}
+			return origWalk(r, fn)
+		}
+		analyzeFileFunc = func(path string, size int64) (FileAnalysis, error) {
+			if path == badPath {
+				return FileAnalysis{}, os.ErrPermission
+			}
+			return origAnalyze(path, size)
+		}
+
+		var buf bytes.Buffer
+		if err := DoAnalyze([]string{root}, AnalyzeOptions{}, &buf); err != nil {
+			t.Fatalf("DoAnalyze error: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "good.txt") {
+			t.Errorf("esperaba good.txt en salida:\n%s", out)
+		}
+		if strings.Contains(out, "bad.txt") {
+			t.Errorf("no debía incluir bad.txt fallido en salida:\n%s", out)
+		}
+		if !strings.Contains(out, "2 elemento(s) no se pudieron leer") {
+			t.Errorf("esperaba conteo de 2 elementos ilegibles:\n%s", out)
+		}
+	})
+
+	t.Run("real_fs_chmod_unreadable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 0000 es legible como root")
+		}
+		root := t.TempDir()
+		payload := bytes.Repeat([]byte("permission test payload line\n"), 100)
+
+		okFile := filepath.Join(root, "readable.txt")
+		if err := os.WriteFile(okFile, payload, 0644); err != nil {
+			t.Fatal(err)
+		}
+		noReadFile := filepath.Join(root, "secret.txt")
+		if err := os.WriteFile(noReadFile, payload, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(noReadFile, 0000); err != nil {
+			t.Fatal(err)
+		}
+		noReadDir := filepath.Join(root, "locked_dir")
+		if err := os.MkdirAll(noReadDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(noReadDir, 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chmod(noReadFile, 0644)
+			_ = os.Chmod(noReadDir, 0755)
+		})
+
+		var buf bytes.Buffer
+		if err := DoAnalyze([]string{root}, AnalyzeOptions{}, &buf); err != nil {
+			t.Fatalf("DoAnalyze error: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "readable.txt") {
+			t.Errorf("esperaba readable.txt:\n%s", out)
+		}
+		if !strings.Contains(out, "2 elemento(s) no se pudieron leer") {
+			t.Errorf("esperaba 2 elementos ilegibles:\n%s", out)
+		}
+	})
+}
+
+func TestDoAnalyze_StreamsBeforeWalkCompletes(t *testing.T) {
+	root := t.TempDir()
+	payload := bytes.Repeat([]byte("streaming proof payload\n"), 100)
+	firstFile := filepath.Join(root, "first.txt")
+	secondFile := filepath.Join(root, "second.txt")
+	if err := os.WriteFile(firstFile, payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondFile, payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origWalk := analyzeWalkDir
+	origAnalyze := analyzeFileFunc
+	t.Cleanup(func() {
+		analyzeWalkDir = origWalk
+		analyzeFileFunc = origAnalyze
+	})
+
+	firstAnalyzed := make(chan struct{})
+	var signalOnce sync.Once
+
+	analyzeFileFunc = func(path string, size int64) (FileAnalysis, error) {
+		an, err := origAnalyze(path, size)
+		if path == firstFile {
+			signalOnce.Do(func() { close(firstAnalyzed) })
+		}
+		return an, err
+	}
+
+	var walkedAfterWorker atomic.Bool
+	analyzeWalkDir = func(r string, fn fs.WalkDirFunc) error {
+		entries, err := os.ReadDir(r)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			p := filepath.Join(r, e.Name())
+			if err := fn(p, e, nil); err != nil {
+				return err
+			}
+			if p == firstFile {
+				select {
+				case <-firstAnalyzed:
+					walkedAfterWorker.Store(true)
+				case <-time.After(2 * time.Second):
+					return errors.New("worker no inició antes de terminar WalkDir (buffering detectado)")
+				}
+			}
+		}
+		return nil
+	}
+
+	var buf bytes.Buffer
+	if err := DoAnalyze([]string{root}, AnalyzeOptions{}, &buf); err != nil {
+		t.Fatalf("DoAnalyze falló: %v", err)
+	}
+	if !walkedAfterWorker.Load() {
+		t.Fatalf("WalkDir debió continuar después de que un worker analizó first.txt")
+	}
+	if !strings.Contains(buf.String(), "first.txt") || !strings.Contains(buf.String(), "second.txt") {
+		t.Errorf("reporte incompleto:\n%s", buf.String())
+	}
+}
+
+func TestDoAnalyze_WalkErrorPropagationAndCleanTeardown(t *testing.T) {
+	errBoom := errors.New("boom walk failure")
+
+	cases := []struct {
+		name         string
+		filesToEmit  int
+		returnErr    error
+		simulateTTY  bool
+		wantErr      bool
+		wantReportOk bool
+	}{
+		{
+			name:        "immediate_walk_error_non_tty",
+			filesToEmit: 0,
+			returnErr:   errBoom,
+			simulateTTY: false,
+			wantErr:     true,
+		},
+		{
+			name:        "immediate_walk_error_tty",
+			filesToEmit: 0,
+			returnErr:   errBoom,
+			simulateTTY: true,
+			wantErr:     true,
+		},
+		{
+			name:        "mid_stream_walk_error_exceeds_channel_cap",
+			filesToEmit: 180,
+			returnErr:   errBoom,
+			simulateTTY: true,
+			wantErr:     true,
+		},
+		{
+			name:         "zero_files_tty_clean_stop",
+			filesToEmit:  0,
+			returnErr:    nil,
+			simulateTTY:  true,
+			wantErr:      false,
+			wantReportOk: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			payload := bytes.Repeat([]byte("teardown line\n"), 50)
+			for i := 0; i < tc.filesToEmit; i++ {
+				name := filepath.Join(root, "f_"+FormatNumber(i)+".txt")
+				if err := os.WriteFile(name, payload, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			origWalk := analyzeWalkDir
+			origTerm := analyzeIsTerminal
+			origStderr := analyzeStderr
+			t.Cleanup(func() {
+				analyzeWalkDir = origWalk
+				analyzeIsTerminal = origTerm
+				analyzeStderr = origStderr
+			})
+
+			var stderrBuf bytes.Buffer
+			analyzeIsTerminal = func() bool { return tc.simulateTTY }
+			analyzeStderr = &stderrBuf
+
+			analyzeWalkDir = func(r string, fn fs.WalkDirFunc) error {
+				if tc.filesToEmit > 0 {
+					if err := origWalk(r, fn); err != nil {
+						return err
+					}
+				}
+				return tc.returnErr
+			}
+
+			runtime.GC()
+			baseGoroutines := runtime.NumGoroutine()
+
+			var out bytes.Buffer
+			err := DoAnalyze([]string{root}, AnalyzeOptions{}, &out)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("esperaba error, obtuve nil")
+				}
+				if !errors.Is(err, errBoom) {
+					t.Errorf("error = %v, esperaba envolver %v", err, errBoom)
+				}
+				if out.Len() != 0 {
+					t.Errorf("no debía imprimir reporte en error, obtuvo: %q", out.String())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("error inesperado: %v", err)
+				}
+				if tc.wantReportOk && !strings.Contains(out.String(), "No se encontraron archivos para analizar.") {
+					t.Errorf("salida esperada de directorio vacío, obtenida:\n%s", out.String())
+				}
+			}
+
+			if tc.simulateTTY {
+				s := stderrBuf.String()
+				if !strings.Contains(s, "\033[?25l") {
+					t.Errorf("TTY debió ocultar cursor al iniciar tracker")
+				}
+				if !strings.Contains(s, "\033[?25h") {
+					t.Errorf("TTY debió restaurar cursor al detener tracker")
+				}
+			}
+
+			deadline := time.Now().Add(500 * time.Millisecond)
+			for runtime.NumGoroutine() > baseGoroutines && time.Now().Before(deadline) {
+				runtime.Gosched()
+				time.Sleep(5 * time.Millisecond)
+			}
+			if got := runtime.NumGoroutine(); got > baseGoroutines {
+				t.Errorf("posible fuga de goroutines: antes=%d después=%d", baseGoroutines, got)
+			}
+		})
+	}
+}
+
+func TestAnalyzeProgressTracker_StreamingDiscoveryAndRace(t *testing.T) {
+	t.Run("format_states_table", func(t *testing.T) {
+		cases := []struct {
+			name           string
+			discovered     int64
+			discoveredSize int64
+			done           int64
+			bytesRead      int64
+			walkDone       bool
+			elapsed        time.Duration
+			wantContains   []string
+			wantNotContain []string
+		}{
+			{
+				name:           "scanning_initial",
+				discovered:     0,
+				done:           0,
+				bytesRead:      0,
+				walkDone:       false,
+				elapsed:        10 * time.Millisecond,
+				wantContains:   []string{"Escaneando...", "0/0", "iniciando..."},
+				wantNotContain: []string{"%", "restantes"},
+			},
+			{
+				name:           "scanning_live_progress",
+				discovered:     1200,
+				discoveredSize: 10 * 1024 * 1024,
+				done:           400,
+				bytesRead:      8 * 1024 * 1024,
+				walkDone:       false,
+				elapsed:        2 * time.Second,
+				wantContains:   []string{"Escaneando...", "400/1,200", "MiB/s"},
+				wantNotContain: []string{"%", "restantes"},
+			},
+			{
+				name:         "walk_done_with_pct_and_eta",
+				discovered:   1000,
+				done:         250,
+				bytesRead:    10 * 1024 * 1024,
+				walkDone:     true,
+				elapsed:      5 * time.Second,
+				wantContains: []string{"25.0%", "250/1,000", "restantes", "MiB/s"},
+			},
+			{
+				name:           "walk_done_complete_no_eta",
+				discovered:     500,
+				done:           500,
+				bytesRead:      5 * 1024 * 1024,
+				walkDone:       true,
+				elapsed:        5 * time.Second,
+				wantContains:   []string{"100.0%", "500/500"},
+				wantNotContain: []string{"restantes"},
+			},
+			{
+				name:         "done_exceeds_discovered_clamped",
+				discovered:   5,
+				done:         8,
+				bytesRead:    1024,
+				walkDone:     true,
+				elapsed:      2 * time.Second,
+				wantContains: []string{"100.0%"},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				apt := newAnalyzeProgressTracker()
+				apt.startTime = time.Now().Add(-tc.elapsed)
+				if tc.discovered > 0 {
+					apt.AddDiscovered(tc.discovered)
+				}
+				if tc.discoveredSize > 0 {
+					apt.AddDiscoveredBytes(tc.discoveredSize)
+				}
+				if tc.done > 0 {
+					apt.filesDone.Store(tc.done)
+				}
+				if tc.bytesRead > 0 {
+					apt.AddBytes(tc.bytesRead)
+				}
+				if tc.walkDone {
+					apt.MarkWalkDone()
+				}
+
+				line := apt.formatProgress()
+				for _, want := range tc.wantContains {
+					if !strings.Contains(line, want) {
+						t.Errorf("formatProgress() = %q, esperaba contener %q", line, want)
+					}
+				}
+				for _, forbid := range tc.wantNotContain {
+					if strings.Contains(line, forbid) {
+						t.Errorf("formatProgress() = %q, no debía contener %q", line, forbid)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("concurrent_updates_and_lifecycle_under_race", func(t *testing.T) {
+		var buf bytes.Buffer
+		apt := newAnalyzeProgressTracker()
+		apt.isTTY = true
+		apt.out = &buf
+		apt.tickInterval = 5 * time.Millisecond
+
+		apt.Start()
+		apt.Start() // idempotente
+
+		const total = 400
+		const workers = 4
+		ch := make(chan int, 16)
+
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range ch {
+					apt.Incr()
+					apt.AddBytes(512)
+				}
+			}()
+		}
+
+		go func() {
+			for i := 0; i < total; i++ {
+				apt.AddDiscovered(1)
+				apt.AddDiscoveredBytes(1024)
+				ch <- i
+				if i%100 == 0 {
+					time.Sleep(6 * time.Millisecond)
+				}
+			}
+			apt.MarkWalkDone()
+			close(ch)
+		}()
+
+		wg.Wait()
+		time.Sleep(15 * time.Millisecond)
+		apt.Stop()
+		apt.Stop() // idempotente
+
+		if got := apt.discovered.Load(); got != total {
+			t.Errorf("discovered = %d, want %d", got, total)
+		}
+		if got := apt.filesDone.Load(); got != total {
+			t.Errorf("filesDone = %d, want %d", got, total)
+		}
+		if got := apt.bytesRead.Load(); got != total*512 {
+			t.Errorf("bytesRead = %d, want %d", got, total*512)
+		}
+		if !apt.walkDone.Load() {
+			t.Errorf("walkDone = false, want true")
+		}
+		rendered := buf.String()
+		if !strings.Contains(rendered, "\033[?25l") || !strings.Contains(rendered, "\033[?25h") {
+			t.Errorf("salida TTY incompleta: %q", rendered)
+		}
+	})
+
+	t.Run("stop_without_start_and_non_tty_noop", func(t *testing.T) {
+		var buf bytes.Buffer
+		apt := newAnalyzeProgressTracker()
+		apt.isTTY = false
+		apt.out = &buf
+		apt.Start()
+		apt.AddDiscovered(10)
+		apt.MarkWalkDone()
+		apt.Stop()
+		if buf.Len() != 0 {
+			t.Errorf("non-TTY no debía escribir salida, obtuvo: %q", buf.String())
+		}
+
+		apt2 := newAnalyzeProgressTracker()
+		apt2.isTTY = true
+		apt2.out = &buf
+		apt2.Stop() // sin Start() no debe bloquear ni entrar en pánico
+	})
+}

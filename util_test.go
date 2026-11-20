@@ -1696,19 +1696,279 @@ func TestMemorySafeMaxThreads(t *testing.T) {
 	orig := getMemLimit
 	defer func() { getMemLimit = orig }()
 
-	// Simular 250 MB de memoria disponible
-	getMemLimit = func() int { return 250 }
+	getMemLimit = func() int { return 1400 }
 
-	// Para Xz (100MB/thread): 250 / 100 = 2 hilos máx
-	safe := MemorySafeMaxThreads(Xz, 8)
-	if safe != 2 {
-		t.Errorf("expected 2 threads for Xz with 250MB RAM, got %d", safe)
+	if safe := MemorySafeMaxThreads(Xz, 8); safe != 2 {
+		t.Errorf("MemorySafeMaxThreads(Xz, 8) with 1400MB = %d, want 2", safe)
+	}
+	if safe1 := MemorySafeMaxThreads(Xz, 1); safe1 != 1 {
+		t.Errorf("MemorySafeMaxThreads(Xz, 1) = %d, want 1", safe1)
 	}
 
-	// Para formato con 1 hilo pedido
-	safe1 := MemorySafeMaxThreads(Xz, 1)
-	if safe1 != 1 {
-		t.Errorf("expected 1 thread for 1 requested, got %d", safe1)
+	getMemLimit = func() int { return 250 }
+	if safe := MemorySafeMaxThreads(Xz, 8); safe != 1 {
+		t.Errorf("MemorySafeMaxThreads(Xz, 8) with 250MB = %d, want 1", safe)
+	}
+}
+
+func TestMemorySafeMaxThreadsForBudget(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  Format
+		threads int
+		memMB   int
+		want    int
+	}{
+		{"xz 250MB clamps to 1", Xz, 8, 250, 1},
+		{"xz 673MB clamps to 1", Xz, 8, 673, 1},
+		{"xz 1348MB allows 2", Xz, 8, 1348, 2},
+		{"xz 4096MB caps at requested", Xz, 4, 4096, 4},
+		{"lrz 511MB clamps to 1", Lrz, 8, 511, 1},
+		{"lrz 1024MB allows 2", Lrz, 8, 1024, 2},
+		{"lrz 2048MB allows 4", Lrz, 8, 2048, 4},
+		{"7z 299MB clamps to 1", SevenZ, 8, 299, 1},
+		{"7z 600MB allows 2", SevenZ, 8, 600, 2},
+		{"7z 1500MB allows 5", SevenZ, 8, 1500, 5},
+		{"zst 159MB clamps to 1", Zst, 8, 159, 1},
+		{"zst 320MB allows 2", Zst, 8, 320, 2},
+		{"zst 800MB allows 5", Zst, 8, 800, 5},
+		{"lz 256MB allows 2", Lz, 8, 256, 2},
+		{"lz 512MB allows 4", Lz, 8, 512, 4},
+		{"bz3 192MB allows 2", Bz3, 8, 192, 2},
+		{"bz3 480MB allows 5", Bz3, 8, 480, 5},
+		{"br 128MB allows 2", Br, 8, 128, 2},
+		{"rar 256MB allows 4", Rar, 8, 256, 4},
+		{"bz2 32MB allows 2", Bz2, 8, 32, 2},
+		{"bz2 80MB allows 5", Bz2, 8, 80, 5},
+		{"gz default 8MB/thread 24MB allows 3", Gz, 8, 24, 3},
+		{"lz4 default 8MB/thread 32MB allows 4", Lz4, 8, 32, 4},
+		{"zip default 8MB/thread 16MB allows 2", Zip, 8, 16, 2},
+		{"tar default 8MB/thread 16MB allows 2", Tar, 8, 16, 2},
+		{"threads <= 1 always returns 1", Xz, 1, 16384, 1},
+		{"threads 0 returns 1", Xz, 0, 16384, 1},
+		{"negative threads returns 1", Xz, -4, 16384, 1},
+		{"zero budget returns requested threads", Xz, 6, 0, 6},
+		{"negative budget returns requested threads", Xz, 6, -100, 6},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MemorySafeMaxThreadsForBudget(tt.format, tt.threads, tt.memMB)
+			if got != tt.want {
+				t.Errorf("MemorySafeMaxThreadsForBudget(%s, %d, %d) = %d, want %d",
+					tt.format, tt.threads, tt.memMB, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveThreadCapForBudget(t *testing.T) {
+	orig := getMemLimit
+	defer func() { getMemLimit = orig }()
+
+	const gib = int64(1024 * 1024 * 1024)
+
+	tests := []struct {
+		name      string
+		format    Format
+		sizeBytes int64
+		budgetMB  int
+		want      int
+	}{
+		{
+			name:      "single-threaded format Tar always 1",
+			format:    Tar,
+			sizeBytes: 2 * gib,
+			budgetMB:  16384,
+			want:      1,
+		},
+		{
+			name:      "single-threaded format Br always 1",
+			format:    Br,
+			sizeBytes: 2 * gib,
+			budgetMB:  16384,
+			want:      1,
+		},
+		{
+			name:      "small xz file capped by block size",
+			format:    Xz,
+			sizeBytes: 1024 * 1024,
+			budgetMB:  16384,
+			want:      1,
+		},
+		{
+			name:      "large xz file capped by tight RAM budget",
+			format:    Xz,
+			sizeBytes: 2 * gib,
+			budgetMB:  700,
+			want:      1,
+		},
+		{
+			name:      "large xz file with 1400MB budget allows up to 2",
+			format:    Xz,
+			sizeBytes: 2 * gib,
+			budgetMB:  1400,
+			want:      min(2, FormatMaxThreads(Xz)),
+		},
+		{
+			name:      "large lrz file capped by tight RAM budget",
+			format:    Lrz,
+			sizeBytes: 2 * gib,
+			budgetMB:  1024,
+			want:      min(2, FormatMaxThreads(Lrz)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveThreadCapForBudget(tt.format, tt.sizeBytes, tt.budgetMB)
+			if got != tt.want {
+				t.Errorf("resolveThreadCapForBudget(%s, %d, %d) = %d, want %d",
+					tt.format, tt.sizeBytes, tt.budgetMB, got, tt.want)
+			}
+		})
+	}
+
+	getMemLimit = func() int { return 700 }
+	if got := resolveThreadCap(Xz, 2*gib); got != 1 {
+		t.Errorf("resolveThreadCap(Xz, 2GiB) with 700MB = %d, want 1", got)
+	}
+}
+
+func TestPipeFlagsForThreadsAndMem(t *testing.T) {
+	orig := getMemLimit
+	defer func() { getMemLimit = orig }()
+
+	tests := []struct {
+		name        string
+		info        FormatInfo
+		threads     int
+		memBudgetMB int
+		want        []string
+	}{
+		{
+			name:        "xz with positive budget above floor",
+			info:        FormatInfo{Tool: "xz"},
+			threads:     4,
+			memBudgetMB: 512,
+			want:        []string{"-dc", "-T4", "--memlimit-mt-decompress=512MiB"},
+		},
+		{
+			name:        "xz clamps small positive budget to 65MiB floor",
+			info:        FormatInfo{Tool: "xz"},
+			threads:     4,
+			memBudgetMB: 32,
+			want:        []string{"-dc", "-T4", "--memlimit-mt-decompress=65MiB"},
+		},
+		{
+			name:        "xz exact 65MiB floor",
+			info:        FormatInfo{Tool: "xz"},
+			threads:     2,
+			memBudgetMB: 65,
+			want:        []string{"-dc", "-T2", "--memlimit-mt-decompress=65MiB"},
+		},
+		{
+			name:        "xz omits memlimit when budget <= 0",
+			info:        FormatInfo{Tool: "xz"},
+			threads:     4,
+			memBudgetMB: 0,
+			want:        []string{"-dc", "-T4"},
+		},
+		{
+			name:        "lrzip with budget in hundreds of MB",
+			info:        FormatInfo{Tool: "lrzip"},
+			threads:     4,
+			memBudgetMB: 850,
+			want:        []string{"-d", "-p", "4", "-o", "-", "-m", "8"},
+		},
+		{
+			name:        "lrzip clamps small positive budget to -m 1",
+			info:        FormatInfo{Tool: "lrzip"},
+			threads:     2,
+			memBudgetMB: 50,
+			want:        []string{"-d", "-p", "2", "-o", "-", "-m", "1"},
+		},
+		{
+			name:        "lrzip omits -m when budget <= 0",
+			info:        FormatInfo{Tool: "lrzip"},
+			threads:     4,
+			memBudgetMB: 0,
+			want:        []string{"-d", "-p", "4", "-o", "-"},
+		},
+		{
+			name:        "zstd never passes -M when budget < 128MiB",
+			info:        FormatInfo{Tool: "zstd"},
+			threads:     4,
+			memBudgetMB: 64,
+			want:        []string{"-dc", "-T4"},
+		},
+		{
+			name:        "zstd never passes -M when budget >= 128MiB",
+			info:        FormatInfo{Tool: "zstd"},
+			threads:     8,
+			memBudgetMB: 1024,
+			want:        []string{"-dc", "-T8"},
+		},
+		{
+			name:        "pigz ignores mem budget",
+			info:        FormatInfo{Tool: "pigz"},
+			threads:     6,
+			memBudgetMB: 512,
+			want:        []string{"-dc", "-p", "6"},
+		},
+		{
+			name:        "bzip3 ignores mem budget",
+			info:        FormatInfo{Tool: "bzip3"},
+			threads:     4,
+			memBudgetMB: 512,
+			want:        []string{"-dc", "-j", "4"},
+		},
+		{
+			name:        "plzip ignores mem budget",
+			info:        FormatInfo{Tool: "plzip"},
+			threads:     3,
+			memBudgetMB: 512,
+			want:        []string{"-dc", "--threads=3"},
+		},
+		{
+			name:        "lbzip2 ignores mem budget",
+			info:        FormatInfo{Tool: "lbzip2"},
+			threads:     4,
+			memBudgetMB: 512,
+			want:        []string{"-dc", "-n", "4"},
+		},
+		{
+			name:        "default fallback uses PipeFlags",
+			info:        FormatInfo{Tool: "gzip", PipeFlags: "-dc"},
+			threads:     4,
+			memBudgetMB: 512,
+			want:        []string{"-dc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PipeFlagsForThreadsAndMem(tt.info, tt.threads, tt.memBudgetMB)
+			if len(got) != len(tt.want) {
+				t.Fatalf("PipeFlagsForThreadsAndMem(%s, %d, %d) = %v, want %v",
+					tt.info.Tool, tt.threads, tt.memBudgetMB, got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("flag[%d] = %q, want %q (full: %v)", i, got[i], tt.want[i], got)
+				}
+			}
+		})
+	}
+
+	getMemLimit = func() int { return 400 }
+	xzFlags := PipeFlagsForThreads(FormatInfo{Tool: "xz"}, 4)
+	if !strings.Contains(strings.Join(xzFlags, " "), "--memlimit-mt-decompress=400MiB") {
+		t.Errorf("PipeFlagsForThreads(xz) did not delegate getMemLimit(): %v", xzFlags)
+	}
+	lrzFlags := PipeFlagsForThreads(FormatInfo{Tool: "lrzip"}, 4)
+	if !strings.Contains(strings.Join(lrzFlags, " "), "-m 4") {
+		t.Errorf("PipeFlagsForThreads(lrzip) did not delegate getMemLimit(): %v", lrzFlags)
 	}
 }
 

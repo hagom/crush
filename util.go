@@ -983,9 +983,9 @@ func safeFlagArg(p string) string {
 	return p
 }
 
-func resolveThreadCap(f Format, sizeBytes int64) int {
+func resolveThreadCapForBudget(f Format, sizeBytes int64, memBudgetMB int) int {
 	c := MaxEffectiveThreads(f, sizeBytes)
-	c = MemorySafeMaxThreads(f, c)
+	c = MemorySafeMaxThreadsForBudget(f, c, memBudgetMB)
 	if fmtMax := FormatMaxThreads(f); c > fmtMax {
 		c = fmtMax
 	}
@@ -993,6 +993,10 @@ func resolveThreadCap(f Format, sizeBytes int64) int {
 		c = 1
 	}
 	return c
+}
+
+func resolveThreadCap(f Format, sizeBytes int64) int {
+	return resolveThreadCapForBudget(f, sizeBytes, getMemLimit())
 }
 
 func isNameAvailable(name string) bool {
@@ -2062,28 +2066,33 @@ func readPasswordTerminal(prompt string) (string, error) {
 
 var readPasswordFunc = readPasswordTerminal
 
-// MemorySafeMaxThreads throttles thread allocation if available system memory is insufficient
-// for the given format, preventing OOM crashes.
-func MemorySafeMaxThreads(f Format, threads int) int {
+func MemorySafeMaxThreadsForBudget(f Format, threads int, memMB int) int {
 	if threads <= 1 {
 		return 1
 	}
-	memMB := getMemLimit()
 	if memMB <= 0 {
 		return threads
 	}
 	var mbPerThread int
 	switch f {
-	case Xz, SevenZ:
-		mbPerThread = 100
-	case Bz3:
-		mbPerThread = 64
+	case Xz:
+		mbPerThread = 674
+	case Lrz:
+		mbPerThread = 512
+	case SevenZ:
+		mbPerThread = 300
 	case Zst:
-		mbPerThread = 30
+		mbPerThread = 160
+	case Lz:
+		mbPerThread = 128
+	case Bz3:
+		mbPerThread = 96
+	case Br, Rar:
+		mbPerThread = 64
 	case Bz2:
-		mbPerThread = 8
+		mbPerThread = 16
 	default:
-		mbPerThread = 4
+		mbPerThread = 8
 	}
 	maxSafe := memMB / mbPerThread
 	if maxSafe < 1 {
@@ -2093,6 +2102,10 @@ func MemorySafeMaxThreads(f Format, threads int) int {
 		return maxSafe
 	}
 	return threads
+}
+
+func MemorySafeMaxThreads(f Format, threads int) int {
+	return MemorySafeMaxThreadsForBudget(f, threads, getMemLimit())
 }
 
 // AllocateThreadsProportional distributes totalCores among files based on their sizes.
@@ -2276,17 +2289,24 @@ func AllocateThreadsProportionalWithCaps(sizes []int64, totalCores int, minThrea
 	return result
 }
 
-// PipeFlagsForThreads returns appropriate decompression CLI flags injecting the given thread limit.
 func PipeFlagsForThreads(info FormatInfo, threads int) []string {
+	return PipeFlagsForThreadsAndMem(info, threads, getMemLimit())
+}
+
+func PipeFlagsForThreadsAndMem(info FormatInfo, threads int, memBudgetMB int) []string {
 	if threads <= 0 {
 		threads = NCPU()
 	}
-	thStr := fmt.Sprintf("%d", threads)
+	thStr := strconv.Itoa(threads)
 	switch info.Tool {
 	case "pigz":
 		return []string{"-dc", "-p", thStr}
 	case "xz":
-		return []string{"-dc", "-T" + thStr}
+		args := []string{"-dc", "-T" + thStr}
+		if memBudgetMB > 0 {
+			args = append(args, fmt.Sprintf("--memlimit-mt-decompress=%dMiB", max(65, memBudgetMB)))
+		}
+		return args
 	case "zstd":
 		return []string{"-dc", "-T" + thStr}
 	case "bzip3":
@@ -2296,7 +2316,11 @@ func PipeFlagsForThreads(info FormatInfo, threads int) []string {
 	case "lbzip2":
 		return []string{"-dc", "-n", thStr}
 	case "lrzip":
-		return []string{"-d", "-p", thStr, "-o", "-"}
+		args := []string{"-d", "-p", thStr, "-o", "-"}
+		if memBudgetMB > 0 {
+			args = append(args, "-m", strconv.Itoa(max(1, memBudgetMB/100)))
+		}
+		return args
 	case "lz4":
 		if lz4SupportsThreads() {
 			return []string{"-dc", "-T" + thStr}

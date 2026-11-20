@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,7 @@ type CompressOptions struct {
 	SkipCleanup     bool
 	Combine         bool
 	ThreadLimit     int
+	MemBudgetMB     int
 	Progress        *ProgressTracker
 	Hash            bool
 	Password        string
@@ -40,6 +42,22 @@ type CompressOptions struct {
 	Clean           bool
 	Resume          bool
 	CutoffTime      time.Time
+}
+
+func effectiveMemBudget(budget int) int {
+	if budget > 0 {
+		return budget
+	}
+	return getMemLimit()
+}
+
+func isHeavyCompressFormat(f Format) bool {
+	switch f {
+	case Xz, SevenZ, Lrz, Zst, Bz3:
+		return true
+	default:
+		return false
+	}
 }
 
 var DefaultCleanExcludes = []string{
@@ -650,7 +668,10 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	}
 
 	opts.TotalSize = totalSize
-	if cap := resolveThreadCap(opts.Format, totalSize); opts.ThreadLimit <= 0 || cap < opts.ThreadLimit {
+	if opts.MemBudgetMB <= 0 {
+		opts.MemBudgetMB = getMemLimit()
+	}
+	if cap := resolveThreadCapForBudget(opts.Format, totalSize, opts.MemBudgetMB); opts.ThreadLimit <= 0 || cap < opts.ThreadLimit {
 		opts.ThreadLimit = cap
 	}
 	realOut := splitOutPath(outPath, opts)
@@ -878,6 +899,7 @@ func compressItems(files []string, outPath string, opts CompressOptions) error {
 
 func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 	ext := opts.Format.String()
+	budget := effectiveMemBudget(opts.MemBudgetMB)
 	switch ext {
 	case "gz":
 		level := fmt.Sprintf("-%d", fastOrSlow(opts, 9))
@@ -891,6 +913,9 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		return execCommand("gzip", args...)
 	case "xz":
 		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "-e"}
+		if budget > 0 {
+			args = append(args, "--memlimit-compress="+strconv.Itoa(max(128, budget))+"MiB")
+		}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return execCommand("xz", args...)
 	case "bz2":
@@ -907,11 +932,26 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return execCommand(bin, args...)
 	case "bz3":
-		args := []string{"-c", "-b", "64", "-j", threadStr(opts.ThreadLimit)}
+		blockSize := "64"
+		if budget > 0 && budget < 512 {
+			blockSize = "16"
+		} else if budget > 0 && budget < 1024 {
+			blockSize = "32"
+		}
+		args := []string{"-c", "-b", blockSize, "-j", threadStr(opts.ThreadLimit)}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return execCommand("bzip3", args...)
 	case "zst":
-		args := []string{"-c", "-T" + threadStr(opts.ThreadLimit), "--ultra", fmt.Sprintf("-%d", fastOrSlow(opts, 22))}
+		var args []string
+		if budget > 0 && budget < 1024 && opts.CompressionOpts == "" {
+			level := 15
+			if budget >= 512 {
+				level = 19
+			}
+			args = []string{"-c", "-T" + threadStr(opts.ThreadLimit), fmt.Sprintf("-%d", level)}
+		} else {
+			args = []string{"-c", "-T" + threadStr(opts.ThreadLimit), "--ultra", fmt.Sprintf("-%d", fastOrSlow(opts, 22))}
+		}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return execCommand("zstd", args...)
 	case "lz":
@@ -936,6 +976,9 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		return execCommand("brotli", args...)
 	case "lrz":
 		args := []string{"-z", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-o", "-"}
+		if budget > 0 {
+			args = append(args, "-m", strconv.Itoa(max(1, budget/100)))
+		}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return execCommand("lrzip", args...)
 	default:
@@ -988,9 +1031,13 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 	if opts.Format.IsStream() {
 		ext := opts.Format.String()
 		if ext == "lrz" {
-			args := []string{"-f", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath, file}
+			args := []string{"-f", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z"}
+			if budget := effectiveMemBudget(opts.MemBudgetMB); budget > 0 {
+				args = append(args, "-m", strconv.Itoa(max(1, budget/100)))
+			}
 			args = append(args, strings.Fields(opts.CompressionOpts)...)
-			cmd := exec.Command("lrzip", args...)
+			args = append(args, "-o", safeFlagArg(outPath), "--", file)
+			cmd := execCommand("lrzip", args...)
 			cmd.Stdout = stdoutFor(opts.Progress)
 			cmd.Stderr = stderrFor(opts.Progress)
 			if opts.Verbose {
@@ -1194,10 +1241,13 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 	totalCores := NCPU()
 	maxWorkers := opts.Parallel
 	anyMultiThreaded := false
+	anyHeavy := false
 	for _, t := range tasks {
 		if FormatMaxThreads(t.Format) > 1 {
 			anyMultiThreaded = true
-			break
+		}
+		if isHeavyCompressFormat(t.Format) {
+			anyHeavy = true
 		}
 	}
 	isRot := false
@@ -1215,11 +1265,23 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 	} else if anyMultiThreaded && maxWorkers > 8 {
 		maxWorkers = 8
 	}
+	memTotal := getMemLimit()
+	if memTotal > 0 && anyHeavy {
+		memMaxWorkers := max(1, memTotal/512)
+		if maxWorkers > memMaxWorkers {
+			maxWorkers = memMaxWorkers
+		}
+	}
 	if len(tasks) < maxWorkers {
 		maxWorkers = len(tasks)
 	}
 	if maxWorkers < 1 {
 		maxWorkers = 1
+	}
+
+	var workerBudget int
+	if memTotal > 0 {
+		workerBudget = max(128, memTotal/maxWorkers)
 	}
 
 	sizesSlice := make([]int64, len(tasks))
@@ -1232,6 +1294,12 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 			totalBatchSize += sz
 		}
 		c := t.ThreadCap
+		if workerBudget > 0 {
+			budgetCap := resolveThreadCapForBudget(t.Format, t.Size, workerBudget)
+			if c <= 0 || budgetCap < c {
+				c = budgetCap
+			}
+		}
 		if c < 1 {
 			c = 1
 		}
@@ -1300,6 +1368,9 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 
 			fileOpts := opts
 			fileOpts.Format = t.Format
+			if workerBudget > 0 {
+				fileOpts.MemBudgetMB = workerBudget
+			}
 			var th int
 			if len(preAlloc) == len(tasks) {
 				th = preAlloc[idx]
@@ -1500,9 +1571,13 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 
 	// For lrzip which writes directly to file instead of stdout
 	if ext == "lrz" {
-		args := []string{"-f", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z", "-o", outPath}
+		args := []string{"-f", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z"}
+		if budget := effectiveMemBudget(opts.MemBudgetMB); budget > 0 {
+			args = append(args, "-m", strconv.Itoa(max(1, budget/100)))
+		}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
-		compressCmd = exec.Command("lrzip", args...)
+		args = append(args, "-o", safeFlagArg(outPath))
+		compressCmd = execCommand("lrzip", args...)
 		pipeCmds := []*exec.Cmd{tarCmd}
 		if opts.Progress == nil && hasTool("pv") {
 			pvArgs := []string{"-f", "-B", "256k"}
@@ -1626,8 +1701,13 @@ func compressZip(files []string, outPath string, opts CompressOptions, fp *FileP
 }
 
 func adaptive7zDict(fileSize int64, threads int) string {
+	return adaptive7zDictForBudget(fileSize, threads, getMemLimit())
+}
+
+func adaptive7zDictForBudget(fileSize int64, threads int, memBudgetMB int) string {
+	memBudgetMB = effectiveMemBudget(memBudgetMB)
 	dictMB := 256
-	if getMemLimit() < 8192 {
+	if memBudgetMB > 0 && memBudgetMB < 8192 {
 		dictMB = 128
 	}
 
@@ -1642,6 +1722,19 @@ func adaptive7zDict(fileSize int64, threads int) string {
 		case fileSize <= 128*1024*1024:
 			if dictMB > 128 {
 				dictMB = 128
+			}
+		}
+	}
+
+	if memBudgetMB > 0 {
+		blockPairs := max(1, threads/2)
+		for _, candidate := range []int{256, 128, 64, 32, 16} {
+			if candidate > dictMB {
+				continue
+			}
+			dictMB = candidate
+			if float64(blockPairs)*11.5*float64(candidate) <= float64(memBudgetMB) {
+				break
 			}
 		}
 	}
@@ -1665,7 +1758,7 @@ func build7zArgs(files []string, outPath string, opts CompressOptions, precalcSi
 			}
 		}
 	}
-	md := adaptive7zDict(totalSize, opts.ThreadLimit)
+	md := adaptive7zDictForBudget(totalSize, opts.ThreadLimit, effectiveMemBudget(opts.MemBudgetMB))
 	mmt := "-mmt=on"
 	if opts.ThreadLimit > 0 {
 		mmt = "-mmt=" + threadStr(opts.ThreadLimit)

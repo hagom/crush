@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -3158,6 +3159,248 @@ func TestDoCompress_SequentialRespectsThreadCap(t *testing.T) {
 		t.Errorf("sequential DoCompress on tiny xz file should cap threads to -T1, got args: %v", xzArgs)
 	}
 }
+
+func TestEffectiveMemBudget(t *testing.T) {
+	origMem := getMemLimit
+	defer func() { getMemLimit = origMem }()
+	getMemLimit = func() int { return 4096 }
+
+	tests := []struct {
+		name   string
+		budget int
+		want   int
+	}{
+		{"explicit positive budget", 512, 512},
+		{"zero falls back to getMemLimit", 0, 4096},
+		{"negative falls back to getMemLimit", -100, 4096},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveMemBudget(tt.budget); got != tt.want {
+				t.Errorf("effectiveMemBudget(%d) = %d, want %d", tt.budget, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAdaptive7zDictForBudget(t *testing.T) {
+	const mib = 1024 * 1024
+	tests := []struct {
+		name     string
+		fileSize int64
+		threads  int
+		budgetMB int
+		want     string
+	}{
+		{"16GB 1 thread large file -> 256m", 500 * mib, 1, 16384, "-md=256m"},
+		{"4GB 1 thread large file -> 128m", 500 * mib, 1, 4096, "-md=128m"},
+		{"4GB 8 threads large file clamps to 64m", 500 * mib, 8, 4096, "-md=64m"},
+		{"2GB 8 threads large file clamps to 32m", 500 * mib, 8, 2048, "-md=32m"},
+		{"1GB 8 threads large file clamps to 16m", 500 * mib, 8, 1024, "-md=16m"},
+		{"1GB 4 threads large file clamps to 32m", 500 * mib, 4, 1024, "-md=32m"},
+		{"1GB 1 thread large file clamps to 64m", 500 * mib, 1, 1024, "-md=64m"},
+		{"512MB 4 threads floors at 16m", 500 * mib, 4, 512, "-md=16m"},
+		{"small file <=16MB stays 16m on 16GB", 10 * mib, 1, 16384, "-md=16m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := adaptive7zDictForBudget(tt.fileSize, tt.threads, tt.budgetMB)
+			if got != tt.want {
+				t.Errorf("adaptive7zDictForBudget(%d, %d, %d) = %s, want %s", tt.fileSize, tt.threads, tt.budgetMB, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("build7zArgs respects MemBudgetMB and ThreadLimit", func(t *testing.T) {
+		args := build7zArgs([]string{"nonexistent.bin"}, "out.7z", CompressOptions{
+			Format:      SevenZ,
+			ThreadLimit: 8,
+			MemBudgetMB: 2048,
+		}, 500*mib)
+		if !containsArg(args, "-md=32m") {
+			t.Errorf("build7zArgs with 8 threads and 2048MB budget should use -md=32m, got %v", args)
+		}
+	})
+}
+
+func TestBuildCompressCmd_MemoryBudgetFlags(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     CompressOptions
+		wantArgs []string
+		forbid   []string
+	}{
+		{
+			name:     "xz with 1024MB budget",
+			opts:     CompressOptions{Format: Xz, ThreadLimit: 2, MemBudgetMB: 1024},
+			wantArgs: []string{"--memlimit-compress=1024MiB"},
+		},
+		{
+			name:     "xz clamps small budget to 128MiB",
+			opts:     CompressOptions{Format: Xz, ThreadLimit: 1, MemBudgetMB: 64},
+			wantArgs: []string{"--memlimit-compress=128MiB"},
+		},
+		{
+			name:     "zstd normal budget >= 1024MB keeps --ultra -22",
+			opts:     CompressOptions{Format: Zst, ThreadLimit: 4, MemBudgetMB: 2048},
+			wantArgs: []string{"--ultra", "-22"},
+		},
+		{
+			name:     "zstd medium budget 512..1023MB drops --ultra and caps to -19",
+			opts:     CompressOptions{Format: Zst, ThreadLimit: 2, MemBudgetMB: 768},
+			wantArgs: []string{"-19"},
+			forbid:   []string{"--ultra", "-22"},
+		},
+		{
+			name:     "zstd low budget < 512MB drops --ultra and caps to -15",
+			opts:     CompressOptions{Format: Zst, ThreadLimit: 1, MemBudgetMB: 256},
+			wantArgs: []string{"-15"},
+			forbid:   []string{"--ultra", "-22", "-19"},
+		},
+		{
+			name:     "bzip3 budget >= 1024MB uses -b 64",
+			opts:     CompressOptions{Format: Bz3, ThreadLimit: 4, MemBudgetMB: 2048},
+			wantArgs: []string{"-b", "64"},
+		},
+		{
+			name:     "bzip3 budget 512..1023MB uses -b 32",
+			opts:     CompressOptions{Format: Bz3, ThreadLimit: 2, MemBudgetMB: 768},
+			wantArgs: []string{"-b", "32"},
+		},
+		{
+			name:     "bzip3 budget < 512MB uses -b 16",
+			opts:     CompressOptions{Format: Bz3, ThreadLimit: 1, MemBudgetMB: 256},
+			wantArgs: []string{"-b", "16"},
+		},
+		{
+			name:     "lrzip budget 1500MB appends -m 15",
+			opts:     CompressOptions{Format: Lrz, ThreadLimit: 2, MemBudgetMB: 1500},
+			wantArgs: []string{"-m", "15"},
+		},
+		{
+			name:     "lrzip small budget 50MB clamps to -m 1",
+			opts:     CompressOptions{Format: Lrz, ThreadLimit: 1, MemBudgetMB: 50},
+			wantArgs: []string{"-m", "1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := buildCompressCmd(tt.opts)
+			for _, w := range tt.wantArgs {
+				if !containsArg(cmd.Args, w) {
+					t.Errorf("buildCompressCmd(%+v) args = %v, missing %q", tt.opts, cmd.Args, w)
+				}
+			}
+			for _, f := range tt.forbid {
+				if containsArg(cmd.Args, f) {
+					t.Errorf("buildCompressCmd(%+v) args = %v, should not contain %q", tt.opts, cmd.Args, f)
+				}
+			}
+		})
+	}
+}
+
+func TestCompressParallelTasks_WorkerCapAndPerWorkerBudget(t *testing.T) {
+	origMem := getMemLimit
+	defer func() { getMemLimit = origMem }()
+	getMemLimit = func() int { return 1024 } // 1024MB -> maxWorkers = max(1, 1024/512) = 2; workerBudget = 512MB
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	var mu sync.Mutex
+	var seenArgs [][]string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "xz" {
+			mu.Lock()
+			seenArgs = append(seenArgs, append([]string(nil), args...))
+			mu.Unlock()
+			return mockExecCommand("mock-noop")
+		}
+		return exec.Command(name, args...)
+	}
+
+	tmpDir := t.TempDir()
+	var tasks []CompressionTask
+	for i := 0; i < 4; i++ {
+		f := filepath.Join(tmpDir, fmt.Sprintf("f%d.bin", i))
+		if err := os.WriteFile(f, []byte("payload"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		tasks = append(tasks, CompressionTask{
+			ID:        i + 1,
+			File:      f,
+			Format:    Xz,
+			Size:      100 * 1024 * 1024,
+			ThreadCap: 8,
+			OutPath:   f + ".xz",
+		})
+	}
+
+	opts := CompressOptions{
+		Format:      Xz,
+		OutputDir:   tmpDir,
+		Parallel:    8,
+		KeepOrig:    true,
+		SkipCleanup: true,
+		Progress:    NewProgressTracker(400*1024*1024, 4),
+	}
+
+	if _, err := compressParallelTasks(tasks, opts); err != nil {
+		t.Fatalf("compressParallelTasks failed: %v", err)
+	}
+
+	if len(seenArgs) != 4 {
+		t.Fatalf("expected 4 xz invocations, got %d", len(seenArgs))
+	}
+	for i, args := range seenArgs {
+		if !containsArg(args, "--memlimit-compress=512MiB") {
+			t.Errorf("worker %d expected --memlimit-compress=512MiB (1024MB / 2 workers), got %v", i, args)
+		}
+		if !containsArg(args, "-T1") {
+			t.Errorf("worker %d expected -T1 under 512MB budget for xz, got %v", i, args)
+		}
+	}
+}
+
+func TestDoCompress_SequentialSetsMemBudget(t *testing.T) {
+	origMem := getMemLimit
+	defer func() { getMemLimit = origMem }()
+	getMemLimit = func() int { return 768 }
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	var zstArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "zstd" {
+			zstArgs = append([]string(nil), args...)
+			return mockExecCommand("mock-noop")
+		}
+		return exec.Command(name, args...)
+	}
+
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "seq.txt")
+	if err := os.WriteFile(src, []byte("sequential memory budget test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := DoCompress([]string{src}, CompressOptions{
+		Format:      Zst,
+		OutputDir:   tmpDir,
+		KeepOrig:    true,
+		SkipCleanup: true,
+	})
+	if err != nil {
+		t.Fatalf("DoCompress failed: %v", err)
+	}
+	if !containsArg(zstArgs, "-19") || containsArg(zstArgs, "--ultra") {
+		t.Errorf("sequential DoCompress with 768MB RAM should use zstd -19 without --ultra, got %v", zstArgs)
+	}
+}
+
 
 
 

@@ -2942,6 +2942,253 @@ func TestExternalExtractors_HardenedArgsAndKeepOldFiles(t *testing.T) {
 	})
 }
 
+func TestDecompressFile_TarStreamSinglePass(t *testing.T) {
+	if !hasTool("tar") {
+		t.Skip("tar no disponible")
+	}
+
+	cases := []struct {
+		name string
+		ext  string
+		tool string
+	}{
+		{name: "tar.xz", ext: ".tar.xz", tool: "xz"},
+		{name: "tar.bz2", ext: ".tar.bz2", tool: bzip2Bin()},
+		{name: "tar.zst", ext: ".tar.zst", tool: "zstd"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !hasTool(tc.tool) {
+				t.Skipf("%s no disponible", tc.tool)
+			}
+			tmpDir := t.TempDir()
+			srcDir := filepath.Join(tmpDir, "pkg")
+			if err := os.MkdirAll(filepath.Join(srcDir, "sub"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			payloadA := []byte(strings.Repeat("single-pass-tar-payload-A\n", 200))
+			payloadB := []byte(strings.Repeat("single-pass-tar-payload-B\n", 300))
+			if err := os.WriteFile(filepath.Join(srcDir, "a.txt"), payloadA, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(srcDir, "sub", "b.txt"), payloadB, 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			rawTar := filepath.Join(tmpDir, "archive.tar")
+			if err := exec.Command("tar", "-cf", rawTar, "-C", tmpDir, "pkg").Run(); err != nil {
+				t.Fatal(err)
+			}
+			archivePath := filepath.Join(tmpDir, "archive"+tc.ext)
+			outF, err := os.Create(archivePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compCmd := exec.Command(tc.tool, "-c", rawTar)
+			compCmd.Stdout = outF
+			if err := compCmd.Run(); err != nil {
+				outF.Close()
+				t.Fatal(err)
+			}
+			outF.Close()
+			_ = os.Remove(rawTar)
+			_ = os.RemoveAll(srcDir)
+
+			outDir := filepath.Join(tmpDir, "out")
+			preExistingFile := filepath.Join(outDir, "keep_me.txt")
+			if err := os.MkdirAll(outDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(preExistingFile, []byte("untouched"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var decompCalls atomic.Int32
+			origExec := execCommand
+			defer func() { execCommand = origExec }()
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				if name == tc.tool {
+					for _, a := range args {
+						if a == "-dc" || a == "-d" {
+							decompCalls.Add(1)
+							break
+						}
+					}
+				}
+				return origExec(name, args...)
+			}
+
+			fp := &FileProgress{Name: filepath.Base(archivePath), Size: 100}
+			err = decompressFile(archivePath, DecompressOptions{
+				OutputDir: outDir,
+				KeepOrig:  true,
+				Force:     true,
+				Progress:  NewProgressTracker(100, 1),
+			}, fp)
+			if err != nil {
+				t.Fatalf("decompressFile(%s) failed: %v", archivePath, err)
+			}
+
+			if got := decompCalls.Load(); got != 1 {
+				t.Errorf("expected decompressor %s to be invoked exactly once (single pass), got %d invocations", tc.tool, got)
+			}
+
+			wantSize := int64(len(payloadA) + len(payloadB))
+			if gotSize := fp.GetUncompressedSize(); gotSize != wantSize {
+				t.Errorf("fp.GetUncompressedSize() = %d, want %d", gotSize, wantSize)
+			}
+			if _, err := os.Stat(preExistingFile); err != nil {
+				t.Errorf("pre-existing file removed: %v", err)
+			}
+		})
+	}
+
+	t.Run("TruncatedTarPreservesPreExistingAndCleansNewTopLevel", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		contentDir := filepath.Join(tmpDir, "content")
+		if err := os.MkdirAll(contentDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(contentDir, "a.txt"), []byte("aaaa"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		big := make([]byte, 512*1024)
+		if _, err := rand.Read(big); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(contentDir, "b.bin"), big, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		tarPath := filepath.Join(tmpDir, "trunc.tar")
+		cmd := exec.Command("tar", "-cf", tarPath, "content")
+		cmd.Dir = tmpDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.RemoveAll(contentDir)
+
+		fi, err := os.Stat(tarPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(tarPath, fi.Size()*6/10); err != nil {
+			t.Fatal(err)
+		}
+
+		outDir := filepath.Join(tmpDir, "out")
+		preDir := filepath.Join(outDir, "pre_existing_dir")
+		preFile := filepath.Join(preDir, "keep.txt")
+		if err := os.MkdirAll(preDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(preFile, []byte("must survive"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err = DoDecompress([]string{tarPath}, DecompressOptions{OutputDir: outDir, KeepOrig: true})
+		if err == nil {
+			t.Fatal("expected error for truncated .tar")
+		}
+		if _, statErr := os.Stat(filepath.Join(outDir, "content")); !os.IsNotExist(statErr) {
+			t.Errorf("expected partial extracted dir 'content' to be removed, statErr=%v", statErr)
+		}
+		if got, readErr := os.ReadFile(preFile); readErr != nil || string(got) != "must survive" {
+			t.Errorf("pre-existing dir/file should be preserved: err=%v, got=%q", readErr, string(got))
+		}
+	})
+
+	t.Run("TarTopLevelTracker_ChunkedAndDeduplicated", func(t *testing.T) {
+		tr := newTarTopLevelTracker(nil)
+		chunks := []string{
+			"rootdir/sub1/a.txt\nroot",
+			"dir/sub2/b.txt\n./single.txt\n../escape.txt\n/abs/evil.txt\n",
+			"rootdir/sub3/c.txt\nanother/deep/nested/file.go",
+		}
+		for _, c := range chunks {
+			if _, err := tr.Write([]byte(c)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := tr.Outputs("/out")
+		want := []string{
+			filepath.Join("/out", "rootdir"),
+			filepath.Join("/out", "single.txt"),
+			filepath.Join("/out", "another"),
+		}
+		if len(got) != len(want) {
+			t.Fatalf("Outputs() = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("Outputs()[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+}
+
+func TestIsArchiveFullyExtracted_StreamsAndStopsEarly(t *testing.T) {
+	t.Run("StopsOnFirstMissingMemberFromInfiniteStream", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		rarPath := filepath.Join(tmpDir, "huge.rar")
+		if err := os.WriteFile(rarPath, []byte("Rar!\x1a\x07\x00"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		outDir := filepath.Join(tmpDir, "out")
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		origExec := execCommand
+		origLook := lookPath
+		defer func() {
+			execCommand = origExec
+			lookPath = origLook
+		}()
+		lookPath = func(name string) (string, error) {
+			return "/usr/bin/" + name, nil
+		}
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return mockExecCommand("mock-producer")
+		}
+
+		done := make(chan bool, 1)
+		go func() {
+			done <- isArchiveFullyExtracted(rarPath, outDir, "")
+		}()
+
+		select {
+		case ok := <-done:
+			if ok {
+				t.Fatalf("expected isArchiveFullyExtracted to return false on missing member")
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("isArchiveFullyExtracted buffered entire infinite member stream instead of stopping on first missing member")
+		}
+	})
+
+	t.Run("EmptyArchiveReturnsFalse", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		zipPath := filepath.Join(tmpDir, "empty.zip")
+		f, err := os.Create(zipPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(f)
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if isArchiveFullyExtracted(zipPath, tmpDir, "") {
+			t.Fatalf("expected false for 0-member archive")
+		}
+	})
+}
+
+
 
 
 

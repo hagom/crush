@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -517,33 +518,178 @@ func sanitizeArchiveRelPath(member string) (string, bool) {
 	return rel, true
 }
 
-func isArchiveFullyExtracted(file string, dir string, password string) bool {
-	members, err := ListArchiveMembers(file, password)
-	if err != nil || len(members) == 0 {
-		return false
+func topLevelArchiveEntry(member string) (string, bool) {
+	rel, ok := sanitizeArchiveRelPath(member)
+	if !ok {
+		return "", false
 	}
+	if idx := strings.IndexByte(rel, filepath.Separator); idx >= 0 {
+		rel = rel[:idx]
+	}
+	if rel == "" || rel == "." || rel == ".." {
+		return "", false
+	}
+	return rel, true
+}
+
+func listTopLevelContainerOutputs(file string, dir string, password string) []string {
+	seen := make(map[string]bool)
+	var outputs []string
+	err := IterArchiveMembers(file, password, func(m ArchiveMember) error {
+		top, ok := topLevelArchiveEntry(m.Path)
+		if !ok || seen[top] {
+			return nil
+		}
+		seen[top] = true
+		outputs = append(outputs, filepath.Join(dir, top))
+		return nil
+	})
+	if len(outputs) == 0 && err != nil {
+		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
+		return nil
+	}
+	return outputs
+}
+
+const maxTarLineCarry = 64 * 1024
+
+type tarTopLevelTracker struct {
+	mu      sync.Mutex
+	rem     []byte
+	seen    map[string]bool
+	topList []string
+	out     io.Writer
+}
+
+func newTarTopLevelTracker(out io.Writer) *tarTopLevelTracker {
+	return &tarTopLevelTracker{
+		seen: make(map[string]bool),
+		out:  out,
+	}
+}
+
+func (t *tarTopLevelTracker) recordLineLocked(raw string) {
+	line := strings.TrimSpace(raw)
+	if line == "" {
+		return
+	}
+	top, ok := topLevelArchiveEntry(line)
+	if !ok || t.seen[top] {
+		return
+	}
+	t.seen[top] = true
+	t.topList = append(t.topList, top)
+}
+
+func (t *tarTopLevelTracker) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.out != nil {
+		_, _ = t.out.Write(p)
+	}
+	data := p
+	if len(t.rem) > 0 {
+		if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
+			t.rem = append(t.rem, data[:idx]...)
+			t.recordLineLocked(string(t.rem))
+			t.rem = t.rem[:0]
+			data = data[idx+1:]
+		} else {
+			if len(t.rem)+len(data) <= maxTarLineCarry {
+				t.rem = append(t.rem, data...)
+			}
+			return len(p), nil
+		}
+	}
+	for {
+		idx := bytes.IndexByte(data, '\n')
+		if idx < 0 {
+			break
+		}
+		t.recordLineLocked(string(data[:idx]))
+		data = data[idx+1:]
+	}
+	if len(data) > 0 && len(data) <= maxTarLineCarry {
+		t.rem = append(t.rem[:0], data...)
+	}
+	return len(p), nil
+}
+
+func (t *tarTopLevelTracker) Flush() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.rem) > 0 {
+		t.recordLineLocked(string(t.rem))
+		t.rem = t.rem[:0]
+	}
+}
+
+func (t *tarTopLevelTracker) Outputs(dir string) []string {
+	t.Flush()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, 0, len(t.topList))
+	for _, top := range t.topList {
+		out = append(out, filepath.Join(dir, top))
+	}
+	return out
+}
+
+func isArchiveFullyExtracted(file string, dir string, password string) bool {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return false
 	}
 	defer root.Close()
-	for _, m := range members {
+
+	memberCount := 0
+	allExtracted := true
+	err = IterArchiveMembers(file, password, func(m ArchiveMember) error {
+		memberCount++
 		if m.IsDir {
-			continue
+			return nil
 		}
 		rel, ok := sanitizeArchiveRelPath(m.Path)
 		if !ok {
-			return false
+			allExtracted = false
+			return errStopIter
 		}
 		fi, err := root.Lstat(rel)
 		if err != nil || fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-			return false
+			allExtracted = false
+			return errStopIter
 		}
 		if m.Size > 0 && fi.Size() != m.Size {
-			return false
+			allExtracted = false
+			return errStopIter
+		}
+		return nil
+	})
+	return err == nil && memberCount > 0 && allExtracted
+}
+
+func collectCmdLines(cmd *exec.Cmd) ([]string, bool) {
+	if cmd.Stdin == nil {
+		cmd.Stdin = getNullFile()
+	}
+	cmd.Stderr = io.Discard
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, false
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, false
+	}
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, listScannerInitBuf), listScannerMaxBuf)
+	var members []string
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			members = append(members, line)
 		}
 	}
-	return true
+	_ = cmd.Wait()
+	return members, len(members) > 0
 }
 
 func listTarMembers(file string) ([]string, bool) {
@@ -560,18 +706,7 @@ func listTarMembers(file string) ([]string, bool) {
 		args = []string{"-I", "lz4 -dc", "-tf"}
 	}
 	args = append(args, safeFlagArg(file), "--")
-	cmd := execCommand("tar", args...)
-	var out strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
-	_ = cmd.Run()
-	var members []string
-	for _, line := range strings.Split(out.String(), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			members = append(members, line)
-		}
-	}
-	return members, len(members) > 0
+	return collectCmdLines(execCommand("tar", args...))
 }
 
 func listRarMembers(file string, password string) ([]string, bool) {
@@ -586,19 +721,7 @@ func listRarMembers(file string, password string) ([]string, bool) {
 		args = append(args, "-p-")
 	}
 	args = append(args, "--", safeFlagArg(file))
-	cmd := execCommand(tool, args...)
-	cmd.Stdin = getNullFile()
-	var out strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
-	_ = cmd.Run()
-	var members []string
-	for _, line := range strings.Split(out.String(), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			members = append(members, line)
-		}
-	}
-	return members, len(members) > 0
+	return collectCmdLines(execCommand(tool, args...))
 }
 
 func resolveOutputs(members []string, dir string) []string {
@@ -687,19 +810,59 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		}
 	}
 
-	outputs := listArchiveOutputs(file, dir, info, opts.Password)
-	if len(outputs) > 0 && fp != nil {
-		fp.SetOutPath(outputs[0])
-	}
-	preExisting := make(map[string]bool, len(outputs))
-	for _, o := range outputs {
-		if _, err := os.Lstat(o); err == nil {
-			preExisting[o] = true
+	isTar := info.IsTar || info.Format == Tar
+	var outputs []string
+	var preExisting map[string]bool
+	var preExistingTop map[string]bool
+	var tarTracker *tarTopLevelTracker
+
+	if isTar {
+		preExistingTop = make(map[string]bool)
+		if entries, readErr := os.ReadDir(dir); readErr == nil {
+			for _, e := range entries {
+				preExistingTop[e.Name()] = true
+			}
+		}
+		var verboseOut io.Writer
+		if opts.Verbose && opts.Progress == nil {
+			verboseOut = os.Stdout
+		}
+		tarTracker = newTarTopLevelTracker(verboseOut)
+	} else if info.IsStream() {
+		if outName, vErr := validateOutputName(stripCompressionExt(filepath.Base(file))); vErr == nil {
+			outputs = []string{filepath.Join(dir, outName)}
+		}
+		if len(outputs) > 0 && fp != nil {
+			fp.SetOutPath(outputs[0])
+		}
+		preExisting = make(map[string]bool, len(outputs))
+		for _, o := range outputs {
+			if _, lerr := os.Lstat(o); lerr == nil {
+				preExisting[o] = true
+			}
+		}
+	} else {
+		outputs = listTopLevelContainerOutputs(file, dir, opts.Password)
+		if len(outputs) > 0 && fp != nil {
+			fp.SetOutPath(outputs[0])
+		}
+		preExisting = make(map[string]bool, len(outputs))
+		for _, o := range outputs {
+			if _, lerr := os.Lstat(o); lerr == nil {
+				preExisting[o] = true
+			}
 		}
 	}
 
-	if info.IsTar {
-		err = decompressTar(file, dir, info, opts, fp)
+	if isTar {
+		err = decompressTar(file, dir, info, opts, fp, tarTracker)
+		outputs = tarTracker.Outputs(dir)
+		preExisting = make(map[string]bool, len(outputs))
+		for _, o := range outputs {
+			if preExistingTop[filepath.Base(o)] {
+				preExisting[o] = true
+			}
+		}
 	} else {
 		err = decompressSingle(file, dir, info, opts, fp)
 	}
@@ -725,25 +888,19 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		fi, err := os.Lstat(targetPath)
 		if err != nil && filepath.Ext(targetPath) == "" {
 			if isoFi, isoErr := os.Lstat(targetPath + ".iso"); isoErr == nil {
+				targetPath += ".iso"
 				fi = isoFi
 				err = nil
 			}
 		}
 		if err == nil {
 			foundDiskFiles = true
-			if !fi.IsDir() {
+			if fi.IsDir() {
+				dirSz, _ := GetDirSize(targetPath)
+				realSize += dirSz
+			} else {
 				realSize += fi.Size()
 			}
-		}
-	}
-	if realSize == 0 && len(outputs) == 1 {
-		targetPath := outputs[0]
-		if _, err := os.Lstat(targetPath); err != nil && filepath.Ext(targetPath) == "" {
-			targetPath += ".iso"
-		}
-		if fi, err := os.Lstat(targetPath); err == nil && fi.IsDir() {
-			foundDiskFiles = true
-			realSize, _ = GetDirSize(targetPath)
 		}
 	}
 
@@ -798,9 +955,9 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 func buildTarExtractArgs(tarFile, dir string, opts DecompressOptions) []string {
 	var args []string
 	if tarFile == "-" {
-		args = []string{"-xf", "-"}
+		args = []string{"-xvf", "-"}
 	} else {
-		args = []string{"-x", "-f", safeFlagArg(tarFile)}
+		args = []string{"-xv", "-f", safeFlagArg(tarFile)}
 	}
 	args = append(args, "-C", safeFlagArg(dir))
 	if !opts.Force && !opts.Resume {
@@ -831,20 +988,34 @@ func build7zExtractArgs(file, dir string, opts DecompressOptions, baseFlags ...s
 	return args
 }
 
-func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
+func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress, trackers ...*tarTopLevelTracker) error {
 	if info.Tool == "" {
 		return fmt.Errorf("No se detectó herramienta para: %s", file)
 	}
 
 	WriteLogf("  → %s/\n", dir)
 
+	var tracker *tarTopLevelTracker
+	if len(trackers) > 0 && trackers[0] != nil {
+		tracker = trackers[0]
+	} else {
+		tracker = newTarTopLevelTracker(nil)
+	}
+
+	if strings.HasSuffix(strings.ToLower(file), ".tar") {
+		tarExtract := execCommand("tar", buildTarExtractArgs(file, dir, opts)...)
+		tarExtract.Stdout = tracker
+		tarExtract.Stderr = stderrFor(opts.Progress)
+		if err := augmentErr(tarExtract, tarExtract.Run()); err != nil {
+			return fmt.Errorf("Error extrayendo %s: %w", file, err)
+		}
+		return nil
+	}
+
 	parts := findSplitParts(file)
 	tarExtract := execCommand("tar", buildTarExtractArgs("-", dir, opts)...)
 
 	if len(parts) == 1 && opts.Progress == nil && hasTool("pv") {
-		if strings.HasSuffix(strings.ToLower(file), ".tar") {
-			return execCommand("tar", buildTarExtractArgs(file, dir, opts)...).Run()
-		}
 		decompCmd, closer := pipeCmdFor(info, file, opts.ThreadLimit)
 		if closer != nil {
 			defer closer.Close()
@@ -856,7 +1027,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		}
 		pvCmd := execCommand("pv", pvArgs...)
 
-		if err := pipeline(os.Stdout, os.Stderr, decompCmd, pvCmd, tarExtract); err != nil {
+		if err := pipeline(tracker, os.Stderr, decompCmd, pvCmd, tarExtract); err != nil {
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 	} else {
@@ -868,7 +1039,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			defer closer.Close()
 		}
 
-		if err := pipeline(stdoutFor(opts.Progress), stderrFor(opts.Progress), decompCmd, tarExtract); err != nil {
+		if err := pipeline(tracker, stderrFor(opts.Progress), decompCmd, tarExtract); err != nil {
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 	}

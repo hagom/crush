@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ type DecompressOptions struct {
 	Force       bool
 	Parallel    int
 	ThreadLimit int
+	MemBudgetMB int
 	Progress    *ProgressTracker
 	Password    string
 	Filter      string
@@ -31,11 +33,18 @@ type DecompressOptions struct {
 	Resume      bool
 }
 
+func effectiveDecompressMemBudget(memBudgetMB int) int {
+	if memBudgetMB > 0 {
+		return memBudgetMB
+	}
+	return getMemLimit()
+}
+
 func decompressStream(r io.Reader, w io.Writer, info FormatInfo) error {
 	if info.Tool == "" {
 		return fmt.Errorf("formato no soportado para pipe")
 	}
-	pipeFlags := strings.Fields(info.PipeFlags)
+	pipeFlags := PipeFlagsForThreadsAndMem(info, resolveThreadCap(info.Format, 0), getMemLimit())
 	decompCmd := execCommand(info.Tool, pipeFlags...)
 	decompCmd.Stdin = r
 	decompCmd.Stdout = w
@@ -342,7 +351,17 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 		pt.Start()
 		defer pt.Stop()
 
-		err := decompressFile(files[0], opts, fps[0])
+		fileOpts := opts
+		if fileOpts.MemBudgetMB <= 0 {
+			fileOpts.MemBudgetMB = getMemLimit()
+		}
+		if fileOpts.ThreadLimit <= 0 {
+			if info, err := DetectFormat(files[0]); err == nil {
+				fileOpts.ThreadLimit = resolveThreadCapForBudget(info.Format, archiveSizes[files[0]], fileOpts.MemBudgetMB)
+			}
+		}
+
+		err := decompressFile(files[0], fileOpts, fps[0])
 		if err != nil {
 			fps[0].SetStatus("error")
 			WriteLogf("%s✗ %s%s\n", Red, err, NC)
@@ -354,7 +373,8 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 	} else {
 		totalCores := NCPU()
 		sizesSlice := make([]int64, len(files))
-		caps := make([]int, len(files))
+		formats := make([]Format, len(files))
+		formatOK := make([]bool, len(files))
 		var totalDecompBytes int64
 		allMono := true
 		for i, f := range files {
@@ -365,13 +385,12 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 			}
 			info, err := DetectFormat(f)
 			if err == nil {
-				c := resolveThreadCap(info.Format, sz)
-				if c > 1 {
+				formats[i] = info.Format
+				formatOK[i] = true
+				if resolveThreadCap(info.Format, sz) > 1 {
 					allMono = false
 				}
-				caps[i] = c
 			} else {
-				caps[i] = totalCores
 				allMono = false
 			}
 		}
@@ -396,6 +415,24 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 		}
 		if maxWorkers < 1 {
 			maxWorkers = 1
+		}
+
+		memTotal := opts.MemBudgetMB
+		if memTotal <= 0 {
+			memTotal = getMemLimit()
+		}
+		workerBudget := 0
+		if memTotal > 0 {
+			workerBudget = max(128, memTotal/maxWorkers)
+		}
+
+		caps := make([]int, len(files))
+		for i := range files {
+			if formatOK[i] {
+				caps[i] = resolveThreadCapForBudget(formats[i], sizesSlice[i], workerBudget)
+			} else {
+				caps[i] = totalCores
+			}
 		}
 
 		pool := NewDynamicThreadPool(totalCores, 1, totalCores, len(files), totalDecompBytes, maxWorkers)
@@ -425,6 +462,7 @@ func decompressBatch(files []string, archiveSizes map[string]int64, opts Decompr
 
 				fileOpts := opts
 				fileOpts.QuietReport = true
+				fileOpts.MemBudgetMB = workerBudget
 				var th int
 				if len(preAlloc) == len(files) {
 					th = preAlloc[idx]
@@ -1014,9 +1052,10 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 
 	parts := findSplitParts(file)
 	tarExtract := execCommand("tar", buildTarExtractArgs("-", dir, opts)...)
+	budget := effectiveDecompressMemBudget(opts.MemBudgetMB)
 
 	if len(parts) == 1 && opts.Progress == nil && hasTool("pv") {
-		decompCmd, closer := pipeCmdFor(info, file, opts.ThreadLimit)
+		decompCmd, closer := pipeCmdForWithMem(info, file, opts.ThreadLimit, budget)
 		if closer != nil {
 			defer closer.Close()
 		}
@@ -1031,7 +1070,7 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 	} else {
-		decompCmd, closer, err := pipeCmdForParts(info, parts, opts.Progress, fp, opts.ThreadLimit)
+		decompCmd, closer, err := pipeCmdForPartsWithMem(info, parts, opts.Progress, fp, opts.ThreadLimit, budget)
 		if err != nil {
 			return fmt.Errorf("Error preparando descompresión de %s: %w", file, err)
 		}
@@ -1051,11 +1090,19 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 // formato por la extensión del nombre (case-sensitive), así que con .LZ4 debe
 // leer por stdin (magic). El io.Closer devuelto cierra el archivo si se abrió.
 func pipeCmdFor(info FormatInfo, file string, threads ...int) (*exec.Cmd, io.Closer) {
-	th := NCPU()
-	if len(threads) > 0 && threads[0] > 0 {
+	th := 0
+	if len(threads) > 0 {
 		th = threads[0]
 	}
-	flags := PipeFlagsForThreads(info, th)
+	return pipeCmdForWithMem(info, file, th, getMemLimit())
+}
+
+func pipeCmdForWithMem(info FormatInfo, file string, threads int, memBudgetMB int) (*exec.Cmd, io.Closer) {
+	th := NCPU()
+	if threads > 0 {
+		th = threads
+	}
+	flags := PipeFlagsForThreadsAndMem(info, th, memBudgetMB)
 	cmd := execCommand(info.Tool, flags...)
 	if info.Tool == "lz4" {
 		in, err := os.Open(file)
@@ -1084,11 +1131,19 @@ func (mc *multiCloser) Close() error {
 }
 
 func pipeCmdForParts(info FormatInfo, parts []string, pt *ProgressTracker, fp *FileProgress, threads ...int) (*exec.Cmd, io.Closer, error) {
-	th := NCPU()
-	if len(threads) > 0 && threads[0] > 0 {
+	th := 0
+	if len(threads) > 0 {
 		th = threads[0]
 	}
-	flags := PipeFlagsForThreads(info, th)
+	return pipeCmdForPartsWithMem(info, parts, pt, fp, th, getMemLimit())
+}
+
+func pipeCmdForPartsWithMem(info FormatInfo, parts []string, pt *ProgressTracker, fp *FileProgress, threads int, memBudgetMB int) (*exec.Cmd, io.Closer, error) {
+	th := NCPU()
+	if threads > 0 {
+		th = threads
+	}
+	flags := PipeFlagsForThreadsAndMem(info, th, memBudgetMB)
 	cmd := execCommand(info.Tool, flags...)
 	if len(parts) == 1 && info.Tool == "lrzip" {
 		cmd.Args = append(cmd.Args, "--", parts[0])
@@ -1122,6 +1177,7 @@ func pipeCmdForParts(info FormatInfo, parts []string, pt *ProgressTracker, fp *F
 
 func decompressSingle(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress) error {
 	ext := strings.ToLower(file)
+	budget := effectiveDecompressMemBudget(opts.MemBudgetMB)
 
 	switch {
 	case strings.HasSuffix(ext, ".zip"):
@@ -1211,7 +1267,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 				return err
 			}
 			defer outFile.Close()
-			pipeFlags := strings.Fields(info.PipeFlags)
+			pipeFlags := PipeFlagsForThreadsAndMem(info, opts.ThreadLimit, budget)
 			decompCmd := execCommand(info.Tool, pipeFlags...)
 			decompCmd.Args = append(decompCmd.Args, "--", file)
 			pvArgs := []string{"-f", "-B", "256k"}
@@ -1228,7 +1284,11 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 		if err := ensureLrzOutputSafe(root, outName, outputPath, opts); err != nil {
 			return err
 		}
-		args := []string{"-d", "-p", threadStr(opts.ThreadLimit), "-o", outputPath, "--", file}
+		args := []string{"-d", "-p", threadStr(opts.ThreadLimit)}
+		if budget > 0 {
+			args = append(args, "-m", strconv.Itoa(max(1, budget/100)))
+		}
+		args = append(args, "-o", outputPath, "--", file)
 		cmd := execCommand("lrzip", args...)
 		cmd.Stdout = stdoutFor(opts.Progress)
 		cmd.Stderr = stderrFor(opts.Progress)
@@ -1258,7 +1318,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 
 		parts := findSplitParts(file)
 		if len(parts) == 1 && opts.Progress == nil && hasTool("pv") {
-			decompCmd, closer := pipeCmdFor(info, file, opts.ThreadLimit)
+			decompCmd, closer := pipeCmdForWithMem(info, file, opts.ThreadLimit, budget)
 			if closer != nil {
 				defer closer.Close()
 			}
@@ -1274,7 +1334,7 @@ func decompressSingle(file string, dir string, info FormatInfo, opts DecompressO
 			checkAndApplyIsoExtensionInRoot(root, outName, opts.Force || opts.Resume)
 			return nil
 		}
-		decompCmd, closer, err := pipeCmdForParts(info, parts, opts.Progress, fp, opts.ThreadLimit)
+		decompCmd, closer, err := pipeCmdForPartsWithMem(info, parts, opts.Progress, fp, opts.ThreadLimit, budget)
 		if err != nil {
 			return fmt.Errorf("Error preparando descompresión de %s: %w", file, err)
 		}

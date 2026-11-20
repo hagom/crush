@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -3184,6 +3185,310 @@ func TestIsArchiveFullyExtracted_StreamsAndStopsEarly(t *testing.T) {
 		}
 		if isArchiveFullyExtracted(zipPath, tmpDir, "") {
 			t.Fatalf("expected false for 0-member archive")
+		}
+	})
+}
+
+func TestDecompressMemoryBudgetsAndCaps(t *testing.T) {
+	hasArg := func(args []string, want string) bool {
+		for _, a := range args {
+			if a == want {
+				return true
+			}
+		}
+		return false
+	}
+	argAfter := func(args []string, flag string) string {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == flag {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
+
+	t.Run("DecompressStreamUsesMemAndThreadCaps", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			info     FormatInfo
+			memMB    int
+			wantArgs []string
+		}{
+			{
+				name:     "xz capped to 1 thread and 500MiB memlimit",
+				info:     FormatInfo{Format: Xz, Tool: "xz", PipeFlags: "-dc -T0"},
+				memMB:    500,
+				wantArgs: []string{"-dc", "-T1", "--memlimit-mt-decompress=500MiB"},
+			},
+			{
+				name:     "lrzip capped to 2 threads and -m 12",
+				info:     FormatInfo{Format: Lrz, Tool: "lrzip", PipeFlags: "-d -p 32 -o -"},
+				memMB:    1200,
+				wantArgs: []string{"-d", "-p", "2", "-o", "-", "-m", "12"},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				origExec := execCommand
+				origMem := getMemLimit
+				defer func() {
+					execCommand = origExec
+					getMemLimit = origMem
+				}()
+				getMemLimit = func() int { return tc.memMB }
+
+				var gotArgs []string
+				execCommand = func(name string, args ...string) *exec.Cmd {
+					if name == tc.info.Tool {
+						gotArgs = append([]string(nil), args...)
+					}
+					return mockExecCommand("mock-noop")
+				}
+
+				var out bytes.Buffer
+				if err := decompressStream(strings.NewReader("data"), &out, tc.info); err != nil {
+					t.Fatalf("decompressStream failed: %v", err)
+				}
+				for _, w := range tc.wantArgs {
+					if !hasArg(gotArgs, w) {
+						t.Errorf("decompressStream args = %v, missing %q", gotArgs, w)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("SingleFileBatchCapsThreadsAndPassesMemLimit", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		xzFile := filepath.Join(tmpDir, "single.xz")
+		if err := os.WriteFile(xzFile, make([]byte, 100*1024*1024), 0644); err != nil {
+			t.Fatal(err)
+		}
+		outDir := filepath.Join(tmpDir, "out")
+
+		origExec := execCommand
+		origMem := getMemLimit
+		origAvail := getDiskAvail
+		defer func() {
+			execCommand = origExec
+			getMemLimit = origMem
+			getDiskAvail = origAvail
+		}()
+		getMemLimit = func() int { return 700 }
+		getDiskAvail = func(string) int64 { return -1 }
+
+		var xzDecompArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "xz" && hasArg(args, "-dc") {
+				xzDecompArgs = append([]string(nil), args...)
+			}
+			return mockExecCommand("mock-noop")
+		}
+
+		s, e := decompressBatch([]string{xzFile}, map[string]int64{xzFile: 100 * 1024 * 1024}, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+			Force:     true,
+			Progress:  NewProgressTracker(100, 1),
+		})
+		if e != 0 || s != 1 {
+			t.Fatalf("decompressBatch returned successes=%d errors=%d", s, e)
+		}
+		if !hasArg(xzDecompArgs, "-T1") {
+			t.Errorf("expected single-file xz in 700MB RAM to cap threads to -T1, got: %v", xzDecompArgs)
+		}
+		if !hasArg(xzDecompArgs, "--memlimit-mt-decompress=700MiB") {
+			t.Errorf("expected single-file xz to pass --memlimit-mt-decompress=700MiB, got: %v", xzDecompArgs)
+		}
+	})
+
+	t.Run("MultiFileBatchSplitsWorkerBudget", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		var files []string
+		sizes := make(map[string]int64)
+		for _, name := range []string{"a.xz", "b.xz", "c.xz", "d.xz"} {
+			p := filepath.Join(tmpDir, name)
+			if err := os.WriteFile(p, []byte("stub"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, p)
+			sizes[p] = 100 * 1024 * 1024
+		}
+		outDir := filepath.Join(tmpDir, "out")
+
+		origExec := execCommand
+		origMem := getMemLimit
+		origAvail := getDiskAvail
+		defer func() {
+			execCommand = origExec
+			getMemLimit = origMem
+			getDiskAvail = origAvail
+		}()
+		// 2000 MB across 4 workers -> workerBudget = 500 MB -> 500 < 674 MB/thread for xz -> cap 1 thread & 500MiB limit
+		getMemLimit = func() int { return 2000 }
+		getDiskAvail = func(string) int64 { return -1 }
+
+		var mu sync.Mutex
+		var captured [][]string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "xz" && hasArg(args, "-dc") {
+				mu.Lock()
+				captured = append(captured, append([]string(nil), args...))
+				mu.Unlock()
+			}
+			return mockExecCommand("mock-noop")
+		}
+
+		s, e := decompressBatch(files, sizes, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+			Force:     true,
+			Parallel:  4,
+			Progress:  NewProgressTracker(400, 4),
+		})
+		if e != 0 || s != 4 {
+			t.Fatalf("decompressBatch returned successes=%d errors=%d", s, e)
+		}
+		if len(captured) != 4 {
+			t.Fatalf("expected 4 xz invocations, got %d", len(captured))
+		}
+		for i, args := range captured {
+			if !hasArg(args, "-T1") {
+				t.Errorf("worker %d expected -T1 under 500MB worker budget, got %v", i, args)
+			}
+			if !hasArg(args, "--memlimit-mt-decompress=500MiB") {
+				t.Errorf("worker %d expected --memlimit-mt-decompress=500MiB, got %v", i, args)
+			}
+		}
+	})
+
+	t.Run("LrzDirectAndPvPassMemFlag", func(t *testing.T) {
+		for _, usePv := range []bool{false, true} {
+			name := "Direct"
+			if usePv {
+				name = "WithPv"
+			}
+			t.Run(name, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				lrzFile := filepath.Join(tmpDir, "archive.txt.lrz")
+				if err := os.WriteFile(lrzFile, []byte("stub"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				outDir := filepath.Join(tmpDir, "out")
+				if err := os.MkdirAll(outDir, 0755); err != nil {
+					t.Fatal(err)
+				}
+
+				origExec := execCommand
+				origLook := lookPath
+				origMem := getMemLimit
+				defer func() {
+					execCommand = origExec
+					lookPath = origLook
+					getMemLimit = origMem
+				}()
+				getMemLimit = func() int { return 800 }
+				lookPath = func(bin string) (string, error) {
+					if bin == "pv" && !usePv {
+						return "", exec.ErrNotFound
+					}
+					return "/usr/bin/" + bin, nil
+				}
+
+				var lrzArgs []string
+				execCommand = func(bin string, args ...string) *exec.Cmd {
+					if bin == "lrzip" && hasArg(args, "-d") {
+						lrzArgs = append([]string(nil), args...)
+					}
+					return mockExecCommand("mock-noop")
+				}
+
+				opts := DecompressOptions{
+					OutputDir:   outDir,
+					ThreadLimit: 2,
+					Force:       true,
+					KeepOrig:    true,
+				}
+				if !usePv {
+					opts.Progress = NewProgressTracker(100, 1)
+				}
+				info := FormatInfo{Format: Lrz, Tool: "lrzip", PipeFlags: "-d -p 8 -o -"}
+				if err := decompressSingle(lrzFile, outDir, info, opts, nil); err != nil {
+					t.Fatalf("decompressSingle(.lrz) failed: %v", err)
+				}
+				if gotM := argAfter(lrzArgs, "-m"); gotM != "8" {
+					t.Errorf("expected lrzip -m 8 for 800MB budget, got args: %v", lrzArgs)
+				}
+				if gotP := argAfter(lrzArgs, "-p"); gotP != "2" {
+					t.Errorf("expected lrzip -p 2, got args: %v", lrzArgs)
+				}
+			})
+		}
+	})
+
+	t.Run("PipeCmdForWithMemAndPartsWithMemTable", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		partFile := filepath.Join(tmpDir, "test.tar.xz")
+		if err := os.WriteFile(partFile, []byte("stub"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cases := []struct {
+			name     string
+			info     FormatInfo
+			threads  int
+			memMB    int
+			wantArgs []string
+		}{
+			{
+				name:     "xz with 256MB budget",
+				info:     FormatInfo{Format: Xz, Tool: "xz"},
+				threads:  3,
+				memMB:    256,
+				wantArgs: []string{"-dc", "-T3", "--memlimit-mt-decompress=256MiB"},
+			},
+			{
+				name:     "xz with 32MB budget clamps to 65MiB",
+				info:     FormatInfo{Format: Xz, Tool: "xz"},
+				threads:  1,
+				memMB:    32,
+				wantArgs: []string{"-dc", "-T1", "--memlimit-mt-decompress=65MiB"},
+			},
+			{
+				name:     "lrzip with 350MB budget passes -m 3",
+				info:     FormatInfo{Format: Lrz, Tool: "lrzip"},
+				threads:  2,
+				memMB:    350,
+				wantArgs: []string{"-d", "-p", "2", "-o", "-", "-m", "3"},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cmd, closer := pipeCmdForWithMem(tc.info, partFile, tc.threads, tc.memMB)
+				if closer != nil {
+					_ = closer.Close()
+				}
+				for _, w := range tc.wantArgs {
+					if !hasArg(cmd.Args[1:], w) {
+						t.Errorf("pipeCmdForWithMem args = %v, missing %q", cmd.Args[1:], w)
+					}
+				}
+
+				cmdP, closerP, err := pipeCmdForPartsWithMem(tc.info, []string{partFile}, nil, nil, tc.threads, tc.memMB)
+				if err != nil {
+					t.Fatalf("pipeCmdForPartsWithMem error: %v", err)
+				}
+				if closerP != nil {
+					_ = closerP.Close()
+				}
+				for _, w := range tc.wantArgs {
+					if !hasArg(cmdP.Args[1:], w) {
+						t.Errorf("pipeCmdForPartsWithMem args = %v, missing %q", cmdP.Args[1:], w)
+					}
+				}
+			})
 		}
 	})
 }

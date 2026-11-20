@@ -102,11 +102,10 @@ func FormatComplexityWeight(f Format) int64 {
 	}
 }
 
-func checkAndWarnHighEntropy(item string, fmtChoice Format, warned map[string]bool) {
+var inspectAutoFormatFunc = InspectAutoFormat
+
+func emitHighEntropyNotice(item string, fmtChoice Format, warned map[string]bool) {
 	if warned != nil && warned[item] {
-		return
-	}
-	if !IsHighEntropyFile(item) {
 		return
 	}
 	if warned != nil {
@@ -118,6 +117,28 @@ func checkAndWarnHighEntropy(item string, fmtChoice Format, warned map[string]bo
 	} else if fmtChoice != Tar && fmtChoice != Lz4 {
 		WriteLogf("%s⚠ '%s' ya parece estar comprimido o cifrado; la compresión apenas reducirá su tamaño.%s\n", Yellow, base, NC)
 	}
+}
+
+func checkAndWarnHighEntropy(item string, fmtChoice Format, warned map[string]bool) {
+	if warned != nil && warned[item] {
+		return
+	}
+	if !IsHighEntropyFile(item) {
+		return
+	}
+	emitHighEntropyNotice(item, fmtChoice, warned)
+}
+
+func resolveFormatAndWarnEntropy(item string, fmtChoice Format, warned map[string]bool) Format {
+	if fmtChoice == Auto {
+		detected, highEntropy := inspectAutoFormatFunc(item)
+		if highEntropy {
+			emitHighEntropyNotice(item, Auto, warned)
+		}
+		return detected
+	}
+	checkAndWarnHighEntropy(item, fmtChoice, warned)
+	return fmtChoice
 }
 
 func isExcludedItem(name string, exclude []string) bool {
@@ -283,27 +304,14 @@ func generateCompressionTasks(items []string, opts CompressOptions) ([]Compressi
 		if len(opts.Formats) > 0 {
 			seen := make(map[Format]bool)
 			for _, f := range opts.Formats {
-				targetFmt := f
-				if f == Auto {
-					checkAndWarnHighEntropy(item, Auto, warned)
-					targetFmt = DetectAutoFormat(item)
-				} else {
-					checkAndWarnHighEntropy(item, f, warned)
-				}
+				targetFmt := resolveFormatAndWarnEntropy(item, f, warned)
 				if !seen[targetFmt] {
 					seen[targetFmt] = true
 					formatsToUse = append(formatsToUse, targetFmt)
 				}
 			}
 		} else {
-			targetFmt := opts.Format
-			if targetFmt == Auto {
-				checkAndWarnHighEntropy(item, Auto, warned)
-				targetFmt = DetectAutoFormat(item)
-			} else {
-				checkAndWarnHighEntropy(item, targetFmt, warned)
-			}
-			formatsToUse = []Format{targetFmt}
+			formatsToUse = []Format{resolveFormatAndWarnEntropy(item, opts.Format, warned)}
 		}
 
 		fi, statErr := os.Stat(item)
@@ -454,12 +462,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	singleItem := len(files) == 1 && !opts.Combine && len(opts.Formats) <= 1
 	singleIsDir := false
 	if singleItem {
-		if opts.Format == Auto {
-			checkAndWarnHighEntropy(files[0], Auto, nil)
-			opts.Format = DetectAutoFormat(files[0])
-		} else {
-			checkAndWarnHighEntropy(files[0], opts.Format, nil)
-		}
+		opts.Format = resolveFormatAndWarnEntropy(files[0], opts.Format, nil)
 		if fi, err := os.Stat(files[0]); err == nil && fi.IsDir() {
 			singleIsDir = true
 		}

@@ -3401,6 +3401,135 @@ func TestDoCompress_SequentialSetsMemBudget(t *testing.T) {
 	}
 }
 
+func TestCompressAutoFormat_SinglePassInspectAutoFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	highEntFile := filepath.Join(tmpDir, "encrypted.dat")
+	rndData := make([]byte, 65536)
+	for i := range rndData {
+		rndData[i] = byte((i*1664525 + 1013904223) & 0xFF)
+	}
+	if err := os.WriteFile(highEntFile, rndData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	textFile := filepath.Join(tmpDir, "notes.unknown")
+	if err := os.WriteFile(textFile, []byte(strings.Repeat("plain ascii text line for auto format detection\n", 120)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	binFile := filepath.Join(tmpDir, "struct.unknown")
+	binData := make([]byte, 8192)
+	for i := range binData {
+		binData[i] = byte(i % 16)
+	}
+	if err := os.WriteFile(binFile, binData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origInspect := inspectAutoFormatFunc
+	defer func() { inspectAutoFormatFunc = origInspect }()
+
+	callCounts := make(map[string]int)
+	inspectAutoFormatFunc = func(path string) (Format, bool) {
+		callCounts[path]++
+		return origInspect(path)
+	}
+
+	tests := []struct {
+		name        string
+		file        string
+		wantFmt     Format
+		wantLogPart string
+		forbidLog   string
+	}{
+		{
+			name:        "high entropy file chooses lz4 and logs notice once",
+			file:        highEntFile,
+			wantFmt:     Lz4,
+			wantLogPart: "ya parece estar comprimido; usando compresión rápida (lz4).",
+		},
+		{
+			name:      "text file without known ext chooses xz without warning",
+			file:      textFile,
+			wantFmt:   Xz,
+			forbidLog: "ya parece estar comprimido",
+		},
+		{
+			name:      "structured binary file chooses zst without warning",
+			file:      binFile,
+			wantFmt:   Zst,
+			forbidLog: "ya parece estar comprimido",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run("tasks_"+tt.name, func(t *testing.T) {
+			delete(callCounts, tt.file)
+			oldStderr := os.Stderr
+			r, w, _ := os.Pipe()
+			os.Stderr = w
+
+			tasks, err := generateCompressionTasks([]string{tt.file}, CompressOptions{
+				Format:    Auto,
+				OutputDir: tmpDir,
+			})
+
+			w.Close()
+			os.Stderr = oldStderr
+			var buf bytes.Buffer
+			_, _ = io.Copy(&buf, r)
+			logged := buf.String()
+
+			if err != nil {
+				t.Fatalf("generateCompressionTasks error: %v", err)
+			}
+			if len(tasks) != 1 || tasks[0].Format != tt.wantFmt {
+				t.Errorf("got tasks=%+v, want format %s", tasks, tt.wantFmt)
+			}
+			if callCounts[tt.file] != 1 {
+				t.Errorf("InspectAutoFormat called %d times for %s, want 1", callCounts[tt.file], tt.file)
+			}
+			if tt.wantLogPart != "" && !strings.Contains(logged, tt.wantLogPart) {
+				t.Errorf("expected log %q, got %q", tt.wantLogPart, logged)
+			}
+			if tt.forbidLog != "" && strings.Contains(logged, tt.forbidLog) {
+				t.Errorf("unexpected log %q in %q", tt.forbidLog, logged)
+			}
+		})
+	}
+
+	t.Run("sequential DoCompress -f auto calls InspectAutoFormat once", func(t *testing.T) {
+		delete(callCounts, highEntFile)
+		oldStderr := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		_, err := DoCompress([]string{highEntFile}, CompressOptions{
+			Format:    Auto,
+			DryRun:    true,
+			OutputDir: tmpDir,
+		})
+
+		w.Close()
+		os.Stderr = oldStderr
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		logged := buf.String()
+
+		if err != nil {
+			t.Fatalf("DoCompress DryRun error: %v", err)
+		}
+		if callCounts[highEntFile] != 1 {
+			t.Errorf("InspectAutoFormat called %d times in sequential DoCompress, want 1", callCounts[highEntFile])
+		}
+		if !strings.Contains(logged, "ya parece estar comprimido; usando compresión rápida (lz4).") {
+			t.Errorf("missing high-entropy auto notice in output: %s", logged)
+		}
+	})
+}
+
+
 
 
 

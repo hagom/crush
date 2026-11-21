@@ -426,6 +426,7 @@ Actuar como **equipo de desarrollo completo**, que cada actor del equipo sea un 
 - **Revisión exhaustiva de bugs:** Tras implementar fixes, hacer re-revisión completa del código en busca de bugs restantes. Si se encuentran nuevos bugs, fixearlos y repetir el ciclo. No detenerse hasta que queden **0 bugs conocidos** en todo el proyecto.
 - **Commits por fix/feature:** Cada fix o feature debe tener su propio commit. No mezclar cambios distintos en un mismo commit.
 - **Test obligatorio antes de commit:** Todo fix o feature debe compilar y pasar `go test ./...` (con `-race` si es concurrente) y `go vet ./...` sin errores, y el test correspondiente debe haberse escrito y visto fallar ANTES de la implementación. Si falla algún test o aparece un bug, debe corregirse hasta que quede 0 bugs antes de hacer commit.
+- **Orquestación de modelos:** Si el agente utilizado soporta orquestación o selección dinámica de modelos (en subagentes, swarm o cambios de modelo por rol), seleccionar siempre el modelo que mejor se ajuste a la complejidad y naturaleza de cada tarea solicitada (modelos de mayor capacidad para arquitectura, auditoría, revisión y lógica compleja; modelos más rápidos o ligeros para integración mecánica, tareas repetitivas o monitoreo periódico), teniendo en cuenta la cuota disponible.
 - No esperar instrucciones en cada sub-paso.
 - Al terminar un encargo, dejar el repo limpio (rama `main` actualizada, worktrees removidos, ramas fix eliminadas, AGENTS.md reflejando el nuevo estado).
 

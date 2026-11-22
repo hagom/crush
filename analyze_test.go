@@ -1276,3 +1276,391 @@ func TestAnalyzeProgressTracker_StreamingDiscoveryAndRace(t *testing.T) {
 		apt2.Stop() // sin Start() no debe bloquear ni entrar en pánico
 	})
 }
+
+func TestDoAnalyze_MultiTargetConcurrent(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirA := filepath.Join(tmpDir, "dirA")
+	dirB := filepath.Join(tmpDir, "dirB")
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "data.txt"), bytes.Repeat([]byte("hola "), 2048), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	origWalk := analyzeWalkDir
+	t.Cleanup(func() { analyzeWalkDir = origWalk })
+
+	var inFlight atomic.Int32
+	bothInside := make(chan struct{})
+	var closeOnce sync.Once
+
+	analyzeWalkDir = func(root string, fn fs.WalkDirFunc) error {
+		if n := inFlight.Add(1); n >= 2 {
+			closeOnce.Do(func() { close(bothInside) })
+		}
+		defer inFlight.Add(-1)
+
+		select {
+		case <-bothInside:
+		case <-time.After(1500 * time.Millisecond):
+			return errors.New("timeout esperando ejecución concurrente de WalkDir")
+		}
+		return origWalk(root, fn)
+	}
+
+	var buf bytes.Buffer
+	if err := DoAnalyze([]string{dirA, dirB}, AnalyzeOptions{}, &buf); err != nil {
+		t.Fatalf("DoAnalyze concurrente falló: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, dirA) || !strings.Contains(out, dirB) {
+		t.Errorf("esperaba ambos informes en la salida, obtuve:\n%s", out)
+	}
+}
+
+func TestDoAnalyze_MultiTargetOptionB_OrderAndGlobalSummary(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirA := filepath.Join(tmpDir, "alpha")
+	dirB := filepath.Join(tmpDir, "zeta")
+	singleFile := filepath.Join(tmpDir, "middle.log")
+
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	textPayload := bytes.Repeat([]byte("linea repetitiva de log para comprimir bien\n"), 1500)
+	rnd := rand.New(rand.NewSource(99))
+	incompPayload := make([]byte, 64*1024)
+	rnd.Read(incompPayload)
+
+	fileA := filepath.Join(dirA, "app.txt")
+	fileB := filepath.Join(dirB, "blob.bin")
+	if err := os.WriteFile(fileA, textPayload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(singleFile, textPayload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fileB, incompPayload, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var bufSingle bytes.Buffer
+	if err := DoAnalyze([]string{dirA}, AnalyzeOptions{}, &bufSingle); err != nil {
+		t.Fatalf("DoAnalyze single error: %v", err)
+	}
+	if strings.Contains(bufSingle.String(), "Resumen Global") {
+		t.Errorf("un solo parámetro no debe mostrar Resumen Global")
+	}
+
+	var buf bytes.Buffer
+	if err := DoAnalyze([]string{dirA, singleFile, dirB}, AnalyzeOptions{Verbose: true}, &buf); err != nil {
+		t.Fatalf("DoAnalyze multi error: %v", err)
+	}
+	out := buf.String()
+
+	hA := "=== Informe de Compresibilidad: " + dirA + " ==="
+	hMid := "=== Informe de Compresibilidad: " + singleFile + " ==="
+	hB := "=== Informe de Compresibilidad: " + dirB + " ==="
+
+	idxA := strings.Index(out, hA)
+	idxMid := strings.Index(out, hMid)
+	idxB := strings.Index(out, hB)
+	if idxA < 0 || idxMid < 0 || idxB < 0 {
+		t.Fatalf("faltan encabezados de informes separados en salida:\n%s", out)
+	}
+	if !(idxA < idxMid && idxMid < idxB) {
+		t.Errorf("orden incorrecto de informes: idxA=%d idxMid=%d idxB=%d", idxA, idxMid, idxB)
+	}
+
+	if got := strings.Count(out, "=== Resumen del Estudio ==="); got != 3 {
+		t.Errorf("esperaba 3 resúmenes individuales, obtuve %d", got)
+	}
+
+	globalHeader := "=== Resumen Global (3 elementos) ==="
+	idxGlobal := strings.Index(out, globalHeader)
+	if idxGlobal < 0 {
+		t.Fatalf("falta %q en salida:\n%s", globalHeader, out)
+	}
+	if idxGlobal <= idxB {
+		t.Errorf("Resumen Global (%d) debe aparecer después del último informe (%d)", idxGlobal, idxB)
+	}
+
+	totalBytes := int64(len(textPayload)*2 + len(incompPayload))
+	globalTail := out[idxGlobal:]
+	if !strings.Contains(globalTail, "3 archivos") {
+		t.Errorf("Resumen Global no muestra total de 3 archivos:\n%s", globalTail)
+	}
+	if !strings.Contains(globalTail, FormatSize(totalBytes)) {
+		t.Errorf("Resumen Global no muestra tamaño total %s:\n%s", FormatSize(totalBytes), globalTail)
+	}
+}
+
+func TestDoAnalyze_MultiTargetPartialAndAllErrors(t *testing.T) {
+	t.Run("partial_error_continues_valid_targets", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dir1 := filepath.Join(tmpDir, "valid1")
+		dir2 := filepath.Join(tmpDir, "valid2")
+		missing := filepath.Join(tmpDir, "missing_target")
+		for _, d := range []string{dir1, dir2} {
+			if err := os.MkdirAll(d, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(d, "a.txt"), bytes.Repeat([]byte("abcd"), 512), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		var buf bytes.Buffer
+		err := DoAnalyze([]string{dir1, missing, dir2}, AnalyzeOptions{}, &buf)
+		if err == nil {
+			t.Fatalf("esperaba error por %s, obtuve nil", missing)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "=== Informe de Compresibilidad: "+dir1+" ===") {
+			t.Errorf("faltó informe de %s tras error parcial:\n%s", dir1, out)
+		}
+		if !strings.Contains(out, "=== Informe de Compresibilidad: "+dir2+" ===") {
+			t.Errorf("faltó informe de %s tras error parcial:\n%s", dir2, out)
+		}
+		if !strings.Contains(out, "✗ Error analizando "+missing) {
+			t.Errorf("faltó aviso de error en salida para %s:\n%s", missing, out)
+		}
+		if !strings.Contains(out, "=== Resumen Global (2 elementos) ===") {
+			t.Errorf("faltó Resumen Global de 2 elementos válidos:\n%s", out)
+		}
+	})
+
+	t.Run("single_valid_plus_invalid_omits_global_summary", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dir1 := filepath.Join(tmpDir, "valid1")
+		missing := filepath.Join(tmpDir, "missing")
+		if err := os.MkdirAll(dir1, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir1, "a.txt"), bytes.Repeat([]byte("abcd"), 512), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf bytes.Buffer
+		err := DoAnalyze([]string{dir1, missing}, AnalyzeOptions{}, &buf)
+		if err == nil {
+			t.Fatalf("esperaba error por %s", missing)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "=== Informe de Compresibilidad: "+dir1+" ===") {
+			t.Errorf("faltó informe de %s:\n%s", dir1, out)
+		}
+		if strings.Contains(out, "Resumen Global") {
+			t.Errorf("no debe haber Resumen Global cuando solo 1 objetivo tuvo éxito:\n%s", out)
+		}
+	})
+
+	t.Run("all_targets_invalid_under_tty", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m1 := filepath.Join(tmpDir, "no1")
+		m2 := filepath.Join(tmpDir, "no2")
+
+		origTerm := analyzeIsTerminal
+		origStderr := analyzeStderr
+		t.Cleanup(func() {
+			analyzeIsTerminal = origTerm
+			analyzeStderr = origStderr
+		})
+		var stderrBuf bytes.Buffer
+		analyzeIsTerminal = func() bool { return true }
+		analyzeStderr = &lockedWriter{w: &stderrBuf}
+
+		var buf bytes.Buffer
+		err := DoAnalyze([]string{m1, m2}, AnalyzeOptions{}, &buf)
+		if err == nil {
+			t.Fatalf("esperaba error cuando todos los objetivos faltan")
+		}
+		out := buf.String()
+		if !strings.Contains(out, "✗ Error analizando "+m1) || !strings.Contains(out, "✗ Error analizando "+m2) {
+			t.Errorf("se esperaban ambos errores en salida:\n%s", out)
+		}
+		if strings.Contains(out, "Resumen Global") {
+			t.Errorf("no debe imprimir Resumen Global si todos fallan:\n%s", out)
+		}
+	})
+
+	t.Run("walk_error_on_one_dir_preserves_other_dir", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dirA := filepath.Join(tmpDir, "dirA")
+		dirB := filepath.Join(tmpDir, "dirB")
+		for _, d := range []string{dirA, dirB} {
+			if err := os.MkdirAll(d, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(d, "f.txt"), bytes.Repeat([]byte("x"), 2048), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		origWalk := analyzeWalkDir
+		t.Cleanup(func() { analyzeWalkDir = origWalk })
+		errWalkFail := errors.New("fallo walk simulado")
+		analyzeWalkDir = func(root string, fn fs.WalkDirFunc) error {
+			if root == dirA {
+				return errWalkFail
+			}
+			return origWalk(root, fn)
+		}
+
+		var buf bytes.Buffer
+		err := DoAnalyze([]string{dirA, dirB}, AnalyzeOptions{}, &buf)
+		if !errors.Is(err, errWalkFail) {
+			t.Fatalf("esperaba errWalkFail en err, obtuve: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "✗ Error analizando "+dirA) {
+			t.Errorf("faltó error de %s:\n%s", dirA, out)
+		}
+		if !strings.Contains(out, "=== Informe de Compresibilidad: "+dirB+" ===") {
+			t.Errorf("faltó informe de %s:\n%s", dirB, out)
+		}
+	})
+}
+
+func TestDoAnalyze_MultiTargetTTYProgressSingleBar(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir1 := filepath.Join(tmpDir, "d1")
+	dir2 := filepath.Join(tmpDir, "d2")
+	for _, d := range []string{dir1, dir2} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 5; i++ {
+			name := filepath.Join(d, "f_"+FormatNumber(i)+".txt")
+			if err := os.WriteFile(name, bytes.Repeat([]byte("tty line\n"), 200), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	origTerm := analyzeIsTerminal
+	origStderr := analyzeStderr
+	t.Cleanup(func() {
+		analyzeIsTerminal = origTerm
+		analyzeStderr = origStderr
+	})
+
+	var stderrBuf bytes.Buffer
+	analyzeIsTerminal = func() bool { return true }
+	analyzeStderr = &lockedWriter{w: &stderrBuf}
+
+	var out bytes.Buffer
+	if err := DoAnalyze([]string{dir1, dir2}, AnalyzeOptions{}, &out); err != nil {
+		t.Fatalf("DoAnalyze error: %v", err)
+	}
+
+	errOut := stderrBuf.String()
+	if !strings.Contains(errOut, "Analizando compresibilidad en 2 elementos") {
+		t.Errorf("faltó encabezado único multi-target en TTY stderr, obtuve: %q", errOut)
+	}
+	if !strings.Contains(errOut, "\033[?25l") || !strings.Contains(errOut, "\033[?25h") {
+		t.Errorf("TTY debe ocultar y restaurar cursor una sola vez: %q", errOut)
+	}
+	if got := strings.Count(errOut, "🔍 Analizando compresibilidad en"); got != 1 {
+		t.Errorf("esperaba 1 solo encabezado de progreso global, obtuve %d: %q", got, errOut)
+	}
+}
+
+func TestDoAnalyze_MultiTargetRotationalLimit(t *testing.T) {
+	dirs := make([]string, 4)
+	tmpDir := t.TempDir()
+	for i := range dirs {
+		d := filepath.Join(tmpDir, "dir_"+FormatNumber(i))
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "a.txt"), bytes.Repeat([]byte("rot "), 1024), 0644); err != nil {
+			t.Fatal(err)
+		}
+		dirs[i] = d
+	}
+
+	t.Run("rotational_hdd_caps_concurrent_walks_to_2", func(t *testing.T) {
+		origWalk := analyzeWalkDir
+		origRot := analyzeIsRotational
+		t.Cleanup(func() {
+			analyzeWalkDir = origWalk
+			analyzeIsRotational = origRot
+		})
+
+		analyzeIsRotational = func(string) bool { return true }
+
+		var cur, maxObserved atomic.Int32
+		analyzeWalkDir = func(root string, fn fs.WalkDirFunc) error {
+			n := cur.Add(1)
+			for {
+				prev := maxObserved.Load()
+				if n <= prev || maxObserved.CompareAndSwap(prev, n) {
+					break
+				}
+			}
+			time.Sleep(40 * time.Millisecond)
+			cur.Add(-1)
+			return origWalk(root, fn)
+		}
+
+		var out bytes.Buffer
+		if err := DoAnalyze(dirs, AnalyzeOptions{}, &out); err != nil {
+			t.Fatalf("DoAnalyze rotational error: %v", err)
+		}
+		if got := maxObserved.Load(); got > 2 {
+			t.Errorf("concurrencia rotacional = %d, debía ser <= 2", got)
+		}
+	})
+
+	t.Run("ssd_allows_more_than_2_concurrent_walks", func(t *testing.T) {
+		if NCPU() < 3 {
+			t.Skipf("requiere >= 3 CPUs (NCPU=%d)", NCPU())
+		}
+		origWalk := analyzeWalkDir
+		origRot := analyzeIsRotational
+		t.Cleanup(func() {
+			analyzeWalkDir = origWalk
+			analyzeIsRotational = origRot
+		})
+
+		analyzeIsRotational = func(string) bool { return false }
+
+		var cur, maxObserved atomic.Int32
+		threeInside := make(chan struct{})
+		var closeOnce sync.Once
+		analyzeWalkDir = func(root string, fn fs.WalkDirFunc) error {
+			n := cur.Add(1)
+			for {
+				prev := maxObserved.Load()
+				if n <= prev || maxObserved.CompareAndSwap(prev, n) {
+					break
+				}
+			}
+			if n >= 3 {
+				closeOnce.Do(func() { close(threeInside) })
+			}
+			select {
+			case <-threeInside:
+			case <-time.After(1500 * time.Millisecond):
+			}
+			cur.Add(-1)
+			return origWalk(root, fn)
+		}
+
+		var out bytes.Buffer
+		if err := DoAnalyze(dirs, AnalyzeOptions{}, &out); err != nil {
+			t.Fatalf("DoAnalyze SSD error: %v", err)
+		}
+		if got := maxObserved.Load(); got < 3 {
+			t.Errorf("concurrencia SSD = %d, esperaba >= 3", got)
+		}
+	})
+}

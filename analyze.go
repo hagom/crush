@@ -2,6 +2,7 @@ package main
 
 import (
 	"compress/flate"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -19,6 +20,7 @@ var (
 	analyzeFileFunc             = analyzeFileWithSize
 	analyzeIsTerminal           = isTerminal
 	analyzeStderr     io.Writer = os.Stderr
+	analyzeIsRotational         = IsRotational
 )
 
 // FileAnalysis almacena las métricas individuales de análisis de un archivo regular.
@@ -329,16 +331,11 @@ func DoAnalyze(targets []string, opts AnalyzeOptions, out io.Writer) error {
 		allExcludes = append(allExcludes, DefaultCleanExcludes...)
 	}
 
-	for i, target := range targets {
-		if i > 0 {
-			fmt.Fprintln(out)
-		}
-		if err := analyzeTarget(target, opts, allExcludes, out); err != nil {
-			return err
-		}
+	if len(targets) == 1 {
+		return analyzeTarget(targets[0], opts, allExcludes, out)
 	}
 
-	return nil
+	return analyzeTargetsConcurrent(targets, opts, allExcludes, out)
 }
 
 func isPathExcluded(path string, isDir bool, excludes []string) bool {
@@ -364,268 +361,99 @@ func isPathExcluded(path string, isDir bool, excludes []string) bool {
 	return false
 }
 
-func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io.Writer) error {
-	target = filepath.Clean(target)
-	displayTarget := target
-	if target == "." || target == "" {
-		if abs, err := filepath.Abs(target); err == nil {
+type analyzeGroupData struct {
+	isDir              bool
+	name               string
+	totalSize          int64
+	compressibleSize   int64
+	incompressibleSize int64
+	estimatedSize      int64
+	entropySum         float64
+	fileCount          int
+	topAnalysis        FileAnalysis
+	files              []FileAnalysis
+}
+
+func resolveAnalyzeTarget(raw string) (cleanTarget, displayTarget string) {
+	cleanTarget = filepath.Clean(raw)
+	displayTarget = cleanTarget
+	if cleanTarget == "." || cleanTarget == "" {
+		if abs, err := filepath.Abs(cleanTarget); err == nil {
 			displayTarget = abs
 		}
 	}
-	fi, err := os.Stat(target)
-	if err != nil {
-		return fmt.Errorf("accediendo a %s: %w", displayTarget, err)
+	return cleanTarget, displayTarget
+}
+
+func addAnalysisToGroups(groups map[string]*analyzeGroupData, relPath string, an FileAnalysis, verbose bool) {
+	topKey, _, isSubDir := strings.Cut(filepath.ToSlash(relPath), "/")
+
+	g, ok := groups[topKey]
+	if !ok {
+		gName := topKey
+		if isSubDir {
+			gName += "/"
+		}
+		g = &analyzeGroupData{
+			isDir: isSubDir,
+			name:  gName,
+		}
+		groups[topKey] = g
 	}
 
-	if !fi.IsDir() {
-		// Análisis de un solo archivo
-		if analyzeIsTerminal() {
-			fmt.Fprintf(analyzeStderr, "%s🔍 Analizando '%s'...%s\r", Yellow, displayTarget, NC)
-		}
-		analysis, err := analyzeFileFunc(target, fi.Size())
-		if analyzeIsTerminal() {
-			fmt.Fprintf(analyzeStderr, "\r\033[K")
-		}
-		if err != nil {
-			return fmt.Errorf("analizando %s: %w", displayTarget, err)
-		}
-		entry := EntryReport{
-			Name:            filepath.Base(target),
-			RelPath:         target,
-			IsDir:           false,
-			TotalSize:       analysis.Size,
-			EstimatedSize:   analysis.EstimatedSize,
-			SavingsBytes:    analysis.SavingsBytes,
-			SavingsPct:      analysis.SavingsPct,
-			WeightedEntropy: analysis.Entropy,
-			CompLevel:       analysis.CompLevel,
-			RecommendedFmt:  analysis.RecommendedFmt,
-			FileCount:       1,
-		}
-		summary := AnalyzeSummary{
-			TotalFiles:          1,
-			TotalDirs:           0,
-			TotalBytes:          analysis.Size,
-			EstimatedBytes:      analysis.EstimatedSize,
-			SavingsBytes:        analysis.SavingsBytes,
-			SavingsPct:          analysis.SavingsPct,
-			CompressibleBytes:   0,
-			IncompressibleBytes: 0,
-		}
-		if analysis.Compressible {
-			summary.CompressibleBytes = analysis.Size
-		} else {
-			summary.IncompressibleBytes = analysis.Size
-		}
-		renderAnalyzeReport(displayTarget, []EntryReport{entry}, summary, opts, out)
-		return nil
+	if !isSubDir {
+		g.topAnalysis = an
 	}
 
-	type walkItem struct {
-		absPath string
-		relPath string
-		size    int64
+	g.totalSize += an.Size
+	g.estimatedSize += an.EstimatedSize
+	if an.Compressible {
+		g.compressibleSize += an.Size
+	} else {
+		g.incompressibleSize += an.Size
 	}
-
-	type fileResult struct {
-		relPath  string
-		analysis FileAnalysis
-		err      error
+	g.entropySum += an.Entropy * float64(an.Size)
+	g.fileCount++
+	if verbose {
+		g.files = append(g.files, an)
 	}
+}
 
-	// Análisis concurrente en streaming mediante pool acotado de workers (1..min(NCPU(), 32)).
-	// En --analyze se procesan micro-muestras de 32 KiB; mantener hasta 32 workers permite
-	// que la cola NCQ del almacenamiento (tanto SSD/NVMe como HDD SATA con queue_depth=32)
-	// despache decenas de miles de archivos sin acumular las rutas en RAM.
-	workers := NCPU()
-	if workers < 1 {
-		workers = 1
+func buildSingleFileReport(target string, analysis FileAnalysis) ([]EntryReport, AnalyzeSummary) {
+	entry := EntryReport{
+		Name:            filepath.Base(target),
+		RelPath:         target,
+		IsDir:           false,
+		TotalSize:       analysis.Size,
+		EstimatedSize:   analysis.EstimatedSize,
+		SavingsBytes:    analysis.SavingsBytes,
+		SavingsPct:      analysis.SavingsPct,
+		WeightedEntropy: analysis.Entropy,
+		CompLevel:       analysis.CompLevel,
+		RecommendedFmt:  analysis.RecommendedFmt,
+		FileCount:       1,
 	}
-	if workers > 32 {
-		workers = 32
+	summary := AnalyzeSummary{
+		TotalFiles:     1,
+		TotalDirs:      0,
+		TotalBytes:     analysis.Size,
+		EstimatedBytes: analysis.EstimatedSize,
+		SavingsBytes:   analysis.SavingsBytes,
+		SavingsPct:     analysis.SavingsPct,
 	}
-
-	workChan := make(chan walkItem, workers*4)
-	resChan := make(chan fileResult, workers*4)
-
-	var apt *analyzeProgressTracker
-	stopProgress := func() {}
-	if analyzeIsTerminal() {
-		fmt.Fprintf(analyzeStderr, "%s🔍 Analizando compresibilidad en '%s'...%s\n", Yellow, displayTarget, NC)
-		apt = newAnalyzeProgressTracker()
-		apt.Start()
-		var cleanupOnce sync.Once
-		stopProgress = func() {
-			cleanupOnce.Do(func() {
-				apt.Stop()
-				fmt.Fprintf(analyzeStderr, "\033[1A\r\033[K")
-			})
-		}
-		defer stopProgress()
+	if analysis.Compressible {
+		summary.CompressibleBytes = analysis.Size
+	} else {
+		summary.IncompressibleBytes = analysis.Size
 	}
+	return []EntryReport{entry}, summary
+}
 
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for item := range workChan {
-				an, aErr := analyzeFileFunc(item.absPath, item.size)
-				if apt != nil {
-					apt.Incr()
-					apt.AddBytes(an.SampleBytes)
-				}
-				resChan <- fileResult{
-					relPath:  item.relPath,
-					analysis: an,
-					err:      aErr,
-				}
-			}
-		}()
-	}
-
-	go func() {
-		wg.Wait()
-		close(resChan)
-	}()
-
-	var dirCount atomic.Int64
-	var unreadableCount atomic.Int64
-	walkErrCh := make(chan error, 1)
-
-	go func() {
-		defer func() {
-			if apt != nil {
-				apt.MarkWalkDone()
-			}
-			close(workChan)
-		}()
-		walkErrCh <- analyzeWalkDir(target, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				unreadableCount.Add(1)
-				return nil
-			}
-
-			if path == target {
-				return nil
-			}
-
-			isDir := d.IsDir()
-			rel, relErr := filepath.Rel(target, path)
-			if relErr != nil {
-				rel = path
-			}
-
-			if isPathExcluded(rel, isDir, excludes) || isPathExcluded(path, isDir, excludes) {
-				if isDir {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			// Ignorar symlinks para evitar bucles o falsos duplicados
-			if d.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-
-			if isDir {
-				dirCount.Add(1)
-				return nil
-			}
-
-			// Solo archivos regulares
-			if !d.Type().IsRegular() {
-				return nil
-			}
-
-			info, statErr := d.Info()
-			if statErr != nil {
-				unreadableCount.Add(1)
-				return nil
-			}
-
-			sz := info.Size()
-			if apt != nil {
-				apt.AddDiscovered(1)
-				apt.AddDiscoveredBytes(sz)
-			}
-
-			workChan <- walkItem{
-				absPath: path,
-				relPath: rel,
-				size:    sz,
-			}
-			return nil
-		})
-	}()
-
-	// Agrupación por entrada de primer nivel bajo target
-	type groupData struct {
-		isDir              bool
-		name               string
-		totalSize          int64
-		compressibleSize   int64
-		incompressibleSize int64
-		estimatedSize      int64
-		entropySum         float64
-		fileCount          int
-		topAnalysis        FileAnalysis
-		files              []FileAnalysis
-	}
-
-	groups := make(map[string]*groupData)
-
-	for res := range resChan {
-		if res.err != nil {
-			unreadableCount.Add(1)
-			continue
-		}
-
-		an := res.analysis
-		topKey, _, isSubDir := strings.Cut(filepath.ToSlash(res.relPath), "/")
-
-		g, ok := groups[topKey]
-		if !ok {
-			gName := topKey
-			if isSubDir {
-				gName += "/"
-			}
-			g = &groupData{
-				isDir: isSubDir,
-				name:  gName,
-			}
-			groups[topKey] = g
-		}
-
-		if !isSubDir {
-			g.topAnalysis = an
-		}
-
-		g.totalSize += an.Size
-		g.estimatedSize += an.EstimatedSize
-		if an.Compressible {
-			g.compressibleSize += an.Size
-		} else {
-			g.incompressibleSize += an.Size
-		}
-		g.entropySum += an.Entropy * float64(an.Size)
-		g.fileCount++
-		if opts.Verbose {
-			g.files = append(g.files, an)
-		}
-	}
-
-	stopProgress()
-
-	if walkErr := <-walkErrCh; walkErr != nil {
-		return fmt.Errorf("recorriendo %s: %w", target, walkErr)
-	}
-
-	// Construcción de entradas y resumen
+func buildDirReport(target string, groups map[string]*analyzeGroupData, dirCount, unreadableCount int, opts AnalyzeOptions) ([]EntryReport, AnalyzeSummary) {
 	var entries []EntryReport
 	summary := AnalyzeSummary{
-		TotalDirs:       int(dirCount.Load()),
-		UnreadableCount: int(unreadableCount.Load()),
+		TotalDirs:       dirCount,
+		UnreadableCount: unreadableCount,
 	}
 
 	for _, g := range groups {
@@ -770,6 +598,442 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 		summary.SavingsPct = (float64(summary.SavingsBytes) / float64(summary.TotalBytes)) * 100.0
 	}
 
+	return entries, summary
+}
+
+func walkDirToItems(target string, excludes []string, dirCount, unreadableCount *atomic.Int64, apt *analyzeProgressTracker, emit func(absPath, relPath string, size int64)) error {
+	return analyzeWalkDir(target, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			unreadableCount.Add(1)
+			return nil
+		}
+
+		if path == target {
+			return nil
+		}
+
+		isDir := d.IsDir()
+		rel, relErr := filepath.Rel(target, path)
+		if relErr != nil {
+			rel = path
+		}
+
+		if isPathExcluded(rel, isDir, excludes) || isPathExcluded(path, isDir, excludes) {
+			if isDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Ignorar symlinks para evitar bucles o falsos duplicados
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+
+		if isDir {
+			dirCount.Add(1)
+			return nil
+		}
+
+		// Solo archivos regulares
+		if !d.Type().IsRegular() {
+			return nil
+		}
+
+		info, statErr := d.Info()
+		if statErr != nil {
+			unreadableCount.Add(1)
+			return nil
+		}
+
+		sz := info.Size()
+		if apt != nil {
+			apt.AddDiscovered(1)
+			apt.AddDiscoveredBytes(sz)
+		}
+
+		emit(path, rel, sz)
+		return nil
+	})
+}
+
+func analyzeTargetsConcurrent(targets []string, opts AnalyzeOptions, excludes []string, out io.Writer) error {
+	type targetState struct {
+		target          string
+		displayTarget   string
+		isDir           bool
+		isRot           bool
+		fileSize        int64
+		err             error
+		walkErr         error
+		dirCount        atomic.Int64
+		unreadableCount atomic.Int64
+		groups          map[string]*analyzeGroupData
+		singleAnalysis  FileAnalysis
+		hasSingle       bool
+	}
+
+	type multiWalkItem struct {
+		targetIdx    int
+		absPath      string
+		relPath      string
+		size         int64
+		isSingleFile bool
+	}
+
+	type multiFileResult struct {
+		targetIdx    int
+		relPath      string
+		isSingleFile bool
+		analysis     FileAnalysis
+		err          error
+	}
+
+	states := make([]*targetState, len(targets))
+	validCount := 0
+	for i, raw := range targets {
+		clean, display := resolveAnalyzeTarget(raw)
+		st := &targetState{
+			target:        clean,
+			displayTarget: display,
+		}
+		fi, err := os.Stat(clean)
+		if err != nil {
+			st.err = fmt.Errorf("accediendo a %s: %w", display, err)
+		} else {
+			st.isDir = fi.IsDir()
+			st.fileSize = fi.Size()
+			if st.isDir {
+				st.isRot = analyzeIsRotational(clean)
+				st.groups = make(map[string]*analyzeGroupData)
+			}
+			validCount++
+		}
+		states[i] = st
+	}
+
+	if validCount > 0 {
+		workers := NCPU()
+		if workers < 1 {
+			workers = 1
+		}
+		if workers > 32 {
+			workers = 32
+		}
+
+		workChan := make(chan multiWalkItem, workers*4)
+		resChan := make(chan multiFileResult, workers*4)
+
+		var apt *analyzeProgressTracker
+		stopProgress := func() {}
+		if analyzeIsTerminal() {
+			fmt.Fprintf(analyzeStderr, "%s🔍 Analizando compresibilidad en %d elementos...%s\n", Yellow, validCount, NC)
+			apt = newAnalyzeProgressTracker()
+			apt.Start()
+			var cleanupOnce sync.Once
+			stopProgress = func() {
+				cleanupOnce.Do(func() {
+					apt.Stop()
+					fmt.Fprintf(analyzeStderr, "\033[1A\r\033[K")
+				})
+			}
+			defer stopProgress()
+		}
+
+		var workerWG sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			workerWG.Add(1)
+			go func() {
+				defer workerWG.Done()
+				for item := range workChan {
+					an, aErr := analyzeFileFunc(item.absPath, item.size)
+					if apt != nil {
+						apt.Incr()
+						apt.AddBytes(an.SampleBytes)
+					}
+					resChan <- multiFileResult{
+						targetIdx:    item.targetIdx,
+						relPath:      item.relPath,
+						isSingleFile: item.isSingleFile,
+						analysis:     an,
+						err:          aErr,
+					}
+				}
+			}()
+		}
+
+		go func() {
+			workerWG.Wait()
+			close(resChan)
+		}()
+
+		rotSem := make(chan struct{}, 2)
+		ssdWalkCap := workers
+		if ssdWalkCap > 8 {
+			ssdWalkCap = 8
+		}
+		ssdSem := make(chan struct{}, ssdWalkCap)
+
+		var walkWG sync.WaitGroup
+		for i, st := range states {
+			if st.err != nil {
+				continue
+			}
+			walkWG.Add(1)
+			go func(idx int, s *targetState) {
+				defer walkWG.Done()
+				if !s.isDir {
+					if apt != nil {
+						apt.AddDiscovered(1)
+						apt.AddDiscoveredBytes(s.fileSize)
+					}
+					workChan <- multiWalkItem{
+						targetIdx:    idx,
+						absPath:      s.target,
+						relPath:      s.target,
+						size:         s.fileSize,
+						isSingleFile: true,
+					}
+					return
+				}
+
+				walkSem := ssdSem
+				if s.isRot {
+					walkSem = rotSem
+				}
+				walkSem <- struct{}{}
+				defer func() { <-walkSem }()
+
+				s.walkErr = walkDirToItems(s.target, excludes, &s.dirCount, &s.unreadableCount, apt, func(absPath, relPath string, size int64) {
+					workChan <- multiWalkItem{
+						targetIdx: idx,
+						absPath:   absPath,
+						relPath:   relPath,
+						size:      size,
+					}
+				})
+			}(i, st)
+		}
+
+		go func() {
+			walkWG.Wait()
+			if apt != nil {
+				apt.MarkWalkDone()
+			}
+			close(workChan)
+		}()
+
+		for res := range resChan {
+			st := states[res.targetIdx]
+			if res.isSingleFile {
+				if res.err != nil {
+					st.err = fmt.Errorf("analizando %s: %w", st.displayTarget, res.err)
+				} else {
+					st.singleAnalysis = res.analysis
+					st.hasSingle = true
+				}
+				continue
+			}
+			if res.err != nil {
+				st.unreadableCount.Add(1)
+				continue
+			}
+			addAnalysisToGroups(st.groups, res.relPath, res.analysis, opts.Verbose)
+		}
+
+		stopProgress()
+
+		for _, st := range states {
+			if st.walkErr != nil && st.err == nil {
+				st.err = fmt.Errorf("recorriendo %s: %w", st.target, st.walkErr)
+			}
+		}
+	}
+
+	var globalSummary AnalyzeSummary
+	var errs []error
+	rendered := 0
+	succeeded := 0
+
+	for _, st := range states {
+		if rendered > 0 {
+			fmt.Fprintln(out)
+		}
+		if st.err != nil {
+			fmt.Fprintf(out, "\n%s✗ Error analizando %s: %v%s\n", Red, st.displayTarget, st.err, NC)
+			errs = append(errs, st.err)
+			rendered++
+			continue
+		}
+
+		var entries []EntryReport
+		var summary AnalyzeSummary
+		if !st.isDir {
+			if st.hasSingle {
+				entries, summary = buildSingleFileReport(st.target, st.singleAnalysis)
+			}
+		} else {
+			entries, summary = buildDirReport(st.target, st.groups, int(st.dirCount.Load()), int(st.unreadableCount.Load()), opts)
+		}
+
+		renderAnalyzeReport(st.displayTarget, entries, summary, opts, out)
+
+		globalSummary.TotalFiles += summary.TotalFiles
+		globalSummary.TotalDirs += summary.TotalDirs
+		globalSummary.TotalBytes += summary.TotalBytes
+		globalSummary.CompressibleBytes += summary.CompressibleBytes
+		globalSummary.IncompressibleBytes += summary.IncompressibleBytes
+		globalSummary.EstimatedBytes += summary.EstimatedBytes
+		globalSummary.UnreadableCount += summary.UnreadableCount
+
+		succeeded++
+		rendered++
+	}
+
+	if succeeded >= 2 {
+		globalSummary.SavingsBytes = globalSummary.TotalBytes - globalSummary.EstimatedBytes
+		if globalSummary.SavingsBytes < 0 {
+			globalSummary.SavingsBytes = 0
+			globalSummary.EstimatedBytes = globalSummary.TotalBytes
+		}
+		if globalSummary.TotalBytes > 0 {
+			globalSummary.SavingsPct = (float64(globalSummary.SavingsBytes) / float64(globalSummary.TotalBytes)) * 100.0
+		}
+		renderAnalyzeSummary(fmt.Sprintf("=== Resumen Global (%d elementos) ===", succeeded), globalSummary, out)
+	}
+
+	return errors.Join(errs...)
+}
+
+func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io.Writer) error {
+	target, displayTarget := resolveAnalyzeTarget(target)
+	fi, err := os.Stat(target)
+	if err != nil {
+		return fmt.Errorf("accediendo a %s: %w", displayTarget, err)
+	}
+
+	if !fi.IsDir() {
+		// Análisis de un solo archivo
+		if analyzeIsTerminal() {
+			fmt.Fprintf(analyzeStderr, "%s🔍 Analizando '%s'...%s\r", Yellow, displayTarget, NC)
+		}
+		analysis, err := analyzeFileFunc(target, fi.Size())
+		if analyzeIsTerminal() {
+			fmt.Fprintf(analyzeStderr, "\r\033[K")
+		}
+		if err != nil {
+			return fmt.Errorf("analizando %s: %w", displayTarget, err)
+		}
+		entries, summary := buildSingleFileReport(target, analysis)
+		renderAnalyzeReport(displayTarget, entries, summary, opts, out)
+		return nil
+	}
+
+	type walkItem struct {
+		absPath string
+		relPath string
+		size    int64
+	}
+
+	type fileResult struct {
+		relPath  string
+		analysis FileAnalysis
+		err      error
+	}
+
+	// Análisis concurrente en streaming mediante pool acotado de workers (1..min(NCPU(), 32)).
+	// En --analyze se procesan micro-muestras de 32 KiB; mantener hasta 32 workers permite
+	// que la cola NCQ del almacenamiento (tanto SSD/NVMe como HDD SATA con queue_depth=32)
+	// despache decenas de miles de archivos sin acumular las rutas en RAM.
+	workers := NCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 32 {
+		workers = 32
+	}
+
+	workChan := make(chan walkItem, workers*4)
+	resChan := make(chan fileResult, workers*4)
+
+	var apt *analyzeProgressTracker
+	stopProgress := func() {}
+	if analyzeIsTerminal() {
+		fmt.Fprintf(analyzeStderr, "%s🔍 Analizando compresibilidad en '%s'...%s\n", Yellow, displayTarget, NC)
+		apt = newAnalyzeProgressTracker()
+		apt.Start()
+		var cleanupOnce sync.Once
+		stopProgress = func() {
+			cleanupOnce.Do(func() {
+				apt.Stop()
+				fmt.Fprintf(analyzeStderr, "\033[1A\r\033[K")
+			})
+		}
+		defer stopProgress()
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range workChan {
+				an, aErr := analyzeFileFunc(item.absPath, item.size)
+				if apt != nil {
+					apt.Incr()
+					apt.AddBytes(an.SampleBytes)
+				}
+				resChan <- fileResult{
+					relPath:  item.relPath,
+					analysis: an,
+					err:      aErr,
+				}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(resChan)
+	}()
+
+	var dirCount atomic.Int64
+	var unreadableCount atomic.Int64
+	walkErrCh := make(chan error, 1)
+
+	go func() {
+		defer func() {
+			if apt != nil {
+				apt.MarkWalkDone()
+			}
+			close(workChan)
+		}()
+		walkErrCh <- walkDirToItems(target, excludes, &dirCount, &unreadableCount, apt, func(absPath, relPath string, size int64) {
+			workChan <- walkItem{
+				absPath: absPath,
+				relPath: relPath,
+				size:    size,
+			}
+		})
+	}()
+
+	groups := make(map[string]*analyzeGroupData)
+
+	for res := range resChan {
+		if res.err != nil {
+			unreadableCount.Add(1)
+			continue
+		}
+		addAnalysisToGroups(groups, res.relPath, res.analysis, opts.Verbose)
+	}
+
+	stopProgress()
+
+	if walkErr := <-walkErrCh; walkErr != nil {
+		return fmt.Errorf("recorriendo %s: %w", target, walkErr)
+	}
+
+	entries, summary := buildDirReport(target, groups, int(dirCount.Load()), int(unreadableCount.Load()), opts)
 	renderAnalyzeReport(displayTarget, entries, summary, opts, out)
 	return nil
 }
@@ -862,7 +1126,11 @@ func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSu
 		}
 	}
 
-	fmt.Fprintf(out, "\n%s=== Resumen del Estudio ===%s\n", Bold, NC)
+	renderAnalyzeSummary("=== Resumen del Estudio ===", summary, out)
+}
+
+func renderAnalyzeSummary(title string, summary AnalyzeSummary, out io.Writer) {
+	fmt.Fprintf(out, "\n%s%s%s\n", Bold, title, NC)
 	dirWord := "directorios"
 	if summary.TotalDirs == 1 {
 		dirWord = "directorio"

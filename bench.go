@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -33,7 +34,7 @@ type BenchResult struct {
 	ErrorMsg    string
 }
 
-func GenerateBenchmarkDataset(sizeBytes int64, outPath string) error {
+func GenerateBenchmarkDataset(sizeBytes int64, outPath string) (retErr error) {
 	if sizeBytes <= 0 {
 		return fmt.Errorf("tamaño inválido para dataset: %d", sizeBytes)
 	}
@@ -42,10 +43,17 @@ func GenerateBenchmarkDataset(sizeBytes int64, outPath string) error {
 	if err != nil {
 		return fmt.Errorf("no se pudo crear archivo de dataset %s: %w", outPath, err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+		if retErr != nil {
+			_ = os.Remove(outPath)
+		}
+	}()
 
 	w := bufio.NewWriterSize(f, 64*1024)
-	defer w.Flush()
 
 	r := rand.New(rand.NewSource(42))
 
@@ -91,7 +99,11 @@ func GenerateBenchmarkDataset(sizeBytes int64, outPath string) error {
 		}
 	}
 
-	return nil
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	closed = true
+	return f.Close()
 }
 
 func getBenchCompressor(f Format) (tool string, available bool) {
@@ -185,9 +197,17 @@ func BenchmarkFormat(datasetPath string, f Format, workDir string) BenchResult {
 	}
 
 	ext := f.String()
-	compFile := filepath.Join(workDir, fmt.Sprintf("bench_%s_%d.%s", ext, time.Now().UnixNano(), ext))
-	decompFile := filepath.Join(workDir, fmt.Sprintf("bench_%s_%d.decomp", ext, time.Now().UnixNano()))
-	extractDir := filepath.Join(workDir, fmt.Sprintf("extract_%s_%d", ext, time.Now().UnixNano()))
+	runDir, err := os.MkdirTemp(workDir, "bench-"+ext+"-*")
+	if err != nil {
+		res.Status = "ERROR"
+		res.ErrorMsg = fmt.Sprintf("error creando directorio temporal de benchmark: %v", err)
+		return res
+	}
+	defer os.RemoveAll(runDir)
+
+	compFile := filepath.Join(runDir, "archive."+ext)
+	decompFile := filepath.Join(runDir, "archive.decomp")
+	extractDir := filepath.Join(runDir, "extract")
 
 	startComp := time.Now()
 	compErr := runFormatCompression(f, tool, datasetPath, compFile)
@@ -288,6 +308,7 @@ func runFormatCompression(f Format, tool, datasetPath, compFile string) error {
 		}
 		cmd := execCommand("zip", "-q", "-r", "-9", safeFlagArg(compFileAbs), "--", filepath.Base(datasetAbs))
 		cmd.Dir = filepath.Dir(datasetAbs)
+		cmd.Stdout = io.Discard
 		stderrBuf := newLimitedBuffer(maxStderrBytes)
 		cmd.Stderr = stderrBuf
 		if err := cmd.Run(); err != nil {
@@ -379,7 +400,7 @@ func runFormatCompression(f Format, tool, datasetPath, compFile string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%w: %s", err, stderrBuf.String())
 	}
-	return nil
+	return outF.Close()
 }
 
 func runFormatDecompression(f Format, tool, compFile, decompFile, extractDir string) error {
@@ -405,7 +426,9 @@ func runFormatDecompression(f Format, tool, compFile, decompFile, extractDir str
 	memMB := getMemLimit()
 
 	if f == Zip {
-		_ = os.MkdirAll(extractDirAbs, 0755)
+		if err := os.MkdirAll(extractDirAbs, 0o700); err != nil {
+			return err
+		}
 		if hasTool(sevenzBin()) {
 			cmd := execCommand(sevenzBin(), "x", "-tzip", "-y", "-mmt="+thStr, "-o"+extractDirAbs, "--", compFileAbs)
 			cmd.Stdout = io.Discard
@@ -416,7 +439,8 @@ func runFormatDecompression(f Format, tool, compFile, decompFile, extractDir str
 			}
 			return nil
 		}
-		cmd := execCommand("unzip", "-q", "-o", safeFlagArg(compFileAbs), "-d", safeFlagArg(extractDirAbs))
+		cmd := execCommand("unzip", "-q", "-o", "-d", safeFlagArg(extractDirAbs), "--", safeFlagArg(compFileAbs))
+		cmd.Stdout = io.Discard
 		stderrBuf := newLimitedBuffer(maxStderrBytes)
 		cmd.Stderr = stderrBuf
 		if err := cmd.Run(); err != nil {
@@ -426,7 +450,9 @@ func runFormatDecompression(f Format, tool, compFile, decompFile, extractDir str
 	}
 
 	if f == SevenZ {
-		_ = os.MkdirAll(extractDirAbs, 0755)
+		if err := os.MkdirAll(extractDirAbs, 0o700); err != nil {
+			return err
+		}
 		cmd := execCommand(sevenzBin(), "x", "-y", "-mmt="+thStr, "-o"+extractDirAbs, "--", compFileAbs)
 		cmd.Stdout = io.Discard
 		stderrBuf := newLimitedBuffer(maxStderrBytes)
@@ -501,7 +527,7 @@ func runFormatDecompression(f Format, tool, compFile, decompFile, extractDir str
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%w: %s", err, stderrBuf.String())
 	}
-	return nil
+	return outF.Close()
 }
 
 func formatDuration(d time.Duration) string {
@@ -612,6 +638,9 @@ func DoBench(datasetPath string, sizeMB int) error {
 	if sizeMB <= 0 {
 		sizeMB = 10
 	}
+	if int64(sizeMB) > math.MaxInt64/(1024*1024) {
+		return fmt.Errorf("tamaño de dataset demasiado grande: %d MB", sizeMB)
+	}
 
 	var isTempDataset bool
 	if datasetPath == "" {
@@ -635,6 +664,9 @@ func DoBench(datasetPath string, sizeMB int) error {
 		}
 		if fi.IsDir() {
 			return fmt.Errorf("%s es un directorio; el benchmark requiere un archivo regular", datasetPath)
+		}
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("%s no es un archivo regular; el benchmark requiere un archivo regular", datasetPath)
 		}
 	}
 

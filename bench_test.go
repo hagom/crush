@@ -4,11 +4,13 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -360,6 +362,148 @@ func TestBench_MemorySafeFlagsAndBoundedStderr(t *testing.T) {
 		}
 		if len(err.Error()) > maxStderrBytes+512 {
 			t.Errorf("error message length %d exceeds bounded buffer limit (%d)", len(err.Error()), maxStderrBytes)
+		}
+	})
+}
+
+func TestBenchAudit_CleanupArgsAndValidation(t *testing.T) {
+	t.Run("BenchmarkFormat cleans up per-format temp artifacts in workDir", func(t *testing.T) {
+		datasetDir := t.TempDir()
+		workDir := t.TempDir()
+		datasetPath := filepath.Join(datasetDir, "dataset.dat")
+		if err := GenerateBenchmarkDataset(16*1024, datasetPath); err != nil {
+			t.Fatalf("GenerateBenchmarkDataset: %v", err)
+		}
+
+		res := BenchmarkFormat(datasetPath, Gz, workDir)
+		if res.Status != "OK" {
+			t.Fatalf("BenchmarkFormat(Gz) failed: %s: %s", res.Status, res.ErrorMsg)
+		}
+		entries, err := os.ReadDir(workDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Errorf("BenchmarkFormat left temporary artifacts in workDir: %v", names)
+		}
+	})
+
+	t.Run("unzip decompression uses -d <dir> -- <file>", func(t *testing.T) {
+		origLookPath := lookPath
+		defer func() { lookPath = origLookPath }()
+		lookPath = func(name string) (string, error) {
+			if name == "unzip" || name == "zip" {
+				return "/usr/bin/" + name, nil
+			}
+			return "", os.ErrNotExist
+		}
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		var capturedTool string
+		var capturedArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			capturedTool = name
+			capturedArgs = append([]string(nil), args...)
+			return mockExecCommand("mock-noop")
+		}
+
+		tmpDir := t.TempDir()
+		compFile := filepath.Join(tmpDir, "bench.zip")
+		if err := os.WriteFile(compFile, []byte("zip"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		extractDir := filepath.Join(tmpDir, "extract")
+
+		if err := runFormatDecompression(Zip, "zip", compFile, filepath.Join(tmpDir, "out.decomp"), extractDir); err != nil {
+			t.Fatalf("runFormatDecompression(Zip) failed: %v", err)
+		}
+		if capturedTool != "unzip" {
+			t.Fatalf("expected unzip, got %q", capturedTool)
+		}
+		wantSeq := []string{"-d", extractDir, "--", compFile}
+		found := false
+		for i := 0; i+len(wantSeq) <= len(capturedArgs); i++ {
+			if reflect.DeepEqual(capturedArgs[i:i+len(wantSeq)], wantSeq) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("unzip args %v missing sequence %v", capturedArgs, wantSeq)
+		}
+	})
+
+	t.Run("runFormatDecompression returns error when extractDir creation fails", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		called := false
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			called = true
+			return mockExecCommand("mock-noop")
+		}
+
+		tmpDir := t.TempDir()
+		compFile := filepath.Join(tmpDir, "bench.7z")
+		if err := os.WriteFile(compFile, []byte("7z"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		blockingFile := filepath.Join(tmpDir, "not_a_dir")
+		if err := os.WriteFile(blockingFile, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		badExtractDir := filepath.Join(blockingFile, "sub")
+
+		if err := runFormatDecompression(SevenZ, sevenzBin(), compFile, filepath.Join(tmpDir, "d"), badExtractDir); err == nil {
+			t.Errorf("expected MkdirAll error for blocked extractDir, got nil")
+		}
+		if called {
+			t.Errorf("external extractor should not be invoked when MkdirAll fails")
+		}
+	})
+
+	t.Run("DoBench rejects non-regular FIFO without blocking", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		fifo := filepath.Join(tmpDir, "bench_fifo")
+		if err := syscall.Mkfifo(fifo, 0600); err != nil {
+			t.Skipf("mkfifo unavailable: %v", err)
+		}
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- DoBench(fifo, 0)
+		}()
+
+		select {
+		case err := <-errCh:
+			if err == nil {
+				t.Errorf("DoBench(FIFO) expected error, got nil")
+			}
+		case <-time.After(300 * time.Millisecond):
+			if w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				_ = w.Close()
+			}
+			t.Fatalf("DoBench blocked on FIFO instead of rejecting non-regular file")
+		}
+	})
+
+	t.Run("DoBench rejects overflowing sizeMB", func(t *testing.T) {
+		badMBs := []int{math.MaxInt}
+		const maxSafeMB = int64(math.MaxInt64) / (1024 * 1024)
+		if int64(math.MaxInt) > maxSafeMB {
+			badMBs = append(badMBs, int(maxSafeMB+1))
+			if int64(math.MaxInt) > (int64(1)<<44)+1 {
+				badMBs = append(badMBs, int((int64(1)<<44)+1))
+			}
+		}
+		for _, badMB := range badMBs {
+			if err := DoBench("", badMB); err == nil {
+				t.Errorf("DoBench with overflowing sizeMB=%d expected error, got nil", badMB)
+			}
 		}
 	})
 }

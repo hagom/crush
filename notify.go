@@ -18,7 +18,7 @@ func NotifyTaskComplete(title, message string, elapsed time.Duration, forceNotif
 	// Desktop notification via notify-send if GUI environment is present
 	hasGUI := os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("DBUS_SESSION_BUS_ADDRESS") != ""
 	if hasGUI && hasTool("notify-send") {
-		cmd := execCommand("notify-send", "-a", "crush", "-i", "utilities-terminal", title, message)
+		cmd := execCommand("notify-send", "-a", "crush", "-i", "utilities-terminal", "--", title, message)
 		if err := cmd.Run(); err == nil {
 			notified = true
 		}

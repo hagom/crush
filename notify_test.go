@@ -56,4 +56,18 @@ func TestNotifyTaskCompleteCallsNotifySend(t *testing.T) {
 	if !ok || !called {
 		t.Errorf("NotifyTaskComplete did not invoke notify-send with forceNotify=true")
 	}
+
+	// 4. Must pass "--" separator before title and message to prevent option injection
+	called = false
+	capturedArgs = nil
+	ok = NotifyTaskComplete("-evil-title", "--evil-message", 1*time.Second, true)
+	if !ok || !called {
+		t.Fatalf("NotifyTaskComplete did not invoke notify-send")
+	}
+	if len(capturedArgs) < 3 ||
+		capturedArgs[len(capturedArgs)-3] != "--" ||
+		capturedArgs[len(capturedArgs)-2] != "-evil-title" ||
+		capturedArgs[len(capturedArgs)-1] != "--evil-message" {
+		t.Errorf("notify-send args missing '--' separator before title/message: %v", capturedArgs)
+	}
 }

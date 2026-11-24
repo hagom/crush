@@ -70,12 +70,20 @@ func (f Format) IsStream() bool {
 	return !f.IsContainer()
 }
 
+func stripExtPreserveDotfile(base string) string {
+	ext := filepath.Ext(base)
+	if ext != "" && ext != base {
+		return strings.TrimSuffix(base, ext)
+	}
+	return base
+}
+
 func (f Format) ArchiveBaseName(inputPath string) string {
 	base := filepath.Base(inputPath)
 	if f.IsStream() {
 		return base
 	}
-	return strings.TrimSuffix(base, filepath.Ext(base))
+	return stripExtPreserveDotfile(base)
 }
 
 type FormatInfo struct {
@@ -92,7 +100,7 @@ func (fi FormatInfo) IsContainer() bool {
 		return fi.Format.IsContainer()
 	}
 	switch fi.Tool {
-	case "unzip", "tar", "7z", "7za", "7zr", "rar", "unrar":
+	case "unzip", "tar", "7zz", "7z", "7za", "7zr", "rar", "unrar":
 		return true
 	}
 	return fi.Format.IsContainer()
@@ -107,7 +115,7 @@ func (fi FormatInfo) ArchiveBaseName(inputPath string) string {
 	if fi.IsStream() {
 		return base
 	}
-	return strings.TrimSuffix(base, filepath.Ext(base))
+	return stripExtPreserveDotfile(base)
 }
 
 func ExtForFormat(f Format) string {
@@ -260,14 +268,14 @@ func InspectAutoFormat(path string) (Format, bool) {
 	}
 
 	extFmt, hasExtFmt := detectFormatByExt(path)
-	if statErr != nil {
+	if statErr != nil || !fi.Mode().IsRegular() {
 		if hasExtFmt {
 			return extFmt, false
 		}
 		return Zst, false
 	}
 
-	canBeHighEntropy := fi.Mode().IsRegular() && fi.Size() >= minHighEntropySample
+	canBeHighEntropy := fi.Size() >= minHighEntropySample
 	if hasExtFmt && !canBeHighEntropy {
 		return extFmt, false
 	}
@@ -280,11 +288,15 @@ func InspectAutoFormat(path string) (Format, bool) {
 }
 
 func DetectAutoFormat(path string) Format {
-	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+	fi, err := os.Stat(path)
+	if err == nil && fi.IsDir() {
 		return dirAutoFormat()
 	}
 	if extFmt, ok := detectFormatByExt(path); ok {
 		return extFmt
+	}
+	if err != nil || !fi.Mode().IsRegular() {
+		return Zst
 	}
 	sampleFmt, _ := inspectFileHeader(path, true, true)
 	return sampleFmt
@@ -452,7 +464,7 @@ func ParseFormatFromExt(filename string) (Format, bool) {
 	}
 	ext := base[dot+1:]
 	f, err := ParseFormat(ext)
-	if err != nil {
+	if err != nil || f == Auto {
 		return 0, false
 	}
 	return f, true
@@ -494,6 +506,11 @@ func FormatMaxThreads(f Format) int {
 			return 1
 		}
 		return NCPU()
+	case Zip:
+		if !hasTool(sevenzBin()) {
+			return 1
+		}
+		return NCPU()
 	default:
 		return NCPU()
 	}
@@ -512,34 +529,35 @@ func MaxEffectiveThreads(f Format, fileSize int64) int {
 		return fmtMax
 	}
 
-	var maxUseful int
+	var blockSize int64
 	switch f {
 	case Xz:
-		maxUseful = int(fileSize / (24 * 1024 * 1024))
+		blockSize = 24 * 1024 * 1024
 	case SevenZ:
-		maxUseful = int(fileSize / (16 * 1024 * 1024))
+		blockSize = 16 * 1024 * 1024
 	case Bz3:
-		maxUseful = int(fileSize / (64 * 1024 * 1024))
+		blockSize = 64 * 1024 * 1024
 	case Zst:
-		maxUseful = int(fileSize / (4 * 1024 * 1024))
+		blockSize = 4 * 1024 * 1024
 	case Gz:
-		maxUseful = int(fileSize / (128 * 1024))
+		blockSize = 128 * 1024
 	case Bz2:
-		maxUseful = int(fileSize / (900 * 1024))
+		blockSize = 900 * 1024
 	case Lz4:
-		maxUseful = int(fileSize / (4 * 1024 * 1024))
+		blockSize = 4 * 1024 * 1024
 	case Lz:
-		maxUseful = int(fileSize / (2 * 1024 * 1024))
+		blockSize = 2 * 1024 * 1024
 	default:
-		maxUseful = fmtMax
+		return fmtMax
 	}
 
-	if maxUseful < 1 {
-		maxUseful = 1
+	chunks := fileSize / blockSize
+	if chunks < 1 {
+		return 1
 	}
-	if maxUseful > fmtMax {
-		maxUseful = fmtMax
+	if chunks >= int64(fmtMax) {
+		return fmtMax
 	}
-	return maxUseful
+	return int(chunks)
 }
 

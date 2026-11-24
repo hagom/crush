@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestParseFormat(t *testing.T) {
@@ -906,5 +908,108 @@ func TestInspectAutoFormat_PooledBufferSafetyAndConcurrency(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestFormatAudit_EdgeCases(t *testing.T) {
+	t.Run("ParseFormatFromExt and DetectFormat reject .auto", func(t *testing.T) {
+		for _, name := range []string{"config.auto", "path/to/file.AUTO", ".auto"} {
+			if f, ok := ParseFormatFromExt(name); ok {
+				t.Errorf("ParseFormatFromExt(%q) = (%v, true), want (0, false)", name, f)
+			}
+			if info, err := DetectFormat(name); err == nil {
+				t.Errorf("DetectFormat(%q) = (%+v, nil), want error", name, info)
+			}
+		}
+	})
+
+	t.Run("ArchiveBaseName preserves dotfiles for containers", func(t *testing.T) {
+		cases := []struct {
+			format Format
+			input  string
+			want   string
+		}{
+			{Zip, "/tmp/.env", ".env"},
+			{SevenZ, ".bashrc", ".bashrc"},
+			{Tar, ".gitignore", ".gitignore"},
+			{Rar, "/home/u/.profile", ".profile"},
+			{Zip, ".env.local", ".env"},
+			{Gz, ".env", ".env"},
+		}
+		for _, tc := range cases {
+			if got := tc.format.ArchiveBaseName(tc.input); got != tc.want {
+				t.Errorf("%s.ArchiveBaseName(%q) = %q, want %q", tc.format, tc.input, got, tc.want)
+			}
+			info := FormatInfoFromFormat(tc.format)
+			if got := info.ArchiveBaseName(tc.input); got != tc.want {
+				t.Errorf("FormatInfo(%s).ArchiveBaseName(%q) = %q, want %q", tc.format, tc.input, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("FormatInfo.IsContainer recognizes 7zz without Format set", func(t *testing.T) {
+		info := FormatInfo{Tool: "7zz"}
+		if !info.IsContainer() {
+			t.Errorf("FormatInfo{Tool: 7zz}.IsContainer() = false, want true")
+		}
+		if info.IsStream() {
+			t.Errorf("FormatInfo{Tool: 7zz}.IsStream() = true, want false")
+		}
+	})
+
+	t.Run("InspectAutoFormat and DetectAutoFormat do not block on FIFO", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		fifo := filepath.Join(tmpDir, "named_pipe_noext")
+		if err := syscall.Mkfifo(fifo, 0600); err != nil {
+			t.Skipf("mkfifo unavailable: %v", err)
+		}
+
+		done := make(chan Format, 2)
+		go func() {
+			f, high := InspectAutoFormat(fifo)
+			if high {
+				t.Errorf("FIFO should not be high entropy")
+			}
+			done <- f
+			done <- DetectAutoFormat(fifo)
+		}()
+
+		for i := 0; i < 2; i++ {
+			select {
+			case got := <-done:
+				if got != Zst {
+					t.Errorf("call %d on FIFO = %v, want Zst", i, got)
+				}
+			case <-time.After(300 * time.Millisecond):
+				// Unblock the open(O_RDONLY) goroutine so test cleanup completes cleanly.
+				if w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+					_ = w.Close()
+				}
+				t.Fatalf("InspectAutoFormat/DetectAutoFormat blocked on FIFO")
+			}
+		}
+	})
+
+	t.Run("FormatMaxThreads Zip falls back to 1 without 7z", func(t *testing.T) {
+		origLookPath := lookPath
+		defer func() { lookPath = origLookPath }()
+		lookPath = func(name string) (string, error) {
+			if name == "zip" {
+				return "/usr/bin/zip", nil
+			}
+			return "", os.ErrNotExist
+		}
+		if got := FormatMaxThreads(Zip); got != 1 {
+			t.Errorf("FormatMaxThreads(Zip) without 7z = %d, want 1", got)
+		}
+	})
+
+	t.Run("MaxEffectiveThreads handles MaxInt64 without overflow", func(t *testing.T) {
+		const maxInt64 = int64(^uint64(0) >> 1)
+		got := MaxEffectiveThreads(Gz, maxInt64)
+		want := FormatMaxThreads(Gz)
+		if got != want {
+			t.Errorf("MaxEffectiveThreads(Gz, MaxInt64) = %d, want %d", got, want)
+		}
+	})
 }
 

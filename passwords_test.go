@@ -429,6 +429,235 @@ func TestCheckArchivePassword_ZeroByteSlowExit(t *testing.T) {
 	}
 }
 
+func TestPasswordManager_AtomicPersistenceAndSpecialChars(t *testing.T) {
+	t.Run("special chars tab newline cr preserved across reload", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		passFile := filepath.Join(tmpDir, "passwords.txt")
+		pm := NewPasswordManager(passFile)
+
+		inputs := []string{
+			"normalPass",
+			"has\ttab\tinside",
+			"has\nnewline\rinside",
+			"  padded  ",
+		}
+		for _, p := range inputs {
+			pm.AddSuccessful(p)
+		}
+		pm.AddSuccessful("has\ttab\tinside")
+
+		pm2 := NewPasswordManager(passFile)
+		got := pm2.GetStoredPasswords()
+		if len(got) != len(inputs) {
+			t.Fatalf("got %d passwords %q, want %d", len(got), got, len(inputs))
+		}
+		if got[0] != "has\ttab\tinside" {
+			t.Errorf("most frequent password = %q, want %q", got[0], "has\ttab\tinside")
+		}
+		wantSet := map[string]bool{}
+		for _, p := range inputs {
+			wantSet[p] = true
+		}
+		for _, g := range got {
+			if !wantSet[g] {
+				t.Errorf("unexpected reloaded password %q", g)
+			}
+			delete(wantSet, g)
+		}
+		if len(wantSet) != 0 {
+			t.Errorf("missing reloaded passwords: %v", wantSet)
+		}
+	})
+
+	t.Run("tightens 0644 permissions replaces symlink atomically and leaves no temp files", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		passDir := filepath.Join(tmpDir, "cfg")
+		if err := os.MkdirAll(passDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(tmpDir, "outside.txt")
+		if err := os.WriteFile(outside, []byte("DO NOT TOUCH"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		passFile := filepath.Join(passDir, "passwords.txt")
+		if err := os.Symlink(outside, passFile); err != nil {
+			t.Fatal(err)
+		}
+
+		pm := NewPasswordManager(passFile)
+		pm.AddSuccessful("topSecret")
+
+		gotOutside, err := os.ReadFile(outside)
+		if err != nil || string(gotOutside) != "DO NOT TOUCH" {
+			t.Fatalf("symlink target was modified: err=%v data=%q", err, string(gotOutside))
+		}
+		lfi, err := os.Lstat(passFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lfi.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("passwords.txt remained a symlink instead of atomic regular file")
+		}
+		if lfi.Mode().Perm() != 0600 {
+			t.Errorf("passwords.txt perm = %o, want 0600", lfi.Mode().Perm())
+		}
+		entries, err := os.ReadDir(passDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != "passwords.txt" {
+			t.Errorf("unexpected leftover files in %s: %v", passDir, entries)
+		}
+	})
+}
+
+func TestCheckArchivePassword_UsesDashDashAndSafeFlagArg(t *testing.T) {
+	origExec := execCommand
+	origLook := lookPath
+	defer func() {
+		execCommand = origExec
+		lookPath = origLook
+	}()
+
+	tests := []struct {
+		name      string
+		file      string
+		format    Format
+		pass      string
+		onlyUnzip bool
+		wantSafe  string
+	}{
+		{name: "unzip dash file", file: "-dash.zip", format: Zip, pass: "", onlyUnzip: true, wantSafe: "./-dash.zip"},
+		{name: "unzip single dash", file: "-.zip", format: Zip, pass: "pw", onlyUnzip: true, wantSafe: "./-.zip"},
+		{name: "unzip literal dash", file: "-", format: Zip, pass: "", onlyUnzip: true, wantSafe: "./-"},
+		{name: "7z dash file", file: "-dash.7z", format: SevenZ, pass: "pw", wantSafe: "./-dash.7z"},
+		{name: "7z literal dash", file: "-", format: SevenZ, pass: "", wantSafe: "./-"},
+		{name: "rar dash file", file: "-dash.rar", format: Rar, pass: "pw", wantSafe: "./-dash.rar"},
+		{name: "rar literal dash", file: "-", format: Rar, pass: "", wantSafe: "./-"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.onlyUnzip {
+				lookPath = func(name string) (string, error) {
+					if name == "unzip" {
+						return "/usr/bin/unzip", nil
+					}
+					return "", exec.ErrNotFound
+				}
+			} else {
+				lookPath = func(name string) (string, error) {
+					return "/usr/bin/" + name, nil
+				}
+			}
+			var gotArgs []string
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				gotArgs = append([]string(nil), args...)
+				return mockExecCommand("mock-noop")
+			}
+
+			if !checkArchivePassword(tt.file, tt.format, tt.pass) {
+				t.Fatalf("expected mock checkArchivePassword to return true")
+			}
+			dashIdx, fileIdx := -1, -1
+			for i, a := range gotArgs {
+				if a == "--" && dashIdx == -1 {
+					dashIdx = i
+				}
+				if a == tt.wantSafe {
+					fileIdx = i
+				}
+			}
+			if dashIdx < 0 || fileIdx < 0 || dashIdx >= fileIdx {
+				t.Errorf("expected -- before %q in args %v", tt.wantSafe, gotArgs)
+			}
+		})
+	}
+}
+
+func TestArchiveRequiresPassword_DistinguishesCorruptFromEncrypted(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "data.txt")
+	if err := os.WriteFile(src, []byte("secret payload"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	corrupt7z := filepath.Join(tmpDir, "corrupt.7z")
+	corruptZip := filepath.Join(tmpDir, "corrupt.zip")
+	corruptRar := filepath.Join(tmpDir, "corrupt.rar")
+	for _, p := range []string{corrupt7z, corruptZip, corruptRar} {
+		if err := os.WriteFile(p, []byte("definitely not an archive"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	enc7z := filepath.Join(tmpDir, "enc.7z")
+	if hasTool(sevenzBin()) {
+		if out, err := exec.Command(sevenzBin(), "a", "-psec1", "-mhe=on", enc7z, src).CombinedOutput(); err != nil {
+			t.Fatalf("7z create failed: %v %s", err, string(out))
+		}
+	}
+	encZip := filepath.Join(tmpDir, "enc.zip")
+	if hasTool(sevenzBin()) {
+		if out, err := exec.Command(sevenzBin(), "a", "-tzip", "-psec1", encZip, src).CombinedOutput(); err != nil {
+			t.Fatalf("zip create failed: %v %s", err, string(out))
+		}
+	}
+	encRar := filepath.Join(tmpDir, "enc.rar")
+	if hasTool(rarBin()) && rarBin() == "rar" {
+		if out, err := exec.Command("rar", "a", "-ep", "-psec1", encRar, src).CombinedOutput(); err != nil {
+			t.Fatalf("rar create failed: %v %s", err, string(out))
+		}
+	}
+
+	cases := []struct {
+		name   string
+		file   string
+		format Format
+		tool   string
+		want   bool
+	}{
+		{name: "corrupt 7z not encrypted", file: corrupt7z, format: SevenZ, tool: sevenzBin(), want: false},
+		{name: "corrupt zip not encrypted", file: corruptZip, format: Zip, tool: "unzip", want: false},
+		{name: "corrupt rar not encrypted", file: corruptRar, format: Rar, tool: rarBin(), want: false},
+		{name: "missing 7z not encrypted", file: filepath.Join(tmpDir, "missing.7z"), format: SevenZ, tool: sevenzBin(), want: false},
+		{name: "encrypted 7z detected", file: enc7z, format: SevenZ, tool: sevenzBin(), want: true},
+		{name: "encrypted zip detected", file: encZip, format: Zip, tool: sevenzBin(), want: true},
+		{name: "encrypted rar detected", file: encRar, format: Rar, tool: "rar", want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.tool == "rar" && rarBin() != "rar" {
+				t.Skip("rar not installed")
+			}
+			if !hasTool(tc.tool) {
+				t.Skipf("%s not installed", tc.tool)
+			}
+			if tc.want {
+				if !archiveRequiresPassword(tc.file, tc.format) {
+					t.Errorf("archiveRequiresPassword(%s) = false, want true", tc.file)
+				}
+				return
+			}
+			pm := NewPasswordManager(filepath.Join(tmpDir, "pw.txt"))
+			pm.promptFunc = func(file string) (string, error) {
+				t.Fatalf("promptFunc must not be called for corrupt/missing file %s", file)
+				return "", nil
+			}
+			got := archiveRequiresPassword(tc.file, tc.format)
+			if got != tc.want {
+				t.Errorf("archiveRequiresPassword(%s) = %v, want %v", tc.file, got, tc.want)
+			}
+			pass, err := pm.ResolvePassword(tc.file, tc.format, "")
+			if err != nil || pass != "" {
+				t.Errorf("ResolvePassword(%s) = (%q, %v), want (\"\", nil)", tc.file, pass, err)
+			}
+		})
+	}
+}
+
+
 
 
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -80,6 +81,11 @@ func (pm *PasswordManager) load() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	fi, err := os.Lstat(pm.filePath)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || fi.IsDir() {
+		return
+	}
+
 	f, err := os.Open(pm.filePath)
 	if err != nil {
 		return
@@ -90,24 +96,34 @@ func (pm *PasswordManager) load() {
 	seen := make(map[string]bool)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+		raw := strings.TrimRight(scanner.Text(), "\r\n")
 		var pass string
 		count := 1
-		if parts := strings.Split(line, "\t"); len(parts) >= 2 {
-			pass = parts[0]
-			if c, err := strconv.Atoi(parts[1]); err == nil && c > 0 {
-				count = c
+		if strings.Contains(raw, "\t") {
+			parts := strings.Split(raw, "\t")
+			if len(parts) == 3 && parts[2] == "b64" {
+				if dec, decErr := base64.StdEncoding.DecodeString(parts[0]); decErr == nil {
+					pass = string(dec)
+				}
+				if c, err := strconv.Atoi(parts[1]); err == nil && c > 0 {
+					count = c
+				}
+			} else if len(parts) >= 2 {
+				pass = parts[0]
+				if c, err := strconv.Atoi(parts[1]); err == nil && c > 0 {
+					count = c
+				}
 			}
 		} else {
-			pass = line
+			pass = strings.TrimSpace(raw)
 		}
 		if pass != "" && !seen[pass] {
 			seen[pass] = true
 			entries = append(entries, PasswordEntry{Password: pass, Count: count})
 		}
+	}
+	if scanner.Err() != nil {
+		return
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].Count > entries[j].Count
@@ -129,16 +145,58 @@ func (pm *PasswordManager) saveLocked() {
 		return
 	}
 	dir := filepath.Dir(pm.filePath)
-	_ = os.MkdirAll(dir, 0700)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return
+	}
+	if filepath.Base(dir) == "crush" {
+		_ = os.Chmod(dir, 0700)
+	}
 
 	var sb strings.Builder
 	for _, e := range pm.entries {
-		sb.WriteString(e.Password)
-		sb.WriteString("\t")
-		sb.WriteString(strconv.Itoa(e.Count))
-		sb.WriteString("\n")
+		if strings.ContainsAny(e.Password, "\t\r\n") {
+			sb.WriteString(base64.StdEncoding.EncodeToString([]byte(e.Password)))
+			sb.WriteString("\t")
+			sb.WriteString(strconv.Itoa(e.Count))
+			sb.WriteString("\tb64\n")
+		} else {
+			sb.WriteString(e.Password)
+			sb.WriteString("\t")
+			sb.WriteString(strconv.Itoa(e.Count))
+			sb.WriteString("\n")
+		}
 	}
-	_ = os.WriteFile(pm.filePath, []byte(sb.String()), 0600)
+
+	tmpF, err := os.CreateTemp(dir, ".passwords.*.tmp")
+	if err != nil {
+		return
+	}
+	tmpPath := tmpF.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := io.WriteString(tmpF, sb.String()); err != nil {
+		_ = tmpF.Close()
+		return
+	}
+	if err := tmpF.Sync(); err != nil {
+		_ = tmpF.Close()
+		return
+	}
+	if err := tmpF.Close(); err != nil {
+		return
+	}
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		return
+	}
+	if err := os.Rename(tmpPath, pm.filePath); err != nil {
+		return
+	}
+	cleanup = false
 }
 
 func (pm *PasswordManager) AddSuccessful(pass string) {
@@ -215,15 +273,19 @@ func formatSupportsPassword(f Format) bool {
 	return f == SevenZ || f == Zip || f == Rar
 }
 
-func probeStdoutPassword(cmd *exec.Cmd) (started, valid bool) {
+func probePasswordCmd(cmd *exec.Cmd) (started, valid bool, exitCode int, stderrStr string) {
 	cmd.Stdin = getNullFile()
-	cmd.Stderr = io.Discard
+	if len(cmd.Env) == 0 {
+		cmd.Env = append(os.Environ(), "LC_ALL=C")
+	}
+	errBuf := newLimitedBuffer(4096)
+	cmd.Stderr = errBuf
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return false, false
+		return false, false, -1, ""
 	}
 	if err := cmd.Start(); err != nil {
-		return false, false
+		return false, false, -1, ""
 	}
 	buf := make([]byte, 256)
 	n, _ := stdout.Read(buf)
@@ -232,63 +294,114 @@ func probeStdoutPassword(cmd *exec.Cmd) (started, valid bool) {
 			_ = cmd.Process.Kill()
 		}
 		_ = cmd.Wait()
-		return true, true
+		return true, true, 0, ""
 	}
-	return true, cmd.Wait() == nil
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		return true, true, 0, errBuf.String()
+	}
+	code := -1
+	var exitErr *exec.ExitError
+	if errors.As(waitErr, &exitErr) {
+		code = exitErr.ExitCode()
+	}
+	return true, false, code, errBuf.String()
+}
+
+func probeStdoutPassword(cmd *exec.Cmd) (started, valid bool) {
+	started, valid, _, _ = probePasswordCmd(cmd)
+	return started, valid
+}
+
+func buildPasswordProbeCmd(file string, format Format, pass string) (toolUsed string, cmd *exec.Cmd) {
+	passArg := "-p" + pass
+	if pass == "" {
+		passArg = "-p-"
+	}
+	safeFile := safeFlagArg(file)
+
+	switch format {
+	case SevenZ:
+		sevenz := sevenzBin()
+		if !hasTool(sevenz) {
+			return "", nil
+		}
+		return "7z", execCommand(sevenz, "e", "-so", passArg, "-y", "--", safeFile)
+
+	case Zip:
+		sevenz := sevenzBin()
+		if hasTool(sevenz) {
+			return "7z", execCommand(sevenz, "e", "-so", passArg, "-y", "--", safeFile)
+		}
+		if !hasTool("unzip") {
+			return "", nil
+		}
+		return "unzip", execCommand("unzip", "-p", "-P", pass, "--", safeFile)
+
+	case Rar:
+		rar := rarBin()
+		if !hasTool(rar) {
+			return "", nil
+		}
+		return rar, execCommand(rar, "p", passArg, "-inul", "--", safeFile)
+	}
+	return "", nil
 }
 
 func checkArchivePassword(file string, format Format, pass string) bool {
 	if !formatSupportsPassword(format) {
 		return true
 	}
-	passArg := "-p" + pass
-	if pass == "" {
-		passArg = "-p-"
+	toolUsed, cmd := buildPasswordProbeCmd(file, format, pass)
+	if cmd == nil {
+		return false
 	}
-
-	switch format {
-	case SevenZ:
-		sevenz := sevenzBin()
-		if !hasTool(sevenz) {
-			return false
-		}
-		cmd := execCommand(sevenz, "e", "-so", passArg, "-y", "--", file)
-		_, valid := probeStdoutPassword(cmd)
-		return valid
-
-	case Zip:
-		sevenz := sevenzBin()
-		if hasTool(sevenz) {
-			cmd := execCommand(sevenz, "e", "-so", passArg, "-y", "--", file)
-			if started, valid := probeStdoutPassword(cmd); started {
-				return valid
-			}
-		}
-		args := []string{"-p"}
-		if pass != "" {
-			args = append(args, "-P", pass)
-		} else {
-			args = append(args, "-P", "")
-		}
-		args = append(args, file)
-		cmd := execCommand("unzip", args...)
-		_, valid := probeStdoutPassword(cmd)
-		return valid
-
-	case Rar:
-		rar := rarBin()
-		if !hasTool(rar) {
-			return false
-		}
-		cmd := execCommand(rar, "p", passArg, "-inul", "--", file)
-		_, valid := probeStdoutPassword(cmd)
-		return valid
+	started, valid, _, _ := probePasswordCmd(cmd)
+	if !started && format == Zip && toolUsed == "7z" && hasTool("unzip") {
+		uCmd := execCommand("unzip", "-p", "-P", pass, "--", safeFlagArg(file))
+		_, valid, _, _ = probePasswordCmd(uCmd)
 	}
-	return false
+	return valid
+}
+
+func isSevenZipPasswordFailure(stderrStr string) bool {
+	low := strings.ToLower(stderrStr)
+	if strings.Contains(low, "wrong password") ||
+		strings.Contains(low, "cannot open encrypted archive") ||
+		strings.Contains(low, "data error in encrypted file") {
+		return true
+	}
+	return strings.TrimSpace(stderrStr) == ""
 }
 
 func archiveRequiresPassword(file string, format Format) bool {
-	return !checkArchivePassword(file, format, "")
+	if !formatSupportsPassword(format) {
+		return false
+	}
+	toolUsed, cmd := buildPasswordProbeCmd(file, format, "")
+	if cmd == nil {
+		return false
+	}
+	started, valid, exitCode, stderrStr := probePasswordCmd(cmd)
+	if !started && format == Zip && toolUsed == "7z" && hasTool("unzip") {
+		toolUsed = "unzip"
+		cmd = execCommand("unzip", "-p", "-P", "", "--", safeFlagArg(file))
+		started, valid, exitCode, stderrStr = probePasswordCmd(cmd)
+	}
+	if !started || valid {
+		return false
+	}
+	switch toolUsed {
+	case "7z":
+		return isSevenZipPasswordFailure(stderrStr)
+	case "unzip":
+		return exitCode == 82 || (exitCode != 9 && strings.Contains(strings.ToLower(stderrStr), "password"))
+	default:
+		if format == Rar {
+			return exitCode == 11 || strings.Contains(strings.ToLower(stderrStr), "password")
+		}
+		return true
+	}
 }
 
 func FileRequiresInteractivePassword(file string, cliPassword string) bool {

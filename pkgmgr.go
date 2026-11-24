@@ -115,7 +115,7 @@ func DetectPkgManager() *PkgManager {
 }
 
 func runCmd(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	cmd := execCommand(name, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %s: %w", cmd.String(), strings.TrimSpace(string(out)), err)
@@ -131,7 +131,7 @@ func runElevated(name string, args ...string) error {
 	}
 	elevators := []string{"sudo", "pkexec"}
 	for _, elev := range elevators {
-		if _, err := exec.LookPath(elev); err != nil {
+		if _, err := lookPath(elev); err != nil {
 			continue
 		}
 		elevArgs := append([]string{name}, args...)
@@ -144,7 +144,7 @@ func runElevated(name string, args ...string) error {
 }
 
 func runCmdWithOutput(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd := execCommand(name, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s: %s: %w", cmd.String(), strings.TrimSpace(string(out)), err)
@@ -452,9 +452,9 @@ func CompressReadTo(f *os.File, w io.Writer) error {
 	case Br:
 		cmd = execCommand("brotli", "-dc", "--", f.Name())
 	case Lrz:
-		cmd = execCommand("lrzip", "-d", "-k", "-p", ncpuStr(), "-o", "-", "--", f.Name())
+		cmd = execCommand("lrzip", "-d", "-k", "-p", ncpuStr(), "-o", "-", "--", safeFlagArg(f.Name()))
 	case Zip:
-		cmd = execCommand("unzip", "-p", "--", f.Name())
+		cmd = execCommand("unzip", "-p", "--", safeFlagArg(f.Name()))
 	case SevenZ:
 		cmd = execCommand(sevenzBin(), "x", "-so", "--", f.Name())
 	case Rar:
@@ -497,57 +497,62 @@ func ListCompressed(f *os.File) error {
 	var cmd *exec.Cmd
 	name := info.Name()
 	fpath := f.Name()
+	safePath := safeFlagArg(fpath)
 
 	switch {
 	case strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tgz"):
-		cmd = exec.Command("tar", "-tzf", fpath)
+		cmd = execCommand("tar", "-tz", "-f", safePath, "--")
 	case strings.HasSuffix(name, ".tar.xz") || strings.HasSuffix(name, ".txz"):
-		cmd = exec.Command("tar", "-tJf", fpath)
+		cmd = execCommand("tar", "-tJ", "-f", safePath, "--")
 	case strings.HasSuffix(name, ".tar.bz2") || strings.HasSuffix(name, ".tbz2"):
-		cmd = exec.Command("tar", "-tjf", fpath)
+		cmd = execCommand("tar", "-tj", "-f", safePath, "--")
 	case strings.HasSuffix(name, ".tar.bz3"):
-		cmd = exec.Command("tar", "-I", "bzip3 -dc", "-tf", fpath)
+		cmd = execCommand("tar", "-I", "bzip3 -dc", "-tf", safePath, "--")
 	case strings.HasSuffix(name, ".tar.zst") || strings.HasSuffix(name, ".tzst"):
-		cmd = exec.Command("tar", "-I", "zstd -dc", "-tf", fpath)
+		cmd = execCommand("tar", "-I", "zstd -dc", "-tf", safePath, "--")
 	case strings.HasSuffix(name, ".tar.lz") || strings.HasSuffix(name, ".tlz"):
-		cmd = exec.Command("tar", "--lzip", "-tf", fpath)
+		cmd = execCommand("tar", "--lzip", "-tf", safePath, "--")
 	case strings.HasSuffix(name, ".tar.lrz"):
-		cmd = exec.Command("tar", "-I", "lrzip -d -p 1 -o -", "-tf", fpath)
+		cmd = execCommand("tar", "-I", "lrzip -d -p 1 -o -", "-tf", safePath, "--")
 	case strings.HasSuffix(name, ".tar.lz4"):
-		cmd = exec.Command("tar", "-I", "lz4 -dc", "-tf", fpath)
+		cmd = execCommand("tar", "-I", "lz4 -dc", "-tf", safePath, "--")
 	case strings.HasSuffix(name, ".tar.br"):
-		cmd = exec.Command("tar", "-I", "brotli", "-tf", fpath)
+		cmd = execCommand("tar", "-I", "brotli", "-tf", safePath, "--")
 	case strings.HasSuffix(name, ".tar"):
-		cmd = exec.Command("tar", "-tf", fpath)
+		cmd = execCommand("tar", "-tf", safePath, "--")
 	case strings.HasSuffix(name, ".gz"):
-		cmd = exec.Command("pigz", "-l", fpath)
+		cmd = execCommand("pigz", "-l", "--", fpath)
 		if !hasTool("pigz") {
-			cmd = exec.Command("gzip", "-l", fpath)
+			cmd = execCommand("gzip", "-l", "--", fpath)
 		}
 	case strings.HasSuffix(name, ".bz2"):
-		cmd = exec.Command(bzip2Bin(), "-tv", fpath)
+		cmd = execCommand(bzip2Bin(), "-tv", "--", fpath)
 	case strings.HasSuffix(name, ".bz3"):
 		fmt.Printf("Compressed: %s (%s)\n", name, FormatSize(info.Size()))
 		return nil
 	case strings.HasSuffix(name, ".xz"):
-		cmd = exec.Command("xz", "-l", fpath)
+		cmd = execCommand("xz", "-l", "--", fpath)
 	case strings.HasSuffix(name, ".zst"):
-		cmd = exec.Command("zstd", "-l", fpath)
+		cmd = execCommand("zstd", "-l", "--", fpath)
 	case strings.HasSuffix(name, ".zip"):
-		cmd = exec.Command("unzip", "-l", fpath)
+		cmd = execCommand("unzip", "-l", "--", safePath)
 	case strings.HasSuffix(name, ".7z"):
-		cmd = exec.Command(sevenzBin(), "l", fpath)
+		cmd = execCommand(sevenzBin(), "l", "--", fpath)
 	case strings.HasSuffix(name, ".rar"):
-		cmd = exec.Command(rarBin(), "l", fpath)
+		cmd = execCommand(rarBin(), "l", "--", fpath)
 	case strings.HasSuffix(name, ".lz"):
-		cmd = exec.Command("plzip", "-l", fpath)
+		bin := "plzip"
+		if !hasTool("plzip") && hasTool("lzip") {
+			bin = "lzip"
+		}
+		cmd = execCommand(bin, "-l", "--", fpath)
 	case strings.HasSuffix(name, ".lz4"):
-		cmd = exec.Command("lz4", "--list", fpath)
+		cmd = execCommand("lz4", "--list", "--", fpath)
 	case strings.HasSuffix(name, ".br"):
 		fmt.Printf("Compressed: %s (%s)\n", name, FormatSize(info.Size()))
 		return nil
 	case strings.HasSuffix(name, ".lrz"):
-		cmd = exec.Command("lrzip", "-i", fpath)
+		cmd = execCommand("lrzip", "-i", "--", safePath)
 	default:
 		return fmt.Errorf("no se puede listar formato: %s", name)
 	}

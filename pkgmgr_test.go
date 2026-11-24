@@ -425,3 +425,123 @@ func TestCompressRead_TarDashAndLzipFallback(t *testing.T) {
 		}
 	})
 }
+
+func TestListCompressed_SafeArgsAndLzipFallback(t *testing.T) {
+	tmp := t.TempDir()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	origExec := execCommand
+	origLookPath := lookPath
+	defer func() {
+		execCommand = origExec
+		lookPath = origLookPath
+	}()
+
+	cases := []struct {
+		name        string
+		filename    string
+		missingTool string
+		wantBin     string
+		wantSafeArg string
+		wantDashSep bool
+	}{
+		{
+			name:        "tar.gz leading dash uses safeFlagArg and --",
+			filename:    "-evil.tar.gz",
+			wantBin:     "tar",
+			wantSafeArg: "./-evil.tar.gz",
+			wantDashSep: true,
+		},
+		{
+			name:        "tar leading dash uses safeFlagArg and --",
+			filename:    "-evil.tar",
+			wantBin:     "tar",
+			wantSafeArg: "./-evil.tar",
+			wantDashSep: true,
+		},
+		{
+			name:        "tar.zst leading dash uses safeFlagArg and --",
+			filename:    "-evil.tar.zst",
+			wantBin:     "tar",
+			wantSafeArg: "./-evil.tar.zst",
+			wantDashSep: true,
+		},
+		{
+			name:        "gz leading dash uses -- separator",
+			filename:    "-evil.gz",
+			wantBin:     "pigz",
+			wantSafeArg: "-evil.gz",
+			wantDashSep: true,
+		},
+		{
+			name:        "xz leading dash uses -- separator",
+			filename:    "-evil.xz",
+			wantBin:     "xz",
+			wantSafeArg: "-evil.xz",
+			wantDashSep: true,
+		},
+		{
+			name:        "zip leading dash uses -- and safeFlagArg",
+			filename:    "-evil.zip",
+			wantBin:     "unzip",
+			wantSafeArg: "./-evil.zip",
+			wantDashSep: true,
+		},
+		{
+			name:        "lz falls back to lzip when plzip missing",
+			filename:    "-evil.lz",
+			missingTool: "plzip",
+			wantBin:     "lzip",
+			wantSafeArg: "-evil.lz",
+			wantDashSep: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(tc.filename, []byte("dummy"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Open(tc.filename)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+
+			lookPath = func(bin string) (string, error) {
+				if tc.missingTool != "" && bin == tc.missingTool {
+					return "", exec.ErrNotFound
+				}
+				return "/usr/bin/" + bin, nil
+			}
+
+			var gotBin string
+			var gotArgs []string
+			execCommand = func(bin string, args ...string) *exec.Cmd {
+				gotBin = bin
+				gotArgs = append([]string(nil), args...)
+				return mockExecCommand("mock-noop")
+			}
+
+			if err := ListCompressed(f); err != nil {
+				t.Fatalf("ListCompressed(%s) unexpected error: %v", tc.filename, err)
+			}
+			if gotBin != tc.wantBin {
+				t.Fatalf("ListCompressed(%s) called %q, want %q", tc.filename, gotBin, tc.wantBin)
+			}
+			if tc.wantDashSep && !contains(gotArgs, "--") {
+				t.Errorf("ListCompressed(%s) args %v missing '--' separator", tc.filename, gotArgs)
+			}
+			if !contains(gotArgs, tc.wantSafeArg) {
+				t.Errorf("ListCompressed(%s) args %v missing %q", tc.filename, gotArgs, tc.wantSafeArg)
+			}
+		})
+	}
+}

@@ -60,10 +60,11 @@ func (b *cappedDiagBuffer) String() string {
 }
 
 type TestOptions struct {
-	Verbose  bool
-	Quick    bool
-	Verify   bool
-	Password string
+	Verbose     bool
+	Quick       bool
+	Verify      bool
+	Password    string
+	memBudgetMB int
 }
 
 func DoTest(files []string, opts TestOptions) error {
@@ -106,7 +107,35 @@ func DoTest(files []string, opts TestOptions) error {
 		err    error
 	}
 
-	sem := make(chan struct{}, NCPU())
+	maxWorkers := NCPU()
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
+	if len(allFiles) < maxWorkers {
+		maxWorkers = len(allFiles)
+	}
+	hasHeavy := false
+	for _, f := range allFiles {
+		if info, err := DetectFormat(f); err == nil {
+			switch info.Format {
+			case Xz, SevenZ, Lrz, Zst, Bz3:
+				hasHeavy = true
+			}
+		}
+	}
+	memTotal := getMemLimit()
+	if hasHeavy && memTotal > 0 {
+		maxByMem := max(1, memTotal/512)
+		if maxWorkers > maxByMem {
+			maxWorkers = maxByMem
+		}
+	}
+	workerOpts := opts
+	if workerOpts.memBudgetMB <= 0 && memTotal > 0 {
+		workerOpts.memBudgetMB = max(128, memTotal/maxWorkers)
+	}
+
+	sem := make(chan struct{}, maxWorkers)
 	resultCh := make(chan testResult, len(allFiles))
 	var wg sync.WaitGroup
 
@@ -116,7 +145,7 @@ func DoTest(files []string, opts TestOptions) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			status, err := TestFile(file, opts)
+			status, err := TestFile(file, workerOpts)
 			resultCh <- testResult{file, status, err}
 		}(f)
 	}
@@ -184,7 +213,11 @@ func testArchiveIntegrity(file string, opts TestOptions) (string, error) {
 		return "", err
 	}
 	if info.IsContainer() {
-		if p, err := GetPasswordManager().ResolvePassword(file, info.Format, opts.Password); err == nil && p != "" {
+		p, err := GetPasswordManager().ResolvePassword(file, info.Format, opts.Password)
+		if err != nil {
+			return "FAIL", err
+		}
+		if p != "" {
 			opts.Password = p
 		}
 	}
@@ -194,80 +227,74 @@ func testArchiveIntegrity(file string, opts TestOptions) (string, error) {
 		fileSize = fi.Size()
 	}
 
+	budget := opts.memBudgetMB
+	if budget <= 0 {
+		budget = getMemLimit()
+	}
+	safeFile := safeFlagArg(file)
+	passFlag := "-p-"
+	if opts.Password != "" {
+		passFlag = "-p" + opts.Password
+	}
+
 	switch info.Format {
 	case Gz:
 		if hasTool("pigz") {
-			return testWith(file, "pigz", "-t", "--", file)
+			return testWith(file, "pigz", "-t", "--", safeFile)
 		}
-		return testWith(file, "gzip", "-t", "--", file)
+		return testWith(file, "gzip", "-t", "--", safeFile)
 
 	case Xz:
-		thStr := threadStr(resolveThreadCap(Xz, fileSize))
-		memMB := getMemLimit()
-		if memMB < 65 {
-			memMB = 65
-		}
-		return testWith(file, "xz", "-t", "-T"+thStr, fmt.Sprintf("--memlimit-mt-decompress=%dMiB", memMB), "--", file)
+		thStr := threadStr(resolveThreadCapForBudget(Xz, fileSize, budget))
+		memMB := max(65, budget)
+		return testWith(file, "xz", "-t", "-T"+thStr, fmt.Sprintf("--memlimit-mt-decompress=%dMiB", memMB), "--", safeFile)
 
 	case Bz2:
-		return testWith(file, bzip2Bin(), "-t", "--", file)
+		return testWith(file, bzip2Bin(), "-t", "--", safeFile)
 
 	case Bz3:
-		thStr := threadStr(resolveThreadCap(Bz3, fileSize))
-		return testWith(file, "bzip3", "-t", "-j", thStr, "--", file)
+		thStr := threadStr(resolveThreadCapForBudget(Bz3, fileSize, budget))
+		return testWith(file, "bzip3", "-t", "-j", thStr, "--", safeFile)
 
 	case Zst:
-		thStr := threadStr(resolveThreadCap(Zst, fileSize))
-		return testWith(file, "zstd", "-t", "-T"+thStr, "--", file)
+		thStr := threadStr(resolveThreadCapForBudget(Zst, fileSize, budget))
+		return testWith(file, "zstd", "-t", "-T"+thStr, "--", safeFile)
 
 	case Lz:
 		if hasTool("plzip") {
-			thStr := threadStr(resolveThreadCap(Lz, fileSize))
-			return testWith(file, "plzip", "-t", "--threads="+thStr, "--", file)
+			thStr := threadStr(resolveThreadCapForBudget(Lz, fileSize, budget))
+			return testWith(file, "plzip", "-t", "--threads="+thStr, "--", safeFile)
 		}
-		return testWith(file, "lzip", "-t", "--", file)
+		return testWith(file, "lzip", "-t", "--", safeFile)
 
 	case Lrz:
-		thStr := threadStr(resolveThreadCap(Lrz, fileSize))
-		lrzMem := getMemLimit() / 100
-		if lrzMem < 1 {
-			lrzMem = 1
-		}
-		return testWith(file, "lrzip", "-t", "-p", thStr, "-m", strconv.Itoa(lrzMem), "--", file)
+		thStr := threadStr(resolveThreadCapForBudget(Lrz, fileSize, budget))
+		lrzMem := max(1, budget/100)
+		return testWith(file, "lrzip", "-t", "-p", thStr, "-m", strconv.Itoa(lrzMem), "--", safeFile)
 
 	case Lz4:
-		return testWith(file, "lz4", "-t", "--", file)
+		return testWith(file, "lz4", "-t", "--", safeFile)
 
 	case Br:
-		return testWith(file, "brotli", "-t", "--", file)
+		return testWith(file, "brotli", "-t", "--", safeFile)
 
 	case Tar:
-		return testWith(file, "tar", "-tf", safeFlagArg(file), "--")
+		return testWith(file, "tar", "-tf", safeFile, "--")
 
 	case Zip:
 		if opts.Password != "" {
 			if hasTool(sevenzBin()) {
-				return testWith(file, sevenzBin(), "t", "-p"+opts.Password, "--", file)
+				return testWith(file, sevenzBin(), "t", passFlag, "--", safeFile)
 			}
-			return testWith(file, "unzip", "-t", "-P", opts.Password, "--", file)
+			return testWith(file, "unzip", "-t", "-P", opts.Password, "--", safeFile)
 		}
-		return testWith(file, "unzip", "-t", "--", file)
+		return testWith(file, "unzip", "-t", "-P", "", "--", safeFile)
 
 	case SevenZ:
-		args := []string{"t"}
-		if opts.Password != "" {
-			args = append(args, "-p"+opts.Password)
-		}
-		args = append(args, "--", file)
-		return testWith(file, sevenzBin(), args...)
+		return testWith(file, sevenzBin(), "t", passFlag, "--", safeFile)
 
 	case Rar:
-		args := []string{"t"}
-		if opts.Password != "" {
-			args = append(args, "-p"+opts.Password)
-		}
-		args = append(args, "--", file)
-		return testWith(file, rarBin(), args...)
+		return testWith(file, rarBin(), "t", passFlag, "--", safeFile)
 
 	default:
 		return "", fmt.Errorf("formato no reconocido: %s", file)
@@ -279,6 +306,9 @@ func testWith(file, tool string, args ...string) (string, error) {
 		return "WARNING", nil
 	}
 	cmd := execCommand(tool, args...)
+	if cmd.Stdin == nil {
+		cmd.Stdin = getNullFile()
+	}
 	diagBuf := newCappedDiagBuffer(maxTestDiagBytes)
 	if tool == "tar" {
 		cmd.Stdout = io.Discard

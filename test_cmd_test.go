@@ -713,3 +713,150 @@ func TestTestFileLrzipIntegration(t *testing.T) {
 		t.Fatalf("TestFile(%s) failed: status=%q err=%v", lrzPath, status, err)
 	}
 }
+
+func TestTestArchiveIntegrity_NonInteractivePasswordFlagsAndSafeArg(t *testing.T) {
+	origExec := execCommand
+	origLook := lookPath
+	defer func() {
+		execCommand = origExec
+		lookPath = origLook
+	}()
+
+	t.Run("sets null stdin, non-interactive password flags, and safeFlagArg", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			file      string
+			onlyUnzip bool
+			wantFlag  string
+			wantSafe  string
+		}{
+			{name: "7z dash file", file: "-.7z", wantFlag: "-p-", wantSafe: "./-.7z"},
+			{name: "rar dash file", file: "-.rar", wantFlag: "-p-", wantSafe: "./-.rar"},
+			{name: "zip via unzip dash file", file: "-.zip", onlyUnzip: true, wantFlag: "-P", wantSafe: "./-.zip"},
+			{name: "gz dash file", file: "-.gz", wantFlag: "--", wantSafe: "./-.gz"},
+			{name: "xz dash file", file: "-.xz", wantFlag: "--", wantSafe: "./-.xz"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				if tt.onlyUnzip {
+					lookPath = func(name string) (string, error) {
+						if name == "unzip" {
+							return "/usr/bin/unzip", nil
+						}
+						return "", exec.ErrNotFound
+					}
+				} else {
+					lookPath = func(name string) (string, error) {
+						return "/usr/bin/" + name, nil
+					}
+				}
+
+				var gotArgs []string
+				var capturedCmd *exec.Cmd
+				execCommand = func(name string, args ...string) *exec.Cmd {
+					gotArgs = append([]string(nil), args...)
+					capturedCmd = mockExecCommand("mock-noop")
+					return capturedCmd
+				}
+
+				status, err := testArchiveIntegrity(tt.file, TestOptions{})
+				if status != "OK" || err != nil {
+					t.Fatalf("testArchiveIntegrity(%q) = %q, %v; want OK, nil", tt.file, status, err)
+				}
+				if capturedCmd == nil || capturedCmd.Stdin == nil {
+					t.Errorf("expected testWith to set non-nil Stdin (null file)")
+				}
+				hasFlag, hasSafe := false, false
+				for _, a := range gotArgs {
+					if a == tt.wantFlag {
+						hasFlag = true
+					}
+					if a == tt.wantSafe {
+						hasSafe = true
+					}
+				}
+				if !hasFlag {
+					t.Errorf("expected flag %q in args %v", tt.wantFlag, gotArgs)
+				}
+				if !hasSafe {
+					t.Errorf("expected safeFlagArg %q in args %v", tt.wantSafe, gotArgs)
+				}
+			})
+		}
+	})
+
+	t.Run("wrong password returns FAIL without running tool", func(t *testing.T) {
+		if !hasTool(sevenzBin()) {
+			t.Skip("7z not installed")
+		}
+		execCommand = origExec
+		lookPath = origLook
+
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "s.txt")
+		_ = os.WriteFile(src, []byte("secret"), 0644)
+		arch := filepath.Join(tmpDir, "locked.7z")
+		if out, err := exec.Command(sevenzBin(), "a", "-pright", "-mhe=on", arch, src).CombinedOutput(); err != nil {
+			t.Fatalf("7z create failed: %v %s", err, string(out))
+		}
+
+		status, err := testArchiveIntegrity(arch, TestOptions{Password: "wrong"})
+		if status != "FAIL" || err == nil || !strings.Contains(err.Error(), "contraseña incorrecta") {
+			t.Fatalf("expected FAIL with wrong-password error, got status=%q err=%v", status, err)
+		}
+	})
+}
+
+func TestDoTest_MemoryBudgetSplitsAcrossWorkers(t *testing.T) {
+	origExec := execCommand
+	origLook := lookPath
+	origMem := getMemLimit
+	defer func() {
+		execCommand = origExec
+		lookPath = origLook
+		getMemLimit = origMem
+	}()
+	lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	getMemLimit = func() int { return 1200 }
+
+	tmpDir := t.TempDir()
+	var files []string
+	for _, name := range []string{"a.xz", "b.xz"} {
+		p := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(p, make([]byte, 1024*1024), 0644); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, p)
+	}
+
+	var mu sync.Mutex
+	var captured [][]string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "xz" {
+			mu.Lock()
+			captured = append(captured, append([]string(nil), args...))
+			mu.Unlock()
+		}
+		return mockExecCommand("mock-noop")
+	}
+
+	if err := DoTest(files, TestOptions{}); err != nil {
+		t.Fatalf("DoTest failed: %v", err)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("expected 2 xz invocations, got %d", len(captured))
+	}
+	for i, args := range captured {
+		hasMemLimit := false
+		for _, a := range args {
+			if a == "--memlimit-mt-decompress=600MiB" {
+				hasMemLimit = true
+			}
+		}
+		if !hasMemLimit {
+			t.Errorf("worker %d expected split worker budget --memlimit-mt-decompress=600MiB, got %v", i, args)
+		}
+	}
+}
+

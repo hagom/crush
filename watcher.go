@@ -120,78 +120,93 @@ func RunWatcher(ctx context.Context, opts WatcherOptions) error {
 
 	ignoredOutputs := newTTLSet(defaultIgnoredTTL, defaultIgnoredCap)
 	var inProgress sync.Map
+	cleanWatchDir := filepath.Clean(opts.Dir)
 
 	processFn := func(fullPath string) error {
-		base := filepath.Base(fullPath)
-		if strings.HasPrefix(base, ".") {
+		cleanFull := filepath.Clean(fullPath)
+		if filepath.Dir(cleanFull) != cleanWatchDir {
 			return nil
 		}
-		if strings.HasSuffix(base, ".tmp") || strings.HasSuffix(base, ".crush_tmp") || strings.Contains(base, ".part") {
+		base := filepath.Base(cleanFull)
+		if base == "" || base == "." || base == ".." || strings.HasPrefix(base, ".") {
+			return nil
+		}
+		if strings.HasSuffix(base, ".tmp") || strings.HasSuffix(base, ".crush_tmp") || strings.HasSuffix(base, ".sha256") || strings.Contains(base, ".part") {
 			return nil
 		}
 		if ignoredOutputs.Contains(base) {
 			return nil
 		}
-		if _, loaded := inProgress.LoadOrStore(fullPath, true); loaded {
+		if _, loaded := inProgress.LoadOrStore(cleanFull, true); loaded {
 			return nil
 		}
-		defer inProgress.Delete(fullPath)
+		defer inProgress.Delete(cleanFull)
 
-		st, err := os.Stat(fullPath)
+		st, err := os.Lstat(cleanFull)
 		if err != nil {
+			return nil
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 
 		switch opts.Mode {
 		case WatchModeCompress:
+			if !st.Mode().IsRegular() && !st.IsDir() {
+				return nil
+			}
 			cOpts := opts.CompressOpts
 			if cOpts.OutputDir == "" {
 				cOpts.OutputDir = opts.Dir
 			}
-			WriteInfo("[Watcher] Comprimiendo archivo detectado: %s", fullPath)
-			outPaths, err := DoCompress([]string{fullPath}, cOpts)
+			WriteInfo("[Watcher] Comprimiendo archivo detectado: %s", cleanFull)
+			outPaths, err := DoCompress([]string{cleanFull}, cOpts)
 			if err != nil {
-				WriteError("[Watcher] Error comprimiendo %s: %v", fullPath, err)
+				WriteError("[Watcher] Error comprimiendo %s: %v", cleanFull, err)
 				if opts.OnFileHandled != nil {
-					opts.OnFileHandled(fullPath, err)
+					opts.OnFileHandled(cleanFull, err)
 				}
 				return err
 			}
 			for _, out := range outPaths {
-				ignoredOutputs.Add(filepath.Base(out))
+				outBase := filepath.Base(out)
+				ignoredOutputs.Add(outBase)
+				ignoredOutputs.Add(outBase + ".sha256")
 				for _, part := range globSplitParts(out) {
-					ignoredOutputs.Add(filepath.Base(part))
+					partBase := filepath.Base(part)
+					ignoredOutputs.Add(partBase)
+					ignoredOutputs.Add(partBase + ".sha256")
 				}
 			}
-			WriteSuccess("[Watcher] Compresión finalizada: %s", fullPath)
+			WriteSuccess("[Watcher] Compresión finalizada: %s", cleanFull)
 			if opts.OnFileHandled != nil {
-				opts.OnFileHandled(fullPath, nil)
+				opts.OnFileHandled(cleanFull, nil)
 			}
 			return nil
 
 		case WatchModeDecompress:
-			if st.IsDir() {
+			if !st.Mode().IsRegular() {
 				return nil
 			}
-			if _, err := DetectFormat(fullPath); err != nil {
+			if _, err := DetectFormat(cleanFull); err != nil {
 				return nil
 			}
 			dOpts := opts.DecompressOpts
 			if dOpts.OutputDir == "" {
 				dOpts.OutputDir = opts.Dir
 			}
-			WriteInfo("[Watcher] Descomprimiendo archivo detectado: %s", fullPath)
-			err := DoDecompress([]string{fullPath}, dOpts)
+			WriteInfo("[Watcher] Descomprimiendo archivo detectado: %s", cleanFull)
+			err := DoDecompress([]string{cleanFull}, dOpts)
 			if err != nil {
-				WriteError("[Watcher] Error descomprimiendo %s: %v", fullPath, err)
+				WriteError("[Watcher] Error descomprimiendo %s: %v", cleanFull, err)
 				if opts.OnFileHandled != nil {
-					opts.OnFileHandled(fullPath, err)
+					opts.OnFileHandled(cleanFull, err)
 				}
 				return err
 			}
-			WriteSuccess("[Watcher] Descompresión finalizada: %s", fullPath)
+			WriteSuccess("[Watcher] Descompresión finalizada: %s", cleanFull)
 			if opts.OnFileHandled != nil {
-				opts.OnFileHandled(fullPath, nil)
+				opts.OnFileHandled(cleanFull, nil)
 			}
 			return nil
 

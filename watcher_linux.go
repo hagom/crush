@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -21,6 +23,47 @@ func runPlatformWatcher(ctx context.Context, opts WatcherOptions, processFn func
 		return runPollingWatcher(ctx, opts, processFn)
 	}
 	return nil
+}
+
+func parseInotifyEvents(buf []byte) ([]string, bool) {
+	var names []string
+	var overflow bool
+	n := len(buf)
+	offset := 0
+	for offset+syscall.SizeofInotifyEvent <= n {
+		mask := binary.LittleEndian.Uint32(buf[offset+4 : offset+8])
+		nameLen := binary.LittleEndian.Uint32(buf[offset+12 : offset+16])
+		offset += syscall.SizeofInotifyEvent
+
+		if mask&syscall.IN_Q_OVERFLOW != 0 {
+			overflow = true
+		}
+
+		remaining := n - offset
+		if int(nameLen) < 0 || int(nameLen) > remaining {
+			break
+		}
+
+		var name string
+		if nameLen > 0 {
+			nameBytes := buf[offset : offset+int(nameLen)]
+			if idx := bytes.IndexByte(nameBytes, 0); idx != -1 {
+				name = string(nameBytes[:idx])
+			} else {
+				name = string(nameBytes)
+			}
+			offset += int(nameLen)
+		}
+
+		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+			continue
+		}
+
+		if mask&(syscall.IN_CLOSE_WRITE|syscall.IN_MOVED_TO) != 0 {
+			names = append(names, name)
+		}
+	}
+	return names, overflow
 }
 
 func runInotifyWatcher(ctx context.Context, opts WatcherOptions, processFn func(string) error) error {
@@ -45,6 +88,13 @@ func runInotifyWatcher(ctx context.Context, opts WatcherOptions, processFn func(
 	ev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(fd)}
 	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, fd, &ev); err != nil {
 		return fmt.Errorf("epoll_ctl: %w", err)
+	}
+
+	knownBefore := make(map[string]bool)
+	if entries, err := os.ReadDir(opts.Dir); err == nil {
+		for _, e := range entries {
+			knownBefore[e.Name()] = true
+		}
 	}
 
 	var buf [4096]byte
@@ -80,30 +130,49 @@ func runInotifyWatcher(ctx context.Context, opts WatcherOptions, processFn func(
 			continue
 		}
 
-		offset := 0
-		for offset+syscall.SizeofInotifyEvent <= n {
-			mask := binary.LittleEndian.Uint32(buf[offset+4 : offset+8])
-			nameLen := binary.LittleEndian.Uint32(buf[offset+12 : offset+16])
-			offset += syscall.SizeofInotifyEvent
+		handleInotifyBuffer(ctx, opts.Dir, buf[:n], knownBefore, processFn)
+	}
+}
 
-			var name string
-			if nameLen > 0 && offset+int(nameLen) <= n {
-				nameBytes := buf[offset : offset+int(nameLen)]
-				if idx := bytes.IndexByte(nameBytes, 0); idx != -1 {
-					name = string(nameBytes[:idx])
-				} else {
-					name = string(nameBytes)
+func syncKnownEntry(dir, name string, knownBefore map[string]bool) bool {
+	if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+		knownBefore[name] = true
+		return true
+	}
+	delete(knownBefore, name)
+	return false
+}
+
+func handleInotifyBuffer(ctx context.Context, dir string, raw []byte, knownBefore map[string]bool, processFn func(string) error) {
+	names, overflow := parseInotifyEvents(raw)
+	for _, name := range names {
+		if ctx.Err() != nil {
+			return
+		}
+		fullPath := filepath.Join(dir, name)
+		_ = processFn(fullPath)
+		syncKnownEntry(dir, name, knownBefore)
+	}
+	if overflow {
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			currentFiles := make(map[string]bool, len(entries))
+			for _, e := range entries {
+				if ctx.Err() != nil {
+					return
 				}
-				offset += int(nameLen)
+				name := e.Name()
+				if !knownBefore[name] {
+					_ = processFn(filepath.Join(dir, name))
+				}
+				if syncKnownEntry(dir, name, knownBefore) {
+					currentFiles[name] = true
+				}
 			}
-
-			if name == "" || name == "." || name == ".." {
-				continue
-			}
-
-			if mask&(syscall.IN_CLOSE_WRITE|syscall.IN_MOVED_TO) != 0 {
-				fullPath := filepath.Join(opts.Dir, name)
-				_ = processFn(fullPath)
+			for name := range knownBefore {
+				if !currentFiles[name] {
+					delete(knownBefore, name)
+				}
 			}
 		}
 	}

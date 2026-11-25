@@ -623,3 +623,77 @@ func TestTTLSet_Concurrency(t *testing.T) {
 		t.Fatalf("final Len = %d exceeded maxCap %d", n, maxCap)
 	}
 }
+
+func TestWatcher_IgnoresSymlinksAndHashSidecars(t *testing.T) {
+	watchDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("secret outside content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	opts := WatcherOptions{
+		Dir:  watchDir,
+		Mode: WatchModeCompress,
+		CompressOpts: CompressOptions{
+			Format:    Gz,
+			OutputDir: watchDir,
+			KeepOrig:  true,
+			Hash:      true,
+		},
+		PollInterval: 40 * time.Millisecond,
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = RunWatcher(ctx, opts)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// 1. Move a symlink pointing outside watchDir into watchDir (triggers IN_MOVED_TO in inotify)
+	stagingLink := filepath.Join(outsideDir, "staged_link.txt")
+	if err := os.Symlink(outsideFile, stagingLink); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(watchDir, "linked_secret.txt")
+	if err := os.Rename(stagingLink, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Drop a real file with Hash: true
+	realPath := filepath.Join(watchDir, "legit.txt")
+	if err := os.WriteFile(realPath, []byte("legitimate file content for watcher"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	expectedGz := filepath.Join(watchDir, "legit.txt.gz")
+	expectedSha := filepath.Join(watchDir, "legit.txt.gz.sha256")
+	ok := waitForCondition(t, 5*time.Second, func() bool {
+		_, err1 := os.Stat(expectedGz)
+		_, err2 := os.Stat(expectedSha)
+		return err1 == nil && err2 == nil
+	})
+	if !ok {
+		t.Fatalf("timed out waiting for %s and %s", expectedGz, expectedSha)
+	}
+
+	// Give watcher time to process any spurious follow-up events
+	time.Sleep(250 * time.Millisecond)
+
+	cancel()
+	wg.Wait()
+
+	if _, err := os.Lstat(filepath.Join(watchDir, "linked_secret.txt.gz")); !os.IsNotExist(err) {
+		t.Errorf("watcher must ignore symlinks, but created linked_secret.txt.gz")
+	}
+	if _, err := os.Lstat(filepath.Join(watchDir, "legit.txt.gz.sha256.gz")); !os.IsNotExist(err) {
+		t.Errorf("watcher must ignore .sha256 sidecar outputs, but compressed legit.txt.gz.sha256.gz")
+	}
+}

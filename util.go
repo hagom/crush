@@ -1351,12 +1351,6 @@ func appendToLogBufLocked(s string) {
 	logBufTruncated = true
 }
 
-func appendToLogBuf(s string) {
-	logMu.Lock()
-	appendToLogBufLocked(s)
-	logMu.Unlock()
-}
-
 func setLoggingActive(active bool) {
 	logMu.Lock()
 	loggingActive.Store(active)

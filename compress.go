@@ -51,6 +51,21 @@ func effectiveMemBudget(budget int) int {
 	return getMemLimit()
 }
 
+func supportsPassword(f Format) bool {
+	return f == SevenZ || f == Zip || f == Rar
+}
+
+func supportsSplit(f Format) bool {
+	return f.IsStream() && f != Lrz && f != Auto
+}
+
+func archiveBaseNameForItem(f Format, item string, isDir bool) string {
+	if isDir {
+		return filepath.Base(item)
+	}
+	return f.ArchiveBaseName(item)
+}
+
 func isHeavyCompressFormat(f Format) bool {
 	switch f {
 	case Xz, SevenZ, Lrz, Zst, Bz3:
@@ -334,14 +349,17 @@ func generateCompressionTasks(items []string, opts CompressOptions) ([]Compressi
 				Size:   itemSize,
 			}
 
-			baseName := fmtChoice.ArchiveBaseName(item)
+			baseName := archiveBaseNameForItem(fmtChoice, item, isDir)
 			targetDir := opts.OutputDir
-			if opts.SplitSize > 0 {
+			fileOpts := opts
+			fileOpts.Format = fmtChoice
+			if !supportsSplit(fmtChoice) {
+				fileOpts.SplitSize = 0
+			}
+			if fileOpts.SplitSize > 0 {
 				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
 			}
 			ext := ExtForItem(fmtChoice, isDir)
-			fileOpts := opts
-			fileOpts.Format = fmtChoice
 
 			var outPath string
 			if opts.Resume {
@@ -479,29 +497,25 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		ext = ExtForItem(opts.Format, singleIsDir)
 	}
 
-	if opts.SplitSize > 0 {
-		if opts.Format.IsContainer() || opts.Format == Lrz {
+	canParallel := !singleItem && !opts.Combine
+
+	if !canParallel {
+		if opts.SplitSize > 0 && !supportsSplit(opts.Format) {
 			WriteLogf("  %s⚠ split (-s) no soportado para %s (solo disponible para gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*); se ignora%s\n", Yellow, opts.Format, NC)
 			opts.SplitSize = 0
 		}
-	}
-
-	if opts.Password != "" && opts.Format != SevenZ && opts.Format != Zip && opts.Format != Rar {
-		WriteWarning("el cifrado con contraseña solo está soportado en formatos contenedor (7z, zip, rar); se ignora para %s", opts.Format)
-		opts.Password = ""
-	} else if opts.Password != "" {
-		GetPasswordManager().AddSuccessful(opts.Password)
+		if opts.Password != "" && !supportsPassword(opts.Format) {
+			WriteWarning("el cifrado con contraseña solo está soportado en formatos contenedor (7z, zip, rar); se ignora para %s", opts.Format)
+			opts.Password = ""
+		} else if opts.Password != "" {
+			GetPasswordManager().AddSuccessful(opts.Password)
+		}
 	}
 
 	calcOutPath := func() string {
 		if singleItem {
 			targetDir := opts.OutputDir
-			var baseName string
-			if singleIsDir {
-				baseName = filepath.Base(files[0])
-			} else {
-				baseName = opts.Format.ArchiveBaseName(files[0])
-			}
+			baseName := archiveBaseNameForItem(opts.Format, files[0], singleIsDir)
 			if opts.SplitSize > 0 {
 				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
 			}
@@ -520,8 +534,6 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 		}
 		return GetUniqueName(filepath.Join(targetDir, baseName), ext)
 	}
-
-	canParallel := !singleItem && !opts.Combine
 
 	if opts.DryRun {
 		WriteLogf("%s[Simulacro] Comprimiendo %d archivo(s)%s\n", Blue, len(files), NC)
@@ -598,6 +610,27 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 			if err := CheckCompressTools(t.Format); err != nil {
 				return nil, err
 			}
+		}
+
+		warnedSplit := make(map[Format]bool)
+		warnedPass := make(map[Format]bool)
+		anyEncrypted := false
+		for _, t := range tasks {
+			if opts.SplitSize > 0 && !supportsSplit(t.Format) && !warnedSplit[t.Format] {
+				warnedSplit[t.Format] = true
+				WriteLogf("  %s⚠ split (-s) no soportado para %s (solo disponible para gz, xz, bz2, bz3, zst, lz, lz4, br y tar.*); se ignora%s\n", Yellow, t.Format, NC)
+			}
+			if opts.Password != "" {
+				if supportsPassword(t.Format) {
+					anyEncrypted = true
+				} else if !warnedPass[t.Format] {
+					warnedPass[t.Format] = true
+					WriteWarning("el cifrado con contraseña solo está soportado en formatos contenedor (7z, zip, rar); se ignora para %s", t.Format)
+				}
+			}
+		}
+		if opts.Password != "" && anyEncrypted {
+			GetPasswordManager().AddSuccessful(opts.Password)
 		}
 
 		totalSize = 0
@@ -1268,7 +1301,7 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 	} else if anyMultiThreaded && maxWorkers > 8 {
 		maxWorkers = 8
 	}
-	memTotal := getMemLimit()
+	memTotal := effectiveMemBudget(opts.MemBudgetMB)
 	if memTotal > 0 && anyHeavy {
 		memMaxWorkers := max(1, memTotal/512)
 		if maxWorkers > memMaxWorkers {
@@ -1371,6 +1404,12 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 
 			fileOpts := opts
 			fileOpts.Format = t.Format
+			if !supportsSplit(t.Format) {
+				fileOpts.SplitSize = 0
+			}
+			if !supportsPassword(t.Format) {
+				fileOpts.Password = ""
+			}
 			if workerBudget > 0 {
 				fileOpts.MemBudgetMB = workerBudget
 			}
@@ -1383,20 +1422,14 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 			}
 			fileOpts.ThreadLimit = th
 
-			targetDir := opts.OutputDir
-			baseName := t.Format.ArchiveBaseName(t.File)
-			if opts.SplitSize > 0 {
-				targetDir = filepath.Join(opts.OutputDir, baseName+"_parts")
-				if err := os.MkdirAll(targetDir, 0755); err != nil {
-					fp.SetStatus("error")
-					failedFiles.Store(t.File, true)
-					errCh <- fmt.Errorf("%s: %w", t.File, err)
-					pendingTasks[t.File].Add(-1)
-					return
-				}
-			}
-
 			outPath := t.OutPath
+			if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+				fp.SetStatus("error")
+				failedFiles.Store(t.File, true)
+				errCh <- fmt.Errorf("%s: %w", t.File, err)
+				pendingTasks[t.File].Add(-1)
+				return
+			}
 			fp.SetOutPath(outPath)
 
 			mu.Lock()
@@ -2003,7 +2036,7 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		}
 	}
 
-	if opts.Password != "" {
+	if opts.Password != "" && supportsPassword(info.Format) {
 		GetPasswordManager().AddSuccessful(opts.Password)
 	}
 

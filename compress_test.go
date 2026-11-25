@@ -3564,6 +3564,151 @@ func TestDoAppend_EnforcesThreadCapAndMemoryBudget(t *testing.T) {
 	}
 }
 
+func TestCompressAudit_MultiFormatPasswordSplitAndDirNames(t *testing.T) {
+	t.Run("multi-format -F gz,7z preserves password for 7z task", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+
+		var mu sync.Mutex
+		var szArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == sevenzBin() {
+				mu.Lock()
+				szArgs = append([]string(nil), args...)
+				mu.Unlock()
+				return mockExecCommand("mock-noop")
+			}
+			return origExec(name, args...)
+		}
+
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "secret.txt")
+		if err := os.WriteFile(src, []byte("confidential payload"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		const pass = "MultiFmtPass_42"
+		opts := CompressOptions{
+			Format:    Gz,
+			Formats:   []Format{Gz, SevenZ},
+			OutputDir: tmpDir,
+			KeepOrig:  true,
+			Password:  pass,
+		}
+		if _, err := DoCompress([]string{src}, opts); err != nil {
+			t.Fatalf("DoCompress(-F gz,7z -p) failed: %v", err)
+		}
+		if !containsArg(szArgs, "-p"+pass) {
+			t.Errorf("7z task in -F gz,7z lost password! got args: %v", szArgs)
+		}
+	})
+
+	t.Run("auto mode preserves password for directory resolved to 7z", func(t *testing.T) {
+		if !hasTool(sevenzBin()) {
+			t.Skip("7z not available")
+		}
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+
+		var mu sync.Mutex
+		var szArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == sevenzBin() {
+				mu.Lock()
+				szArgs = append([]string(nil), args...)
+				mu.Unlock()
+				return mockExecCommand("mock-noop")
+			}
+			return origExec(name, args...)
+		}
+
+		tmpDir := t.TempDir()
+		dir := filepath.Join(tmpDir, "vault")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "doc.txt"), []byte("secret"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		plain := filepath.Join(tmpDir, "note.txt")
+		if err := os.WriteFile(plain, []byte("note"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		const pass = "AutoDirPass_99"
+		opts := CompressOptions{
+			Format:    Auto,
+			OutputDir: tmpDir,
+			KeepOrig:  true,
+			Password:  pass,
+		}
+		if _, err := DoCompress([]string{dir, plain}, opts); err != nil {
+			t.Fatalf("DoCompress(-f auto -p) failed: %v", err)
+		}
+		if !containsArg(szArgs, "-p"+pass) {
+			t.Errorf("7z task in -f auto lost password! got args: %v", szArgs)
+		}
+	})
+
+	t.Run("multi-format split only places stream formats in _parts dirs", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "item.txt")
+		if err := os.WriteFile(src, []byte("split test payload"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, fmts := range [][]Format{{Gz, Zip}, {Zip, Gz}} {
+			outDir := filepath.Join(tmpDir, fmt.Sprintf("out_%s_%s", fmts[0], fmts[1]))
+			out, err := DoCompress([]string{src}, CompressOptions{
+				Format:    fmts[0],
+				Formats:   fmts,
+				OutputDir: outDir,
+				SplitSize: 1,
+				KeepOrig:  true,
+			})
+			if err != nil {
+				t.Fatalf("DoCompress(%v, SplitSize=1) failed: %v", fmts, err)
+			}
+			wantGz := filepath.Join(outDir, "item.txt_parts", "item.txt.gz")
+			wantZip := filepath.Join(outDir, "item.zip")
+			if _, err := os.Stat(wantGz); err != nil {
+				t.Errorf("formats=%v: expected stream split output at %s, got %v", fmts, wantGz, out)
+			}
+			if _, err := os.Stat(wantZip); err != nil {
+				t.Errorf("formats=%v: expected container output directly at %s (not inside _parts), got %v", fmts, wantZip, out)
+			}
+		}
+	})
+
+	t.Run("parallel container compression preserves dotted directory names", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		d1 := filepath.Join(tmpDir, "app.v1")
+		d2 := filepath.Join(tmpDir, "app.v2")
+		for _, d := range []string{d1, d2} {
+			if err := os.MkdirAll(d, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(d, "f.txt"), []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		outDir := filepath.Join(tmpDir, "out")
+		out, err := DoCompress([]string{d1, d2}, CompressOptions{
+			Format:    Tar,
+			OutputDir: outDir,
+			KeepOrig:  true,
+		})
+		if err != nil {
+			t.Fatalf("DoCompress dotted dirs failed: %v", err)
+		}
+		for _, want := range []string{filepath.Join(outDir, "app.v1.tar"), filepath.Join(outDir, "app.v2.tar")} {
+			if _, err := os.Stat(want); err != nil {
+				t.Errorf("expected %s, got outputs %v", want, out)
+			}
+		}
+	})
+}
+
 
 
 

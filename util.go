@@ -1846,6 +1846,7 @@ func runWithProgress(cmd *exec.Cmd, pt *ProgressTracker, fileSize int64, fp *Fil
 	if err != nil {
 		return fmt.Errorf("Error creando pipe: %w", err)
 	}
+	setPipeCapacity(stdout, nil, defaultPipeCapacity)
 	cmd.Stderr = stderrFor(pt)
 	if err := cmd.Start(); err != nil {
 		return err
@@ -2378,6 +2379,17 @@ func copyWithSplicePool(w io.Writer, r io.Reader) (int64, error) {
 	return io.CopyBuffer(w, r, *bp)
 }
 
+const streamBufSize = 256 * 1024
+
+func newAsyncOSPipe() (*os.File, *os.File, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	setPipeCapacity(r, w, defaultPipeCapacity)
+	return r, w, nil
+}
+
 func setPipeCapacity(r io.Reader, w io.Writer, size int) {
 	if size <= 0 {
 		return
@@ -2404,13 +2416,12 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	}
 
 	for i := 0; i < len(cmds)-1; i++ {
-		r, w, err := os.Pipe()
+		r, w, err := newAsyncOSPipe()
 		if err != nil {
 			closePipes()
 			return fmt.Errorf("pipeline pipe %d: %w", i, err)
 		}
 		pipes = append(pipes, r, w)
-		setPipeCapacity(r, w, defaultPipeCapacity)
 		cmds[i].Stdout = w
 		cmds[i+1].Stdin = r
 	}
@@ -2461,28 +2472,52 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	return firstErr
 }
 
-func waitPipePair(prod, cons *exec.Cmd, pr *io.PipeReader, pw *io.PipeWriter) (prodErr, consErr error) {
+func runAsyncPipePair(prod, cons *exec.Cmd, wrapReader func(io.Reader) io.Reader) (prodErr, consErr error) {
+	pr, pw, err := newAsyncOSPipe()
+	if err != nil {
+		return fmt.Errorf("creando pipe asíncrono: %w", err), nil
+	}
+
+	prod.Stdout = pw
+	if wrapReader != nil {
+		cons.Stdin = wrapReader(pr)
+	} else {
+		cons.Stdin = pr
+	}
+
+	if err := prod.Start(); err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
+		return augmentErr(prod, err), nil
+	}
+	_ = pw.Close()
+
+	if err := cons.Start(); err != nil {
+		_ = pr.Close()
+		if prod.Process != nil {
+			_ = prod.Process.Kill()
+			_ = prod.Wait()
+		}
+		return nil, augmentErr(cons, err)
+	}
+	if wrapReader == nil {
+		_ = pr.Close()
+	}
+
 	done := make(chan struct{})
 	go func() {
-		if prod != nil {
-			prodErr = augmentErr(prod, prod.Wait())
-		}
-		if pw != nil {
-			_ = pw.CloseWithError(prodErr)
-		}
+		prodErr = augmentErr(prod, prod.Wait())
 		close(done)
 	}()
 
-	if cons != nil {
-		consErr = augmentErr(cons, cons.Wait())
-	}
-	if pr != nil {
-		_ = pr.CloseWithError(consErr)
+	consErr = augmentErr(cons, cons.Wait())
+	if wrapReader != nil {
+		_ = pr.Close()
 	}
 	select {
 	case <-done:
 	default:
-		if consErr != nil && prod != nil && prod.Process != nil {
+		if consErr != nil && prod.Process != nil {
 			_ = prod.Process.Kill()
 		}
 		<-done

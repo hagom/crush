@@ -1135,33 +1135,20 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 			}
 			pvCmd := execCommand("pv", pvArgs...)
 			pvCmd.Stdin = inFile
-
-			pvOut, err := pvCmd.StdoutPipe()
-			if err != nil {
-				return fmt.Errorf("Error creando pipe para pv: %w", err)
-			}
-			compressCmd.Stdin = pvOut
 			compressCmd.Stdout = writer
-
-			if err := pvCmd.Start(); err != nil {
-				_ = pvOut.Close()
-				return fmt.Errorf("Error iniciando pv: %w", err)
-			}
 
 			if opts.Verbose {
 				WriteLogf("  $ %s | %s %s > %s\n", file, compressCmd.Path, strings.Join(compressCmd.Args[1:], " "), outPath)
 			}
 
-			compressErr := augmentErr(compressCmd, compressCmd.Run())
-			_ = pvOut.Close()
-			if compressErr != nil && pvCmd.Process != nil {
-				_ = pvCmd.Process.Kill()
-			}
-			_ = pvCmd.Wait()
+			pvErr, compressErr := runAsyncPipePair(pvCmd, compressCmd, nil)
 			writerClosed = true
 			closeErr := writer.Close()
 			if compressErr != nil {
 				return compressErr
+			}
+			if pvErr != nil && pvCmd.Process == nil {
+				return fmt.Errorf("Error iniciando pv: %w", pvErr)
 			}
 			if closeErr != nil {
 				return fmt.Errorf("Error cerrando %s: %w", outPath, closeErr)
@@ -1654,10 +1641,6 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 	}()
 
 	if opts.Progress != nil && pvCmd == nil {
-		pr, pw := io.Pipe()
-		tarCmd.Stdout = pw
-		inReader := &countingReader{r: pr, pt: opts.Progress, fp: fp}
-		compressCmd.Stdin = inReader
 		compressCmd.Stdout = writer
 		compressCmd.Stderr = stderrFor(opts.Progress)
 		tarCmd.Stderr = stderrFor(opts.Progress)
@@ -1666,17 +1649,9 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 			WriteLogf("  $ tar %s | %s > %s\n", strings.Join(tarArgs, " "), strings.Join(compressCmd.Args, " "), outPath)
 		}
 
-		if err := tarCmd.Start(); err != nil {
-			_ = pr.Close()
-			_ = pw.Close()
-			return fmt.Errorf("Error iniciando tar: %w", err)
-		}
-		if err := compressCmd.Start(); err != nil {
-			abortPipeProducer(tarCmd, pr, pw)
-			return fmt.Errorf("Error iniciando compresor: %w", err)
-		}
-
-		tarErr, compErr := waitPipePair(tarCmd, compressCmd, pr, pw)
+		tarErr, compErr := runAsyncPipePair(tarCmd, compressCmd, func(r io.Reader) io.Reader {
+			return &countingReader{r: r, pt: opts.Progress, fp: fp}
+		})
 		writerClosed = true
 		closeErr := writer.Close()
 

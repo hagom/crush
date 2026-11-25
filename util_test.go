@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -3993,6 +3994,156 @@ func TestDisableTerminalEchoOS_Safety(t *testing.T) {
 	restore()
 	restore()
 }
+
+type byteCounterReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *byteCounterReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.n.Add(int64(n))
+	}
+	return n, err
+}
+
+func TestRunAsyncPipePair(t *testing.T) {
+	tests := []struct {
+		name         string
+		makeProd     func() *exec.Cmd
+		makeCons     func() *exec.Cmd
+		withCounter  bool
+		wantProdErr  bool
+		wantConsErr  bool
+		wantMinBytes int64
+		checkReaped  bool
+	}{
+		{
+			name:         "direct mode transfers 4 MiB without deadlock",
+			makeProd:     func() *exec.Cmd { return mockExecCommand("mock-flood-producer") },
+			makeCons:     func() *exec.Cmd { return mockExecCommand("mock-consumer") },
+			wantProdErr:  false,
+			wantConsErr:  false,
+			checkReaped:  true,
+		},
+		{
+			name:        "direct mode kills infinite producer when consumer fails",
+			makeProd:    func() *exec.Cmd { return mockExecCommand("mock-producer") },
+			makeCons:    func() *exec.Cmd { return mockExecCommand("mock-fail-compressor") },
+			wantProdErr: true,
+			wantConsErr: true,
+			checkReaped: true,
+		},
+		{
+			name:        "direct mode handles early exit 0 consumer against large producer",
+			makeProd:    func() *exec.Cmd { return mockExecCommand("mock-flood-producer") },
+			makeCons:    func() *exec.Cmd { return mockExecCommand("mock-read-5-bytes") },
+			wantProdErr: true,
+			wantConsErr: false,
+			checkReaped: true,
+		},
+		{
+			name:        "direct mode returns producer failure while consumer succeeds",
+			makeProd:    func() *exec.Cmd { return mockExecCommand("mock-fail-compressor") },
+			makeCons:    func() *exec.Cmd { return mockExecCommand("mock-consumer") },
+			wantProdErr: true,
+			wantConsErr: false,
+			checkReaped: true,
+		},
+		{
+			name:        "producer Start failure returns error cleanly",
+			makeProd:    func() *exec.Cmd { return exec.Command("/nonexistent-crush-test-producer") },
+			makeCons:    func() *exec.Cmd { return mockExecCommand("mock-consumer") },
+			wantProdErr: true,
+			wantConsErr: false,
+		},
+		{
+			name:        "consumer Start failure kills and reaps started producer",
+			makeProd:    func() *exec.Cmd { return mockExecCommand("mock-producer") },
+			makeCons:    func() *exec.Cmd { return exec.Command("/nonexistent-crush-test-consumer") },
+			wantProdErr: false,
+			wantConsErr: true,
+			checkReaped: true,
+		},
+		{
+			name:         "wrapped mode counts exact 4 MiB bytes via 1 MiB async pipe",
+			makeProd:     func() *exec.Cmd { return mockExecCommand("mock-flood-producer") },
+			makeCons:     func() *exec.Cmd { return mockExecCommand("mock-consumer") },
+			withCounter:  true,
+			wantProdErr:  false,
+			wantConsErr:  false,
+			wantMinBytes: 64 * 65536,
+			checkReaped:  true,
+		},
+		{
+			name:        "wrapped mode closes reader and kills producer on consumer failure",
+			makeProd:    func() *exec.Cmd { return mockExecCommand("mock-producer") },
+			makeCons:    func() *exec.Cmd { return mockExecCommand("mock-fail-compressor") },
+			withCounter: true,
+			wantProdErr: true,
+			wantConsErr: true,
+			checkReaped: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prod := tt.makeProd()
+			cons := tt.makeCons()
+			t.Cleanup(func() {
+				if prod != nil && prod.Process != nil && prod.ProcessState == nil {
+					_ = prod.Process.Kill()
+				}
+				if cons != nil && cons.Process != nil && cons.ProcessState == nil {
+					_ = cons.Process.Kill()
+				}
+			})
+
+			var counter *byteCounterReader
+			var wrap func(io.Reader) io.Reader
+			if tt.withCounter {
+				wrap = func(r io.Reader) io.Reader {
+					counter = &byteCounterReader{r: r}
+					return counter
+				}
+			}
+
+			type result struct {
+				prodErr error
+				consErr error
+			}
+			ch := make(chan result, 1)
+			go func() {
+				pErr, cErr := runAsyncPipePair(prod, cons, wrap)
+				ch <- result{pErr, cErr}
+			}()
+
+			select {
+			case res := <-ch:
+				if (res.prodErr != nil) != tt.wantProdErr {
+					t.Errorf("prodErr = %v, wantErr=%v", res.prodErr, tt.wantProdErr)
+				}
+				if (res.consErr != nil) != tt.wantConsErr {
+					t.Errorf("consErr = %v, wantErr=%v", res.consErr, tt.wantConsErr)
+				}
+				if tt.checkReaped && prod.ProcessState == nil {
+					t.Errorf("producer was not reaped (ProcessState == nil)")
+				}
+				if tt.wantMinBytes > 0 && (counter == nil || counter.n.Load() != tt.wantMinBytes) {
+					var got int64
+					if counter != nil {
+						got = counter.n.Load()
+					}
+					t.Errorf("counter bytes = %d, want %d", got, tt.wantMinBytes)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("runAsyncPipePair deadlocked after 3s")
+			}
+		})
+	}
+}
+
 
 
 

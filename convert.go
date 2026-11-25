@@ -42,15 +42,6 @@ func publishStagedFile(stagePath, outPath string, force bool) error {
 	return os.Rename(stagePath, outPath)
 }
 
-func abortPipeProducer(prod *exec.Cmd, pr *io.PipeReader, pw *io.PipeWriter) {
-	_ = pr.Close()
-	if prod != nil && prod.Process != nil {
-		_ = prod.Process.Kill()
-		_ = prod.Wait()
-	}
-	_ = pw.Close()
-}
-
 type ConvertOptions struct {
 	OutputDir   string
 	KeepOrig    bool
@@ -268,36 +259,19 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		compThreads = opts.ThreadLimit
 	}
 
-	pr, pw := io.Pipe()
-
 	decompCmd := buildDecompressCmdForFileWithMem(srcFile, srcInfo, decompThreads, stageBudget)
 	if closer, err := attachLz4StdinIfNeeded(decompCmd, srcFile, srcInfo.Format); err != nil {
-		_ = pr.Close()
-		_ = pw.Close()
 		return err
 	} else if closer != nil {
 		defer closer.Close()
 	}
-	decompCmd.Stdout = pw
 	decompCmd.Stderr = os.Stderr
 
 	compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: compThreads, MemBudgetMB: stageBudget})
-	compCmd.Stdin = pr
 	compCmd.Stdout = outFile
 	compCmd.Stderr = os.Stderr
 
-	if err := decompCmd.Start(); err != nil {
-		_ = pr.Close()
-		_ = pw.Close()
-		return fmt.Errorf("iniciando descompresión en pipe: %w", err)
-	}
-
-	if err := compCmd.Start(); err != nil {
-		abortPipeProducer(decompCmd, pr, pw)
-		return fmt.Errorf("iniciando compresión en pipe: %w", err)
-	}
-
-	decompErr, compErr := waitPipePair(decompCmd, compCmd, pr, pw)
+	decompErr, compErr := runAsyncPipePair(decompCmd, compCmd, nil)
 	outClosed = true
 	closeErr := outFile.Close()
 
@@ -376,24 +350,10 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		tarCmd := execCommand("tar", "-cf", "-", "-C", safeFlagArg(tmpDir), "--", ".")
 		tarCmd.Stderr = newLimitedBuffer(maxStderrBytes)
 		compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: compThreads, MemBudgetMB: memTotal})
+		compCmd.Stdout = outFile
 		compCmd.Stderr = newLimitedBuffer(maxStderrBytes)
 
-		pr, pw := io.Pipe()
-		tarCmd.Stdout = pw
-		compCmd.Stdin = pr
-		compCmd.Stdout = outFile
-
-		if err := tarCmd.Start(); err != nil {
-			_ = pr.Close()
-			_ = pw.Close()
-			return err
-		}
-		if err := compCmd.Start(); err != nil {
-			abortPipeProducer(tarCmd, pr, pw)
-			return err
-		}
-
-		tarErr, compErr := waitPipePair(tarCmd, compCmd, pr, pw)
+		tarErr, compErr := runAsyncPipePair(tarCmd, compCmd, nil)
 		outClosed = true
 		closeErr := outFile.Close()
 

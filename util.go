@@ -2283,15 +2283,157 @@ func ComputeSHA256(filePath string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+func isValidSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < 64; i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func escapeSHA256Filename(name string) (string, bool) {
+	if !strings.ContainsAny(name, "\\\n\r") {
+		return name, false
+	}
+	var sb strings.Builder
+	sb.Grow(len(name) + 4)
+	for i := 0; i < len(name); i++ {
+		switch name[i] {
+		case '\\':
+			sb.WriteString(`\\`)
+		case '\n':
+			sb.WriteString(`\n`)
+		case '\r':
+			sb.WriteString(`\r`)
+		default:
+			sb.WriteByte(name[i])
+		}
+	}
+	return sb.String(), true
+}
+
+func unescapeSHA256Filename(s string) string {
+	if strings.IndexByte(s, '\\') < 0 {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			switch s[i] {
+			case '\\':
+				sb.WriteByte('\\')
+			case 'n':
+				sb.WriteByte('\n')
+			case 'r':
+				sb.WriteByte('\r')
+			default:
+				sb.WriteByte('\\')
+				sb.WriteByte(s[i])
+			}
+		} else {
+			sb.WriteByte(s[i])
+		}
+	}
+	return sb.String()
+}
+
+func parseSHA256Line(rawLine string) (hashHex string, filename string, hasName bool, ok bool) {
+	line := strings.TrimRight(rawLine, "\r")
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", "", false, false
+	}
+	escaped := false
+	if strings.HasPrefix(trimmed, `\`) {
+		escaped = true
+		trimmed = trimmed[1:]
+	}
+	if strings.HasPrefix(trimmed, "SHA256 (") {
+		if idx := strings.LastIndex(trimmed, ") = "); idx > len("SHA256 (") {
+			namePart := trimmed[len("SHA256 ("):idx]
+			hashPart := strings.TrimSpace(trimmed[idx+len(") = "):])
+			if isValidSHA256Hex(hashPart) {
+				if escaped {
+					namePart = unescapeSHA256Filename(namePart)
+				}
+				return strings.ToLower(hashPart), namePart, true, true
+			}
+		}
+		return "", "", false, false
+	}
+	if len(trimmed) < 64 || !isValidSHA256Hex(trimmed[:64]) {
+		return "", "", false, false
+	}
+	hashPart := strings.ToLower(trimmed[:64])
+	rest := trimmed[64:]
+	if strings.TrimSpace(rest) == "" {
+		if escaped {
+			return "", "", false, false
+		}
+		return hashPart, "", false, true
+	}
+	var namePart string
+	switch {
+	case strings.HasPrefix(rest, "  ") || strings.HasPrefix(rest, " *"):
+		namePart = rest[2:]
+	case rest[0] == ' ' || rest[0] == '\t':
+		namePart = strings.TrimPrefix(strings.TrimLeft(rest, " \t"), "*")
+	default:
+		return "", "", false, false
+	}
+	if escaped {
+		namePart = unescapeSHA256Filename(namePart)
+	}
+	if namePart == "" {
+		return "", "", false, false
+	}
+	return hashPart, namePart, true, true
+}
+
 func WriteSHA256File(archivePath string) (string, error) {
 	hashHex, err := ComputeSHA256(archivePath)
 	if err != nil {
 		return "", err
 	}
 	shaPath := archivePath + ".sha256"
-	content := fmt.Sprintf("%s  %s\n", hashHex, filepath.Base(archivePath))
-	if err := os.WriteFile(shaPath, []byte(content), 0644); err != nil {
+	dir := filepath.Dir(shaPath)
+	shaName := filepath.Base(shaPath)
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
 		return "", err
+	}
+	defer root.Close()
+
+	if fi, err := root.Lstat(shaName); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("rechazando escritura sobre symlink existente: %s", shaPath)
+	}
+
+	escapedName, escaped := escapeSHA256Filename(filepath.Base(archivePath))
+	prefix := ""
+	if escaped {
+		prefix = `\`
+	}
+	content := fmt.Sprintf("%s%s  %s\n", prefix, hashHex, escapedName)
+
+	f, err := root.OpenFile(shaName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return "", err
+	}
+	_, writeErr := f.WriteString(content)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return "", writeErr
+	}
+	if closeErr != nil {
+		return "", closeErr
 	}
 	return hashHex, nil
 }
@@ -2302,29 +2444,39 @@ func ParseSHA256File(shaPath, targetFile string) (string, error) {
 		return "", err
 	}
 	base := filepath.Base(targetFile)
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+	type parsedEntry struct {
+		hash string
+		name string
+	}
+	var named []parsedEntry
+	var rawHash string
+
+	for _, line := range strings.Split(string(data), "\n") {
+		h, name, hasName, ok := parseSHA256Line(line)
+		if !ok {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			filename := strings.TrimPrefix(fields[1], "*")
-			if filename == base {
-				return strings.ToLower(fields[0]), nil
+		if hasName {
+			if name == base {
+				return h, nil
+			}
+			named = append(named, parsedEntry{hash: h, name: name})
+		} else if rawHash == "" {
+			rawHash = h
+		}
+	}
+
+	for _, e := range named {
+		if !strings.ContainsAny(e.name, "\n\r") {
+			normBase := filepath.Base(strings.ReplaceAll(e.name, `\`, "/"))
+			if normBase == base {
+				return e.hash, nil
 			}
 		}
 	}
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) > 0 && len(fields[0]) == 64 {
-			return strings.ToLower(fields[0]), nil
-		}
+
+	if len(named) == 0 && rawHash != "" {
+		return rawHash, nil
 	}
 	return "", fmt.Errorf("no se encontró hash válido para %s en %s", base, shaPath)
 }

@@ -3392,6 +3392,137 @@ func TestEstimateSize_SecurityAndOverflow(t *testing.T) {
 	})
 }
 
+func TestSHA256File_SecurityAndEdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+	validA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	validB := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	notHex64 := "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+
+	t.Run("WriteSHA256File refuses to overwrite symlink target", func(t *testing.T) {
+		arc := filepath.Join(tmpDir, "arc.tar.gz")
+		victim := filepath.Join(tmpDir, "victim.txt")
+		if err := os.WriteFile(arc, []byte("archive-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(victim, []byte("DO_NOT_TOUCH"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(victim, arc+".sha256"); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := WriteSHA256File(arc); err == nil {
+			t.Fatalf("expected WriteSHA256File to reject symlink at %s.sha256", arc)
+		}
+		gotVictim, err := os.ReadFile(victim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotVictim) != "DO_NOT_TOUCH" {
+			t.Fatalf("WriteSHA256File overwrote symlink target! content=%q", string(gotVictim))
+		}
+	})
+
+	t.Run("WriteSHA256File escapes newline/backslash and round-trips with ParseSHA256File", func(t *testing.T) {
+		sub := filepath.Join(tmpDir, "escaped")
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		weirdArc := filepath.Join(sub, "evil\n"+validA+"  injected.tar.gz")
+		if err := os.WriteFile(weirdArc, []byte("payload"), 0o644); err != nil {
+			t.Skipf("filesystem rejected newline in filename: %v", err)
+		}
+		wantHash, err := WriteSHA256File(weirdArc)
+		if err != nil {
+			t.Fatalf("WriteSHA256File failed: %v", err)
+		}
+		shaPath := weirdArc + ".sha256"
+		// Must NOT match injected.tar.gz!
+		if _, err := ParseSHA256File(shaPath, filepath.Join(sub, "injected.tar.gz")); err == nil {
+			t.Fatalf("newline in filename caused checksum line injection for injected.tar.gz")
+		}
+		gotHash, err := ParseSHA256File(shaPath, weirdArc)
+		if err != nil || gotHash != wantHash {
+			t.Fatalf("round-trip ParseSHA256File = (%q, %v), want (%q, nil)", gotHash, err, wantHash)
+		}
+	})
+
+	t.Run("ParseSHA256File handles spaces, paths, BSD style, hex validation, and wrong-file rejection", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			content    string
+			targetFile string
+			wantHash   string
+			wantErr    bool
+		}{
+			{
+				name:       "multi-file manifest with spaces in filenames selects exact file",
+				content:    validA + "  My First Backup.tar.gz\n" + validB + "  My Second Backup.tar.gz\n",
+				targetFile: "/tmp/My Second Backup.tar.gz",
+				wantHash:   validB,
+			},
+			{
+				name:       "binary asterisk mode with spaces",
+				content:    validB + " *Archive With Spaces.7z\n",
+				targetFile: "Archive With Spaces.7z",
+				wantHash:   validB,
+			},
+			{
+				name:       "manifest with ./ relative path prefix in multi-file list",
+				content:    validA + "  ./other.tar.xz\n" + validB + "  ./sub/release.tar.xz\n",
+				targetFile: "/var/tmp/release.tar.xz",
+				wantHash:   validB,
+			},
+			{
+				name:       "BSD style SHA256 (file) = hash",
+				content:    "SHA256 (My Archive.tar.zst) = " + strings.ToUpper(validB) + "\n",
+				targetFile: "My Archive.tar.zst",
+				wantHash:   validB,
+			},
+			{
+				name:       "rejects manifest naming ONLY a different file",
+				content:    validA + "  other_file.tar.gz\n",
+				targetFile: "target_file.tar.gz",
+				wantErr:    true,
+			},
+			{
+				name:       "rejects non-hex 64-char digest on named line",
+				content:    notHex64 + "  target_file.tar.gz\n",
+				targetFile: "target_file.tar.gz",
+				wantErr:    true,
+			},
+			{
+				name:       "rejects non-hex 64-char digest on raw line",
+				content:    notHex64 + "\n",
+				targetFile: "target_file.tar.gz",
+				wantErr:    true,
+			},
+			{
+				name:       "rejects short digest on named line",
+				content:    "deadbeef  target_file.tar.gz\n",
+				targetFile: "target_file.tar.gz",
+				wantErr:    true,
+			},
+		}
+
+		for i, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				p := filepath.Join(tmpDir, fmt.Sprintf("case_%d.sha256", i))
+				if err := os.WriteFile(p, []byte(tt.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				got, err := ParseSHA256File(p, tt.targetFile)
+				if (err != nil) != tt.wantErr {
+					t.Fatalf("ParseSHA256File() err = %v, wantErr = %v (got=%q)", err, tt.wantErr, got)
+				}
+				if !tt.wantErr && got != tt.wantHash {
+					t.Errorf("ParseSHA256File() = %q, want %q", got, tt.wantHash)
+				}
+			})
+		}
+	})
+}
+
 
 
 

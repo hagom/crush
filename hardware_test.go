@@ -272,3 +272,108 @@ func TestIsRotationalLinux_CachesOnlyByMountPoint(t *testing.T) {
 		t.Errorf("after %d distinct paths, rotationalCache grew to %d entries (%v), want %d", numConcurrent, afterCount, afterEntries, len(wantCachedMounts))
 	}
 }
+
+func TestIsRotationalLinux_EscapesMapperPartitionsAndPathEdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+	sysfsDir := filepath.Join(tmpDir, "sys_class_block")
+	devDir := filepath.Join(tmpDir, "dev")
+	if err := os.MkdirAll(filepath.Join(devDir, "mapper"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sysfsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Flat sysfs layout (without parent device tree symlink): mmcblk0 (0) + mmcblk0p1, nvme0n1 (0) + nvme0n1p1, sdc (1) + sdc2
+	writeQueueRot := func(dev, val string) {
+		qDir := filepath.Join(sysfsDir, dev, "queue")
+		if err := os.MkdirAll(qDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(qDir, "rotational"), []byte(val+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeQueueRot("mmcblk0", "0")
+	if err := os.MkdirAll(filepath.Join(sysfsDir, "mmcblk0p1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeQueueRot("sdc", "1")
+	if err := os.MkdirAll(filepath.Join(sysfsDir, "sdc2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. /dev/mapper/vg_hdd-lv_backup -> ../dm-0, where dm-0 has slaves/sdc2 -> ../../sdc2
+	if err := os.WriteFile(filepath.Join(devDir, "dm-0"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../dm-0", filepath.Join(devDir, "mapper", "vg_hdd-lv_backup")); err != nil {
+		t.Fatal(err)
+	}
+	dm0Slaves := filepath.Join(sysfsDir, "dm-0", "slaves")
+	if err := os.MkdirAll(dm0Slaves, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(sysfsDir, "sdc2"), filepath.Join(dm0Slaves, "sdc2")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. /dev/mapper/vg_ssd-lv_fast -> ../dm-1 with direct queue/rotational = 0
+	if err := os.WriteFile(filepath.Join(devDir, "dm-1"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../dm-1", filepath.Join(devDir, "mapper", "vg_ssd-lv_fast")); err != nil {
+		t.Fatal(err)
+	}
+	writeQueueRot("dm-1", "0")
+
+	// 4. mountinfo with:
+	// - initial rootfs on / shadowed by real HDD /dev/sdc2 on / (overmount at same length!)
+	// - octal-escaped space \040 and backslash \134 in mount point
+	// - private mount with 0 optional fields before "-"
+	// - /dev/mapper/ symlinks
+	mountinfoPath := filepath.Join(tmpDir, "mountinfo")
+	mountinfoContent := fmt.Sprintf(
+		"1 1 0:1 / / rw - rootfs rootfs rw\n"+
+			"20 1 8:34 / / rw,relatime - ext4 %s/sdc2 rw\n"+
+			"30 20 179:1 / /mnt/sd\\040card rw - ext4 %s/mmcblk0p1 rw\n"+
+			"40 20 253:0 / /media/My\\040Backup\\134HDD rw,relatime shared:10 - xfs %s/mapper/vg_hdd-lv_backup rw\n"+
+			"50 20 253:1 / /mnt/fast_lvm rw,relatime - ext4 %s/mapper/vg_ssd-lv_fast rw\n",
+		devDir, devDir, devDir, devDir,
+	)
+	if err := os.WriteFile(mountinfoPath, []byte(mountinfoContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDev := defaultDevDir
+	defaultDevDir = devDir
+	t.Cleanup(func() {
+		defaultDevDir = origDev
+		clearRotationalCache()
+	})
+
+	tests := []struct {
+		name    string
+		path    string
+		wantRot bool
+	}{
+		{"overmounted root / resolves later sdc2 HDD mount", "/var/log/syslog", true},
+		{"octal escaped space in SD card mount (mmcblk0p1 -> mmcblk0 SSD)", "/mnt/sd card/photo.jpg", false},
+		{"octal escaped space+backslash + mapper -> dm-0 -> slaves/sdc2 -> sdc HDD", `/media/My Backup\HDD/archive.tar`, true},
+		{"mapper -> dm-1 direct queue/rotational=0 SSD", "/mnt/fast_lvm/db.zst", false},
+		{"uncleaned .. traversal out of fast_lvm back to root HDD", "/mnt/fast_lvm/../var/data.bin", true},
+		{"trailing slash on SSD mount point", "/mnt/fast_lvm/", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRotationalLinux(tc.path, mountinfoPath, sysfsDir); got != tc.wantRot {
+				t.Errorf("isRotationalLinux(%q) = %v, want %v", tc.path, got, tc.wantRot)
+			}
+		})
+	}
+
+	if pathIsUnderMount("", "/") || pathIsUnderMount("relative/file", "/") {
+		t.Errorf("pathIsUnderMount must reject empty or relative paths")
+	}
+}

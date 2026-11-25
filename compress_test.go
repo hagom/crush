@@ -4087,6 +4087,246 @@ func TestCompressAudit_DryRunResumePipesAndSymlinkSafety(t *testing.T) {
 	})
 }
 
+func TestDoAppend_TarStreamVariants(t *testing.T) {
+	tests := []struct {
+		name     string
+		format   Format
+		needTool string
+	}{
+		{name: "tar.gz streaming append without temp tar", format: Gz, needTool: "gzip"},
+		{name: "tar.zst streaming append without temp tar", format: Zst, needTool: "zstd"},
+	}
+
+	largePayload := bytes.Repeat([]byte("APPEND-STREAM-PAYLOAD-"), 16*1024)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.needTool == "gzip" && !hasTool("pigz") && !hasTool("gzip") {
+				t.Skip("gzip/pigz not available")
+			} else if tt.needTool != "gzip" && !hasTool(tt.needTool) {
+				t.Skipf("%s not available", tt.needTool)
+			}
+
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+
+			_ = os.MkdirAll("keep_dir", 0o755)
+			_ = os.WriteFile("init.txt", []byte("initial content"), 0o644)
+			_ = os.WriteFile("keep_dir/nested.txt", []byte("nested initial"), 0o644)
+
+			out, err := DoCompress([]string{"init.txt", "keep_dir"}, CompressOptions{
+				Format:   tt.format,
+				Combine:  true,
+				KeepOrig: true,
+			})
+			if err != nil || len(out) == 0 {
+				t.Fatalf("setup DoCompress(%s) failed: %v", tt.format, err)
+			}
+			archive := out[0]
+
+			_ = os.MkdirAll("more", 0o755)
+			_ = os.WriteFile("extra.txt", []byte("appended text"), 0o644)
+			_ = os.WriteFile("more/run.sh", []byte("#!/bin/sh\necho hi\n"), 0o755)
+			_ = os.WriteFile("big_append.bin", largePayload, 0o640)
+			if sErr := os.Symlink("extra.txt", "sym.txt"); sErr != nil {
+				t.Skipf("symlinks not supported: %v", sErr)
+			}
+
+			origExec := execCommand
+			defer func() { execCommand = origExec }()
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				if name == "tar" {
+					t.Errorf("streaming DoAppend on %s must NOT invoke external tar (args=%v)", archive, args)
+				}
+				return origExec(name, args...)
+			}
+
+			if err := DoAppend(archive, []string{"extra.txt", "more", "big_append.bin", "sym.txt"}, CompressOptions{}); err != nil {
+				t.Fatalf("DoAppend(%s) failed: %v", archive, err)
+			}
+
+			entries := readTarEntriesFromArchive(t, archive, tt.format)
+			if e, ok := entries["init.txt"]; !ok || string(e.data) != "initial content" {
+				t.Errorf("init.txt missing or altered: ok=%v data=%q", ok, e.data)
+			}
+			if e, ok := entries["keep_dir/nested.txt"]; !ok || string(e.data) != "nested initial" {
+				t.Errorf("keep_dir/nested.txt missing or altered: ok=%v data=%q", ok, e.data)
+			}
+			if e, ok := entries["extra.txt"]; !ok || string(e.data) != "appended text" {
+				t.Errorf("extra.txt missing or altered: ok=%v data=%q", ok, e.data)
+			}
+			if e, ok := entries["more/run.sh"]; !ok || string(e.data) != "#!/bin/sh\necho hi\n" || e.mode != 0o755 {
+				t.Errorf("more/run.sh mismatch: ok=%v mode=%o data=%q", ok, e.mode, e.data)
+			}
+			if e, ok := entries["big_append.bin"]; !ok || !bytes.Equal(e.data, largePayload) {
+				t.Errorf("big_append.bin mismatch: ok=%v len=%d want=%d", ok, len(e.data), len(largePayload))
+			}
+			if e, ok := entries["sym.txt"]; !ok || e.typeflag != tar.TypeSymlink || e.linkname != "extra.txt" {
+				t.Errorf("sym.txt mismatch: ok=%v type=%v link=%q", ok, e.typeflag, e.linkname)
+			}
+
+			if matches, _ := filepath.Glob("crush_append_*.tar"); len(matches) > 0 {
+				t.Errorf("unexpected temp tar files remaining: %v", matches)
+			}
+		})
+	}
+}
+
+func TestDoAppend_TarStream_ExcludeCleanAndNewerInsideOldDir(t *testing.T) {
+	if !hasTool("pigz") && !hasTool("gzip") {
+		t.Skip("gzip/pigz not available")
+	}
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	_ = os.WriteFile("init.txt", []byte("base"), 0o644)
+	out, err := DoCompress([]string{"init.txt"}, CompressOptions{
+		Format:   Gz,
+		Combine:  true,
+		KeepOrig: true,
+	})
+	if err != nil || len(out) == 0 {
+		t.Fatalf("setup failed: %v", err)
+	}
+	archive := out[0]
+
+	now := time.Now()
+	oldTime := now.Add(-72 * time.Hour)
+	newTime := now.Add(-30 * time.Minute)
+	cutoff := now.Add(-24 * time.Hour)
+
+	_ = os.MkdirAll("src/.git", 0o755)
+	_ = os.MkdirAll("src/excluded_dir", 0o755)
+	_ = os.MkdirAll("src/sub", 0o755)
+	_ = os.WriteFile("src/fresh.txt", []byte("fresh"), 0o644)
+	_ = os.WriteFile("src/stale.txt", []byte("stale"), 0o644)
+	_ = os.WriteFile("src/.git/config", []byte("gitconf"), 0o644)
+	_ = os.WriteFile("src/excluded_dir/inside.txt", []byte("skip"), 0o644)
+	_ = os.WriteFile("src/sub/cache.tmp", []byte("tmp"), 0o644)
+
+	_ = os.Chtimes("src/stale.txt", oldTime, oldTime)
+	_ = os.Chtimes("src/fresh.txt", newTime, newTime)
+	_ = os.Chtimes("src/.git/config", newTime, newTime)
+	_ = os.Chtimes("src/excluded_dir/inside.txt", newTime, newTime)
+	_ = os.Chtimes("src/sub/cache.tmp", newTime, newTime)
+	_ = os.Chtimes("src", oldTime, oldTime)
+
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "tar" {
+			t.Errorf("streaming DoAppend must NOT invoke tar (args=%v)", args)
+		}
+		return origExec(name, args...)
+	}
+
+	if err := DoAppend(archive, []string{"src"}, CompressOptions{
+		Clean:      true,
+		Exclude:    []string{"excluded_dir", "*.tmp"},
+		CutoffTime: cutoff,
+	}); err != nil {
+		t.Fatalf("DoAppend failed: %v", err)
+	}
+
+	entries := readTarEntriesFromArchive(t, archive, Gz)
+	if _, ok := entries["init.txt"]; !ok {
+		t.Errorf("init.txt missing after append")
+	}
+	if _, ok := entries["src/fresh.txt"]; !ok {
+		t.Errorf("src/fresh.txt inside older directory missing after append")
+	}
+	for _, forbidden := range []string{"src/stale.txt", "src/.git", "src/.git/config", "src/excluded_dir", "src/excluded_dir/inside.txt", "src/sub/cache.tmp"} {
+		if _, ok := entries[forbidden]; ok {
+			t.Errorf("forbidden entry %q should not be in archive", forbidden)
+		}
+	}
+}
+
+func TestDoAppend_TarStream_RollbackOnErrors(t *testing.T) {
+	t.Run("corrupt archive returns error and preserves original bytes", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		badTarGz := filepath.Join(tmpDir, "bad.tar.gz")
+		origBytes := []byte("corrupted-not-gzip-archive-bytes")
+		if err := os.WriteFile(badTarGz, origBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		addFile := filepath.Join(tmpDir, "add.txt")
+		_ = os.WriteFile(addFile, []byte("extra"), 0o644)
+
+		if err := DoAppend(badTarGz, []string{addFile}, CompressOptions{}); err == nil {
+			t.Fatal("expected error appending to corrupt tar.gz, got nil")
+		}
+
+		afterBytes, err := os.ReadFile(badTarGz)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(afterBytes, origBytes) {
+			t.Errorf("corrupt archive bytes modified after failed DoAppend")
+		}
+		if left, _ := filepath.Glob(filepath.Join(tmpDir, ".*crush*")); len(left) > 0 {
+			t.Errorf("leftover temp files found: %v", left)
+		}
+	})
+
+	t.Run("compressor failure leaves original archive intact and reaps child", func(t *testing.T) {
+		if !hasTool("pigz") && !hasTool("gzip") {
+			t.Skip("gzip/pigz not available")
+		}
+		tmpDir := t.TempDir()
+		f1 := filepath.Join(tmpDir, "init.txt")
+		f2 := filepath.Join(tmpDir, "add.txt")
+		_ = os.WriteFile(f1, []byte("original-content"), 0o644)
+		_ = os.WriteFile(f2, []byte("extra-content"), 0o644)
+
+		out, err := DoCompress([]string{f1}, CompressOptions{Format: Gz, OutputDir: tmpDir, Combine: true, KeepOrig: true})
+		if err != nil || len(out) == 0 {
+			t.Fatalf("setup failed: %v", err)
+		}
+		archive := out[0]
+		origBytes, _ := os.ReadFile(archive)
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		var compCmd *exec.Cmd
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			for _, a := range args {
+				if a == "-c" || strings.HasPrefix(a, "-T") {
+					isDecomp := false
+					for _, x := range args {
+						if x == "-dc" || x == "-d" {
+							isDecomp = true
+							break
+						}
+					}
+					if !isDecomp {
+						compCmd = mockExecCommand("mock-fail-compressor")
+						return compCmd
+					}
+				}
+			}
+			return origExec(name, args...)
+		}
+
+		if err := DoAppend(archive, []string{f2}, CompressOptions{}); err == nil {
+			t.Fatal("expected error when compressor fails during DoAppend")
+		}
+
+		afterBytes, _ := os.ReadFile(archive)
+		if !bytes.Equal(afterBytes, origBytes) {
+			t.Errorf("original archive changed on compressor failure")
+		}
+		if compCmd != nil && compCmd.ProcessState == nil {
+			t.Errorf("failing compressor child was not reaped")
+		}
+		if left, _ := filepath.Glob(filepath.Join(tmpDir, ".*crush*")); len(left) > 0 {
+			t.Errorf("leftover temp files found: %v", left)
+		}
+	})
+}
+
+
 
 
 

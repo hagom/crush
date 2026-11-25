@@ -1,9 +1,11 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2146,72 +2148,8 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		}
 
 	case info.IsTar && info.IsStream():
-		tmpTar, err := os.CreateTemp(filepath.Dir(archive), "crush_append_*.tar")
-		if err != nil {
-			return fmt.Errorf("creando archivo temporal: %w", err)
-		}
-		tmpTarPath := tmpTar.Name()
-		defer os.Remove(tmpTarPath)
-
-		decompCmd, closer := pipeCmdForWithMem(info, archive, opts.ThreadLimit, opts.MemBudgetMB)
-		if closer != nil {
-			defer closer.Close()
-		}
-		decompCmd.Stdout = tmpTar
-		decompCmd.Stderr = stderrFor(opts.Progress)
-		if err := decompCmd.Run(); err != nil {
-			_ = tmpTar.Close()
-			return fmt.Errorf("error descomprimiendo tar existente: %w", err)
-		}
-		if err := tmpTar.Close(); err != nil {
-			return fmt.Errorf("cerrando tar temporal: %w", err)
-		}
-
-		tarArgs := []string{"-rf", safeTarArchiveArg(tmpTarPath)}
-		if opts.UseSparse() {
-			tarArgs = append(tarArgs, "--sparse")
-		}
-		tarArgs = appendTarFilterFlags(tarArgs, opts)
-		tarArgs = append(tarArgs, "--")
-		tarArgs = append(tarArgs, items...)
-		tarCmd := execCommand("tar", tarArgs...)
-		tarCmd.Stdout = stdoutFor(opts.Progress)
-		tarCmd.Stderr = stderrFor(opts.Progress)
-		if err := augmentErr(tarCmd, tarCmd.Run()); err != nil {
-			return fmt.Errorf("error agregando elementos a tar temporal: %w", err)
-		}
-
-		tarFile, err := os.Open(tmpTarPath)
-		if err != nil {
-			return fmt.Errorf("abriendo tar temporal para recompresión: %w", err)
-		}
-		defer tarFile.Close()
-
-		outF, err := os.CreateTemp(filepath.Dir(archive), ".crush_append_out_*")
-		if err != nil {
-			return fmt.Errorf("creando archivo temporal re-comprimido: %w", err)
-		}
-		tmpOut := outF.Name()
-		defer os.Remove(tmpOut)
-		_ = outF.Chmod(fi.Mode().Perm())
-
-		compOpts := opts
-		compOpts.Format = info.Format
-		compCmd := buildCompressCmd(compOpts)
-		compCmd.Stdin = tarFile
-		compCmd.Stdout = outF
-		compCmd.Stderr = stderrFor(opts.Progress)
-		if err := augmentErr(compCmd, compCmd.Run()); err != nil {
-			_ = outF.Close()
-			return fmt.Errorf("error re-comprimiendo archivo: %w", err)
-		}
-		if err := outF.Close(); err != nil {
-			return fmt.Errorf("cerrando archivo temporal re-comprimido: %w", err)
-		}
-		_ = tarFile.Close()
-
-		if err := os.Rename(tmpOut, archive); err != nil {
-			return fmt.Errorf("error reemplazando archivo original: %w", err)
+		if err := appendTarStream(archive, fi.Mode().Perm(), fi.Size(), totalSize, info, items, opts); err != nil {
+			return err
 		}
 
 	default:
@@ -2226,5 +2164,264 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		}
 	}
 
+	return nil
+}
+
+func appendTarStream(archive string, archivePerm os.FileMode, archiveSize, totalSize int64, info FormatInfo, items []string, opts CompressOptions) error {
+	stageBudget := 0
+	if opts.MemBudgetMB > 0 {
+		stageBudget = max(128, opts.MemBudgetMB/2)
+	}
+	decompThreads := cappedThreadsForBudget(info.Format, archiveSize, stageBudget, opts.ThreadLimit)
+	compThreads := cappedThreadsForBudget(info.Format, totalSize, stageBudget, opts.ThreadLimit)
+
+	outF, err := os.CreateTemp(filepath.Dir(archive), ".crush_append_out_*")
+	if err != nil {
+		return fmt.Errorf("creando archivo temporal re-comprimido: %w", err)
+	}
+	tmpOut := outF.Name()
+	defer os.Remove(tmpOut)
+	_ = outF.Chmod(archivePerm)
+
+	outClosed := false
+	defer func() {
+		if !outClosed {
+			_ = outF.Close()
+		}
+	}()
+
+	decompR, decompW, err := newAsyncOSPipe()
+	if err != nil {
+		return fmt.Errorf("creando pipe asíncrono de lectura: %w", err)
+	}
+	compR, compW, err := newAsyncOSPipe()
+	if err != nil {
+		_ = decompR.Close()
+		_ = decompW.Close()
+		return fmt.Errorf("creando pipe asíncrono de escritura: %w", err)
+	}
+
+	decompCmd, decompCloser := pipeCmdForWithMem(info, archive, decompThreads, stageBudget)
+	if decompCloser != nil {
+		defer decompCloser.Close()
+	}
+	decompCmd.Stdout = decompW
+	decompCmd.Stderr = stderrFor(opts.Progress)
+
+	compOpts := opts
+	compOpts.Format = info.Format
+	compOpts.ThreadLimit = compThreads
+	compOpts.MemBudgetMB = stageBudget
+	compCmd := buildCompressCmd(compOpts)
+	compCmd.Stdin = compR
+	compCmd.Stdout = outF
+	compCmd.Stderr = stderrFor(opts.Progress)
+
+	if err := decompCmd.Start(); err != nil {
+		_ = decompR.Close()
+		_ = decompW.Close()
+		_ = compR.Close()
+		_ = compW.Close()
+		return fmt.Errorf("error descomprimiendo tar existente: %w", augmentErr(decompCmd, err))
+	}
+	_ = decompW.Close()
+	decompW = nil
+
+	if err := compCmd.Start(); err != nil {
+		_ = decompR.Close()
+		_ = compR.Close()
+		_ = compW.Close()
+		if decompCmd.Process != nil {
+			_ = decompCmd.Process.Kill()
+			_ = decompCmd.Wait()
+		}
+		return fmt.Errorf("error re-comprimiendo archivo: %w", augmentErr(compCmd, err))
+	}
+	_ = compR.Close()
+	compR = nil
+
+	decompWaited := false
+	compWaited := false
+	defer func() {
+		if decompR != nil {
+			_ = decompR.Close()
+		}
+		if compW != nil {
+			_ = compW.Close()
+		}
+		if decompCmd.Process != nil && !decompWaited {
+			_ = decompCmd.Process.Kill()
+			_ = decompCmd.Wait()
+		}
+		if compCmd.Process != nil && !compWaited {
+			_ = compCmd.Process.Kill()
+			_ = compCmd.Wait()
+		}
+	}()
+
+	tr := tar.NewReader(bufio.NewReaderSize(decompR, streamBufSize))
+	bw := bufio.NewWriterSize(compW, streamBufSize)
+	tw := tar.NewWriter(bw)
+	copyBuf := make([]byte, streamBufSize)
+
+	reapOnCompWriteErr := func(writeErr error) error {
+		_ = tw.Close()
+		_ = bw.Flush()
+		if compW != nil {
+			_ = compW.Close()
+			compW = nil
+		}
+		if !compWaited {
+			compWaited = true
+			if cErr := augmentErr(compCmd, compCmd.Wait()); cErr != nil {
+				return fmt.Errorf("error re-comprimiendo archivo: %w", cErr)
+			}
+		}
+		return writeErr
+	}
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			_ = decompR.Close()
+			decompR = nil
+			if !decompWaited {
+				decompWaited = true
+				if dErr := augmentErr(decompCmd, decompCmd.Wait()); dErr != nil {
+					return fmt.Errorf("error descomprimiendo tar existente: %w", dErr)
+				}
+			}
+			return fmt.Errorf("error leyendo tar existente: %w", err)
+		}
+		if hdr.Typeflag == tar.TypeRegA {
+			hdr.Typeflag = tar.TypeReg
+		}
+		if hdr.Typeflag == tar.TypeDir {
+			hdr.Size = 0
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return reapOnCompWriteErr(fmt.Errorf("escribiendo cabecera tar: %w", err))
+		}
+		if hdr.Size > 0 && hdr.Typeflag != tar.TypeSymlink && hdr.Typeflag != tar.TypeLink {
+			if _, err := io.CopyBuffer(tw, tr, copyBuf); err != nil {
+				return reapOnCompWriteErr(fmt.Errorf("copiando entrada tar existente: %w", err))
+			}
+		}
+	}
+
+	_ = decompR.Close()
+	decompR = nil
+	decompWaited = true
+	if err := augmentErr(decompCmd, decompCmd.Wait()); err != nil {
+		return fmt.Errorf("error descomprimiendo tar existente: %w", err)
+	}
+
+	if err := writeAppendItemsToTar(tw, items, opts, copyBuf); err != nil {
+		return reapOnCompWriteErr(fmt.Errorf("error agregando elementos al flujo tar: %w", err))
+	}
+
+	if err := tw.Close(); err != nil {
+		return reapOnCompWriteErr(fmt.Errorf("cerrando flujo tar: %w", err))
+	}
+	if err := bw.Flush(); err != nil {
+		return reapOnCompWriteErr(fmt.Errorf("vaciando búfer tar: %w", err))
+	}
+	if err := compW.Close(); err != nil {
+		compW = nil
+		return reapOnCompWriteErr(fmt.Errorf("cerrando pipe hacia compresor: %w", err))
+	}
+	compW = nil
+
+	compWaited = true
+	if err := augmentErr(compCmd, compCmd.Wait()); err != nil {
+		return fmt.Errorf("error re-comprimiendo archivo: %w", err)
+	}
+
+	outClosed = true
+	if err := outF.Close(); err != nil {
+		return fmt.Errorf("cerrando archivo temporal re-comprimido: %w", err)
+	}
+
+	if err := os.Rename(tmpOut, archive); err != nil {
+		return fmt.Errorf("error reemplazando archivo original: %w", err)
+	}
+	return nil
+}
+
+func writeAppendItemsToTar(tw *tar.Writer, items []string, opts CompressOptions, copyBuf []byte) error {
+	for _, item := range items {
+		cleanRoot := filepath.Clean(item)
+		err := filepath.WalkDir(cleanRoot, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			cleanPath := filepath.Clean(path)
+			slashPath := filepath.ToSlash(cleanPath)
+			if isExcludedItem(cleanPath, opts.Exclude) || (slashPath != cleanPath && isExcludedItem(slashPath, opts.Exclude)) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			lfi, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if !opts.CutoffTime.IsZero() && !lfi.IsDir() && lfi.ModTime().Before(opts.CutoffTime) {
+				return nil
+			}
+
+			tarName := strings.TrimLeft(slashPath, "/")
+			if tarName == "" || tarName == "." {
+				return nil
+			}
+
+			var linkTarget string
+			if lfi.Mode()&os.ModeSymlink != 0 {
+				linkTarget, err = os.Readlink(path)
+				if err != nil {
+					return err
+				}
+			}
+
+			hdr, err := tar.FileInfoHeader(lfi, linkTarget)
+			if err != nil {
+				return err
+			}
+			if lfi.IsDir() {
+				if !strings.HasSuffix(tarName, "/") {
+					tarName += "/"
+				}
+				hdr.Size = 0
+			}
+			hdr.Name = tarName
+
+			if err := tw.WriteHeader(hdr); err != nil {
+				return err
+			}
+			if lfi.Mode().IsRegular() && hdr.Size > 0 {
+				f, err := os.Open(path)
+				if err != nil {
+					return err
+				}
+				_, copyErr := io.CopyBuffer(tw, io.LimitReader(f, hdr.Size), copyBuf)
+				closeErr := f.Close()
+				if copyErr != nil {
+					return copyErr
+				}
+				if closeErr != nil {
+					return closeErr
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }

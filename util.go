@@ -132,25 +132,51 @@ func (fp *FileProgress) SetParts(done, total int) {
 	fp.partsTotal = total
 }
 
+func isValidSplitPartSuffix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+	}
+	return true
+}
+
 func globSplitParts(file string) []string {
-	pattern := file + ".part*"
-	matches, err := filepath.Glob(pattern)
+	dir := filepath.Dir(file)
+	prefix := filepath.Base(file) + ".part"
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
+	var matches []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		suffix := name[len(prefix):]
+		if !isValidSplitPartSuffix(suffix) {
+			continue
+		}
+		matches = append(matches, filepath.Join(dir, name))
+	}
 	sort.Slice(matches, func(i, j int) bool {
-		idxI := strings.LastIndex(matches[i], ".part")
-		idxJ := strings.LastIndex(matches[j], ".part")
-		if idxI != -1 && idxJ != -1 {
-			baseI := matches[i][:idxI]
-			baseJ := matches[j][:idxJ]
-			if baseI == baseJ {
-				numI, errI := strconv.Atoi(matches[i][idxI+len(".part"):])
-				numJ, errJ := strconv.Atoi(matches[j][idxJ+len(".part"):])
-				if errI == nil && errJ == nil {
-					return numI < numJ
-				}
-			}
+		sufI := filepath.Base(matches[i])[len(prefix):]
+		sufJ := filepath.Base(matches[j])[len(prefix):]
+		numI, errI := strconv.ParseUint(sufI, 10, 64)
+		numJ, errJ := strconv.ParseUint(sufJ, 10, 64)
+		if (errI == nil) != (errJ == nil) {
+			return errI == nil
+		}
+		if errI == nil && numI != numJ {
+			return numI < numJ
 		}
 		return matches[i] < matches[j]
 	})
@@ -167,10 +193,15 @@ func findSplitParts(file string) []string {
 }
 
 func resolveSplitBase(file string) string {
-	if idx := strings.Index(file, ".part"); idx != -1 {
-		base := file[:idx]
-		if _, err := os.Stat(base); err == nil {
-			return base
+	dir := filepath.Dir(file)
+	baseName := filepath.Base(file)
+	if idx := strings.LastIndex(baseName, ".part"); idx > 0 {
+		suffix := baseName[idx+len(".part"):]
+		if isValidSplitPartSuffix(suffix) {
+			candidate := filepath.Join(dir, baseName[:idx])
+			if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+				return candidate
+			}
 		}
 	}
 	return file
@@ -296,17 +327,17 @@ func NCPU() int {
 		if err == nil {
 			parts := strings.Fields(string(data))
 			if len(parts) > 0 && parts[0] != "max" {
-				quota, err := strconv.Atoi(parts[0])
+				quota, err := strconv.ParseInt(parts[0], 10, 64)
 				if err == nil && quota > 0 {
-					period := 100000
+					period := int64(100000)
 					if len(parts) > 1 {
-						if p, err := strconv.Atoi(parts[1]); err == nil && p > 0 {
+						if p, err := strconv.ParseInt(parts[1], 10, 64); err == nil && p > 0 {
 							period = p
 						}
 					}
 					n := (quota + period - 1) / period
-					if n > 0 {
-						ncpuCache = n
+					if n > 0 && n <= int64(math.MaxInt) {
+						ncpuCache = int(n)
 						return
 					}
 				}
@@ -317,12 +348,12 @@ func NCPU() int {
 		quotaB, _ := os.ReadFile("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
 		periodB, _ := os.ReadFile("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
 		if len(quotaB) > 0 && len(periodB) > 0 {
-			quota, _ := strconv.Atoi(strings.TrimSpace(string(quotaB)))
-			period, _ := strconv.Atoi(strings.TrimSpace(string(periodB)))
+			quota, _ := strconv.ParseInt(strings.TrimSpace(string(quotaB)), 10, 64)
+			period, _ := strconv.ParseInt(strings.TrimSpace(string(periodB)), 10, 64)
 			if quota > 0 && period > 0 {
 				n := (quota + period - 1) / period
-				if n > 0 {
-					ncpuCache = n
+				if n > 0 && n <= int64(math.MaxInt) {
+					ncpuCache = int(n)
 					return
 				}
 			}
@@ -458,11 +489,22 @@ func probeMemLimitMB() int {
 		return defaultMemLimitMB
 	}
 
-	mb := int((availBytes / 1024) * 70 / 100 / 1024)
+	mb := bytesToBudgetMB(availBytes)
 	if mb < 1 {
 		return 1
 	}
 	return mb
+}
+
+func bytesToBudgetMB(availBytes int64) int {
+	if availBytes <= 0 {
+		return 0
+	}
+	mb64 := (availBytes / 1024) * 70 / 100 / 1024
+	if mb64 > int64(math.MaxInt) {
+		return math.MaxInt
+	}
+	return int(mb64)
 }
 
 func readHostMemAvailBytes() (int64, bool) {
@@ -471,7 +513,7 @@ func readHostMemAvailBytes() (int64, bool) {
 			if strings.HasPrefix(line, "MemAvailable:") {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
-					if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil && kb > 0 && kb <= math.MaxInt64/1024 {
+					if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil && kb >= 0 && kb <= math.MaxInt64/1024 {
 						return kb * 1024, true
 					}
 				}
@@ -532,7 +574,7 @@ func getMemAvailBytesFromFree() (int64, bool) {
 		if strings.HasPrefix(line, "Mem:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 7 {
-				if avail, err := strconv.ParseInt(fields[6], 10, 64); err == nil && avail > 0 && avail <= math.MaxInt64/1024 {
+				if avail, err := strconv.ParseInt(fields[6], 10, 64); err == nil && avail >= 0 && avail <= math.MaxInt64/1024 {
 					return avail * 1024, true
 				}
 			}
@@ -543,7 +585,7 @@ func getMemAvailBytesFromFree() (int64, bool) {
 
 func getMemFromFree() int {
 	if b, ok := getMemAvailBytesFromFree(); ok && b > 0 {
-		return int((b / 1024) * 70 / 100 / 1024)
+		return bytesToBudgetMB(b)
 	}
 	return 0
 }
@@ -1072,15 +1114,24 @@ func resolveThreadCap(f Format, sizeBytes int64) int {
 	return resolveThreadCapForBudget(f, sizeBytes, getMemLimit())
 }
 
+func canonicalReservationKey(name string) string {
+	if abs, err := filepath.Abs(name); err == nil {
+		return abs
+	}
+	return filepath.Clean(name)
+}
+
 func ReleaseReservedName(name string) {
+	key := canonicalReservationKey(name)
 	uniqueNameMu.Lock()
-	delete(reservedNames, name)
+	delete(reservedNames, key)
 	uniqueNameMu.Unlock()
 }
 
 func reserveNameLocked(name string) {
+	key := canonicalReservationKey(name)
 	reservedSeq++
-	reservedNames[name] = reservedSeq
+	reservedNames[key] = reservedSeq
 	if len(reservedNames) > maxReservedNames {
 		pruneReservedNamesLocked()
 	}
@@ -1113,10 +1164,11 @@ func pruneReservedNamesLocked() {
 }
 
 func isNameAvailable(name string) bool {
-	if _, ok := reservedNames[name]; ok {
+	key := canonicalReservationKey(name)
+	if _, ok := reservedNames[key]; ok {
 		return false
 	}
-	_, err := os.Lstat(name)
+	_, err := os.Lstat(key)
 	return os.IsNotExist(err)
 }
 
@@ -1124,16 +1176,33 @@ func GetUniqueName(base, ext string) string {
 	uniqueNameMu.Lock()
 	defer uniqueNameMu.Unlock()
 
-	if strings.HasSuffix(base, "."+ext) {
-		base = strings.TrimSuffix(base, "."+ext)
+	ext = strings.TrimPrefix(ext, ".")
+	if ext != "" {
+		dotExt := "." + ext
+		if len(filepath.Base(base)) > len(dotExt) && strings.HasSuffix(base, dotExt) {
+			base = strings.TrimSuffix(base, dotExt)
+		}
 	}
-	name := base + "." + ext
+	formatCandidate := func(counter int) string {
+		if ext == "" {
+			if counter == 0 {
+				return base
+			}
+			return fmt.Sprintf("%s_%d", base, counter)
+		}
+		if counter == 0 {
+			return base + "." + ext
+		}
+		return fmt.Sprintf("%s_%d.%s", base, counter, ext)
+	}
+
+	name := formatCandidate(0)
 	if isNameAvailable(name) {
 		reserveNameLocked(name)
 		return name
 	}
 	for counter := 1; ; counter++ {
-		name = fmt.Sprintf("%s_%d.%s", base, counter, ext)
+		name = formatCandidate(counter)
 		if isNameAvailable(name) {
 			reserveNameLocked(name)
 			return name
@@ -2749,7 +2818,13 @@ func AllocateThreadsProportionalWithCaps(sizes []int64, totalCores int, minThrea
 			c = minThreads
 		}
 		caps[i] = c
-		sumCaps += c
+		if sumCaps < max(0, totalCores) {
+			if c > math.MaxInt-sumCaps {
+				sumCaps = math.MaxInt
+			} else {
+				sumCaps += c
+			}
+		}
 	}
 
 	result := make([]int, n)
@@ -2780,11 +2855,11 @@ func AllocateThreadsProportionalWithCaps(sizes []int64, totalCores int, minThrea
 		return result
 	}
 
-	var totalSize int64
+	var totalSize float64
 	allZero := true
 	for _, sz := range sizes {
 		if sz > 0 {
-			totalSize += sz
+			totalSize += float64(sz)
 			allZero = false
 		}
 	}
@@ -2794,7 +2869,7 @@ func AllocateThreadsProportionalWithCaps(sizes []int64, totalCores int, minThrea
 		targetTotal = sumCaps
 	}
 
-	if allZero || totalSize == 0 {
+	if allZero || totalSize <= 0 {
 		allocated := 0
 		for i := 0; i < n; i++ {
 			result[i] = minThreads
@@ -2829,8 +2904,18 @@ func AllocateThreadsProportionalWithCaps(sizes []int64, totalCores int, minThrea
 	remainders := make([]itemRemainder, n)
 
 	for i, sz := range sizes {
-		raw := float64(targetTotal) * float64(max(0, sz)) / float64(totalSize)
-		count := int(raw)
+		raw := float64(max(0, targetTotal)) * float64(max(0, sz)) / totalSize
+		if math.IsNaN(raw) || raw < 0 {
+			raw = 0
+		}
+		var count int
+		var remFrac float64
+		if raw >= float64(caps[i]) {
+			count = caps[i]
+		} else {
+			count = int(raw)
+			remFrac = raw - float64(count)
+		}
 		if count < minThreads {
 			count = minThreads
 		}
@@ -2839,7 +2924,7 @@ func AllocateThreadsProportionalWithCaps(sizes []int64, totalCores int, minThrea
 		}
 		result[i] = count
 		allocated += count
-		remainders[i] = itemRemainder{index: i, remainder: raw - float64(int(raw))}
+		remainders[i] = itemRemainder{index: i, remainder: remFrac}
 	}
 
 	if allocated < targetTotal {
@@ -2959,7 +3044,10 @@ func NewDynamicThreadPool(totalCores, minThreads, maxThreads, totalFiles int, to
 		minThreads = 1
 	}
 	if maxThreads < minThreads {
-		maxThreads = totalCores
+		maxThreads = max(totalCores, minThreads)
+	}
+	if totalBytes < 0 {
+		totalBytes = 0
 	}
 	mw := 8
 	if len(maxWorkers) > 0 && maxWorkers[0] > 0 {
@@ -2987,9 +3075,16 @@ func (p *DynamicThreadPool) Acquire(fileSize int64, maxFileThreads ...int) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if fileSize < 0 {
+		fileSize = 0
+	}
 	capLimit := p.maxThreads
 	if len(maxFileThreads) > 0 && maxFileThreads[0] > 0 && maxFileThreads[0] < capLimit {
 		capLimit = maxFileThreads[0]
+	}
+	effMin := min(p.minThreads, capLimit)
+	if effMin < 1 {
+		effMin = 1
 	}
 
 	p.activeWorkers++
@@ -3003,15 +3098,20 @@ func (p *DynamicThreadPool) Acquire(fileSize int64, maxFileThreads ...int) int {
 		if tokens > capLimit {
 			tokens = capLimit
 		}
-		if tokens < p.minThreads {
-			tokens = p.minThreads
+		if tokens < effMin {
+			tokens = effMin
 		}
 		p.availableTokens -= tokens
 		if p.availableTokens < 0 {
 			p.availableTokens = 0
 		}
-		p.remainingFiles--
+		if p.remainingFiles > 0 {
+			p.remainingFiles--
+		}
 		p.remainingBytes -= fileSize
+		if p.remainingBytes < 0 {
+			p.remainingBytes = 0
+		}
 		return tokens
 	}
 
@@ -3024,21 +3124,21 @@ func (p *DynamicThreadPool) Acquire(fileSize int64, maxFileThreads ...int) int {
 	base := float64(p.availableTokens) / float64(slotsRemaining)
 	target := int(math.Round(base * ratio))
 
-	maxAllowed := p.availableTokens - (slotsRemaining-1)*p.minThreads
-	if maxAllowed < p.minThreads {
-		maxAllowed = p.minThreads
+	maxAllowed := p.availableTokens - (slotsRemaining-1)*effMin
+	if maxAllowed < effMin {
+		maxAllowed = effMin
 	}
 	if target > maxAllowed {
 		target = maxAllowed
 	}
 
-	if target < p.minThreads {
-		target = p.minThreads
+	if target < effMin {
+		target = effMin
 	}
 	if target > capLimit {
 		target = capLimit
 	}
-	if target > p.availableTokens && p.availableTokens >= p.minThreads {
+	if target > p.availableTokens && p.availableTokens >= effMin {
 		target = p.availableTokens
 	}
 
@@ -3048,6 +3148,9 @@ func (p *DynamicThreadPool) Acquire(fileSize int64, maxFileThreads ...int) int {
 	}
 	p.remainingFiles--
 	p.remainingBytes -= fileSize
+	if p.remainingBytes < 0 {
+		p.remainingBytes = 0
+	}
 	return target
 }
 
@@ -3059,10 +3162,32 @@ func (p *DynamicThreadPool) Release(tokens int) {
 	if p.activeWorkers < 0 {
 		p.activeWorkers = 0
 	}
-	p.availableTokens += tokens
-	if p.availableTokens > p.totalTokens {
-		p.availableTokens = p.totalTokens
+	if tokens > 0 {
+		p.availableTokens += tokens
+		if p.availableTokens > p.totalTokens {
+			p.availableTokens = p.totalTokens
+		}
 	}
+}
+
+const maxCutoffDays = int64(math.MaxInt64 / (24 * time.Hour))
+
+func isSignedIntString(s string) bool {
+	if s == "" {
+		return false
+	}
+	if s[0] == '+' || s[0] == '-' {
+		s = s[1:]
+	}
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseCutoffTime parses a cutoff time from either a date/duration string or a reference file.
@@ -3081,13 +3206,29 @@ func ParseCutoffTime(newerStr, newerThanFile string, now time.Time) (time.Time, 
 	if newerStr == "" {
 		return time.Time{}, nil
 	}
+	if now.IsZero() {
+		now = time.Now()
+	}
 
 	trimmed := strings.TrimSpace(newerStr)
 
 	// Check if it's a day duration like "7d", "1d"
-	if strings.HasSuffix(trimmed, "d") || strings.HasSuffix(trimmed, "D") {
+	if len(trimmed) > 1 && (strings.HasSuffix(trimmed, "d") || strings.HasSuffix(trimmed, "D")) {
 		daysStr := trimmed[:len(trimmed)-1]
-		if days, err := strconv.Atoi(daysStr); err == nil && days > 0 {
+		if isSignedIntString(daysStr) {
+			days, err := strconv.ParseInt(daysStr, 10, 64)
+			if err != nil {
+				if strings.HasPrefix(daysStr, "-") {
+					return time.Time{}, fmt.Errorf("la duración para --newer debe ser positiva: %q", newerStr)
+				}
+				return time.Time{}, fmt.Errorf("duración fuera de rango para --newer: %q", newerStr)
+			}
+			if days <= 0 {
+				return time.Time{}, fmt.Errorf("la duración para --newer debe ser positiva: %q", newerStr)
+			}
+			if days > maxCutoffDays {
+				return time.Time{}, fmt.Errorf("duración fuera de rango para --newer: %q", newerStr)
+			}
 			dur := time.Duration(days) * 24 * time.Hour
 			return now.Add(-dur), nil
 		}

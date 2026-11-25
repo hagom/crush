@@ -3720,6 +3720,145 @@ func TestLimitedBuffer_UTF8TruncationAndZeroMax(t *testing.T) {
 	}
 }
 
+func TestMemPoolSplitCutoffAndUniqueName_EdgeCases(t *testing.T) {
+	t.Run("GetMemLimit clamps MemAvailable 0 kB to 1 MiB instead of 1024 fallback", func(t *testing.T) {
+		origProc := procMeminfoPath
+		origV2Max := cgroupV2MemMax
+		origV1Lim := cgroupV1MemLimit
+		defer func() {
+			procMeminfoPath = origProc
+			cgroupV2MemMax = origV2Max
+			cgroupV1MemLimit = origV1Lim
+			resetMemLimitCache()
+		}()
+
+		tmp := t.TempDir()
+		memFile := filepath.Join(tmp, "meminfo")
+		if err := os.WriteFile(memFile, []byte("MemTotal: 8000000 kB\nMemAvailable: 0 kB\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		procMeminfoPath = memFile
+		cgroupV2MemMax = filepath.Join(tmp, "no_v2")
+		cgroupV1MemLimit = filepath.Join(tmp, "no_v1")
+		resetMemLimitCache()
+
+		if got := GetMemLimit(); got != 1 {
+			t.Errorf("GetMemLimit() with MemAvailable=0 kB = %d, want 1 MiB (got OOM-unsafe fallback)", got)
+		}
+	})
+
+	t.Run("AllocateThreadsProportionalWithCaps and DynamicThreadPool handle MaxInt64 and negative inputs", func(t *testing.T) {
+		got := AllocateThreadsProportionalWithCaps([]int64{math.MaxInt64, math.MaxInt64, 100}, 16, 1, []int{16, 16, 16})
+		if len(got) != 3 || got[0]+got[1]+got[2] != 16 || got[0] < 7 || got[1] < 7 {
+			t.Errorf("AllocateThreadsProportionalWithCaps(MaxInt64 overflow) = %v, want ~[8, 7, 1] summing to 16", got)
+		}
+
+		pool := NewDynamicThreadPool(2, 4, 1, 3, 1000, 2)
+		// Single-threaded format cap 1 must still cap at 1; negative fileSize must not inflate remainingBytes
+		th := pool.Acquire(-500, 1)
+		if th != 1 {
+			t.Errorf("pool.Acquire(-500, cap=1) = %d, want 1", th)
+		}
+		if pool.remainingBytes != 1000 {
+			t.Errorf("negative fileSize mutated remainingBytes to %d, want 1000", pool.remainingBytes)
+		}
+		pool.Release(-99)
+		if pool.availableTokens < 0 {
+			t.Errorf("negative Release corrupted availableTokens to %d", pool.availableTokens)
+		}
+	})
+
+	t.Run("globSplitParts handles bracket metacharacters, ignores .sha256 sidecars, and resolveSplitBase ignores parent .part dir", func(t *testing.T) {
+		tmp := t.TempDir()
+		// Create parent dir ending in .part1 AND a sibling file matching prefix before .part
+		siblingTrap := filepath.Join(tmp, "project")
+		if err := os.MkdirAll(siblingTrap, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		partDir := filepath.Join(tmp, "project.part1")
+		if err := os.MkdirAll(partDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		base := filepath.Join(partDir, "Game [USA].iso.zst")
+		p01 := base + ".part01"
+		p02 := base + ".part02"
+		p10 := base + ".part10"
+		pAlpha := base + ".part1a"
+		shaSidecar := p01 + ".sha256"
+
+		for _, f := range []string{base, p01, p02, p10, pAlpha, shaSidecar} {
+			if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if resolved := resolveSplitBase(base); resolved != base {
+			t.Errorf("resolveSplitBase(%q) = %q, matched parent .part1 dir!", base, resolved)
+		}
+		if resolvedPart := resolveSplitBase(p02); resolvedPart != base {
+			t.Errorf("resolveSplitBase(%q) = %q, want %q", p02, resolvedPart, base)
+		}
+
+		parts := globSplitParts(base)
+		want := []string{p01, p02, p10, pAlpha}
+		if strings.Join(parts, "|") != strings.Join(want, "|") {
+			t.Errorf("globSplitParts(%q) = %v, want %v", base, parts, want)
+		}
+	})
+
+	t.Run("ParseCutoffTime rejects 0d, -7d, and overflowing day durations", func(t *testing.T) {
+		now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+		for _, bad := range []string{"0d", "-7d"} {
+			if _, err := ParseCutoffTime(bad, "", now); err == nil || !strings.Contains(err.Error(), "positiva") {
+				t.Errorf("ParseCutoffTime(%q) err = %v, want 'positiva' error", bad, err)
+			}
+		}
+		got, err := ParseCutoffTime("150000d", "", now)
+		if err == nil && got.After(now) {
+			t.Errorf("ParseCutoffTime(\"150000d\") overflowed into future date %v (now=%v)", got, now)
+		}
+		if err == nil {
+			t.Errorf("ParseCutoffTime(\"150000d\") expected out-of-range error, got %v", got)
+		}
+	})
+
+	t.Run("GetUniqueName canonicalizes ./rel vs rel, preserves dotfiles, and handles empty ext", func(t *testing.T) {
+		tmp := t.TempDir()
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(origWd) }()
+
+		n1 := GetUniqueName("./samefile", "gz")
+		n2 := GetUniqueName("samefile", "gz")
+		if filepath.Clean(n1) == filepath.Clean(n2) {
+			t.Errorf("GetUniqueName('./samefile')=%q collided with GetUniqueName('samefile')=%q", n1, n2)
+		}
+
+		if err := os.WriteFile(".gz", []byte("dot"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dotFirst := GetUniqueName(".gz", "gz")
+		if dotFirst != ".gz.gz" {
+			t.Errorf("first GetUniqueName('.gz', 'gz') = %q, want '.gz.gz'", dotFirst)
+		}
+		dotSecond := GetUniqueName(".gz", "gz")
+		if dotSecond != ".gz_1.gz" {
+			t.Errorf("second GetUniqueName('.gz', 'gz') = %q, want '.gz_1.gz'", dotSecond)
+		}
+
+		noExt := GetUniqueName("plain_output", "")
+		if noExt != "plain_output" {
+			t.Errorf("GetUniqueName('plain_output', '') = %q, want 'plain_output'", noExt)
+		}
+	})
+}
+
 
 
 

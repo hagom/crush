@@ -229,7 +229,7 @@ func appendTarFilterFlags(args []string, opts CompressOptions) []string {
 		args = append(args, "--exclude="+excl)
 	}
 	if !opts.CutoffTime.IsZero() {
-		args = append(args, "--newer-mtime="+opts.CutoffTime.Format("2006-01-02 15:04:05"))
+		args = append(args, "--newer-mtime="+opts.CutoffTime.Format(time.RFC3339))
 	}
 	return args
 }
@@ -893,7 +893,7 @@ func compressToolName(f Format) string {
 	case Tar:
 		return "tar"
 	case Rar:
-		return rarBin()
+		return "rar"
 	default:
 		return ""
 	}
@@ -995,7 +995,10 @@ func buildCompressCmd(opts CompressOptions) *exec.Cmd {
 		if !hasTool("plzip") {
 			tool = "lzip"
 		}
-		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9)), "--threads=" + threadStr(opts.ThreadLimit)}
+		args := []string{"-c", fmt.Sprintf("-%d", fastOrSlow(opts, 9))}
+		if tool == "plzip" {
+			args = append(args, "--threads="+threadStr(opts.ThreadLimit))
+		}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		return execCommand(tool, args...)
 	case "lz4":
@@ -1124,17 +1127,18 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 			if fi, statErr := os.Stat(file); statErr == nil {
 				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", fi.Size()))
 			}
-			pvCmd := exec.Command("pv", pvArgs...)
+			pvCmd := execCommand("pv", pvArgs...)
 			pvCmd.Stdin = inFile
 
-			var err error
-			compressCmd.Stdin, err = pvCmd.StdoutPipe()
+			pvOut, err := pvCmd.StdoutPipe()
 			if err != nil {
 				return fmt.Errorf("Error creando pipe para pv: %w", err)
 			}
+			compressCmd.Stdin = pvOut
 			compressCmd.Stdout = writer
 
 			if err := pvCmd.Start(); err != nil {
+				_ = pvOut.Close()
 				return fmt.Errorf("Error iniciando pv: %w", err)
 			}
 
@@ -1143,7 +1147,11 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 			}
 
 			compressErr := augmentErr(compressCmd, compressCmd.Run())
-			pvCmd.Wait()
+			_ = pvOut.Close()
+			if compressErr != nil && pvCmd.Process != nil {
+				_ = pvCmd.Process.Kill()
+			}
+			_ = pvCmd.Wait()
 			if compressErr == nil && opts.Progress != nil {
 				opts.Progress.FileDone(outPath)
 			}
@@ -1574,7 +1582,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 		if opts.TotalSize > 0 {
 			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
 		}
-		pvCmd = exec.Command("pv", pvArgs...)
+		pvCmd = execCommand("pv", pvArgs...)
 	}
 
 	outFile, err := os.Create(outPath)
@@ -1615,12 +1623,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 		args = append(args, "-o", safeFlagArg(outPath))
 		compressCmd = execCommand("lrzip", args...)
 		pipeCmds := []*exec.Cmd{tarCmd}
-		if opts.Progress == nil && hasTool("pv") {
-			pvArgs := []string{"-f", "-B", "256k"}
-			if opts.TotalSize > 0 {
-				pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
-			}
-			pvCmd = exec.Command("pv", pvArgs...)
+		if pvCmd != nil {
 			pipeCmds = append(pipeCmds, pvCmd)
 		}
 		pipeCmds = append(pipeCmds, compressCmd)
@@ -1837,7 +1840,7 @@ func compress7z(files []string, outPath string, opts CompressOptions, fp *FilePr
 }
 
 func compressPlainTar(files []string, outPath string, opts CompressOptions, fp *FileProgress) error {
-	args := []string{"-cf", outPath}
+	args := []string{"-cf", safeTarArchiveArg(outPath)}
 	if opts.UseSparse() {
 		args = append(args, "--sparse")
 	}
@@ -1861,7 +1864,7 @@ func compressPlainTar(files []string, outPath string, opts CompressOptions, fp *
 }
 
 func compressRar(files []string, outPath string, opts CompressOptions, fp *FileProgress) error {
-	rar := rarBin()
+	rar := "rar"
 	args := []string{"a", "-m" + fmt.Sprintf("%d", fastOrSlow(opts, 5)), "-mt" + threadStr(opts.ThreadLimit)}
 	if opts.Password != "" {
 		args = append(args, "-p"+opts.Password)
@@ -2108,7 +2111,7 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		}
 
 	case info.Format == Rar:
-		tool := rarBin()
+		const tool = "rar"
 		if !hasTool(tool) {
 			return fmt.Errorf("no se encontró %s para actualizar archivo rar", tool)
 		}
@@ -2127,7 +2130,7 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		}
 
 	case info.Format == Tar && !info.IsStream():
-		args := []string{"-rf", archive}
+		args := []string{"-rf", safeTarArchiveArg(archive)}
 		if opts.UseSparse() {
 			args = append(args, "--sparse")
 		}
@@ -2161,7 +2164,7 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		}
 		tmpTar.Close()
 
-		tarArgs := []string{"-rf", tmpTarPath}
+		tarArgs := []string{"-rf", safeTarArchiveArg(tmpTarPath)}
 		if opts.UseSparse() {
 			tarArgs = append(tarArgs, "--sparse")
 		}

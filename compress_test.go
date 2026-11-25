@@ -3709,6 +3709,176 @@ func TestCompressAudit_MultiFormatPasswordSplitAndDirNames(t *testing.T) {
 	})
 }
 
+func TestCompressAudit_ExternalCommandHardening(t *testing.T) {
+	t.Run("lzip fallback omits unsupported --threads flag", func(t *testing.T) {
+		origLookPath := lookPath
+		defer func() { lookPath = origLookPath }()
+		lookPath = func(name string) (string, error) {
+			if name == "lzip" {
+				return "/usr/bin/lzip", nil
+			}
+			return "", os.ErrNotExist
+		}
+
+		cmd := buildCompressCmd(CompressOptions{Format: Lz, ThreadLimit: 4})
+		if filepath.Base(cmd.Path) != "lzip" && cmd.Args[0] != "lzip" {
+			t.Fatalf("expected lzip fallback, got %v", cmd.Args)
+		}
+		for _, a := range cmd.Args {
+			if strings.HasPrefix(a, "--threads") {
+				t.Errorf("serial lzip must not receive --threads flag, got %v", cmd.Args)
+			}
+		}
+	})
+
+	t.Run("compressRar and DoAppend use rar binary instead of unrar", func(t *testing.T) {
+		origLookPath := lookPath
+		defer func() { lookPath = origLookPath }()
+		lookPath = func(name string) (string, error) {
+			if name == "unrar" {
+				return "/usr/bin/unrar", nil
+			}
+			return "", os.ErrNotExist
+		}
+
+		if tool := compressToolName(Rar); tool != "rar" {
+			t.Errorf("compressToolName(Rar) = %q, want %q", tool, "rar")
+		}
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		var capturedName string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			capturedName = name
+			return mockExecCommand("mock-noop")
+		}
+
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "f.txt")
+		if err := os.WriteFile(src, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := compressRar([]string{src}, filepath.Join(tmpDir, "a.rar"), CompressOptions{Format: Rar, KeepOrig: true}, nil); err != nil {
+			t.Fatalf("compressRar failed: %v", err)
+		}
+		if capturedName != "rar" {
+			t.Errorf("compressRar executed %q, want %q", capturedName, "rar")
+		}
+
+		arch := filepath.Join(tmpDir, "existing.rar")
+		if err := os.WriteFile(arch, []byte("rar"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		capturedName = ""
+		if err := DoAppend(arch, []string{src}, CompressOptions{}); err == nil {
+			t.Errorf("DoAppend on .rar with only unrar installed should fail, got nil (invoked %q)", capturedName)
+		}
+	})
+
+	t.Run("tar archive paths starting with dash or containing colon are guarded", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+
+		var tarArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "tar" {
+				tarArgs = append([]string(nil), args...)
+				return mockExecCommand("mock-noop")
+			}
+			return origExec(name, args...)
+		}
+
+		for _, tc := range []struct {
+			name    string
+			outPath string
+			wantArg string
+		}{
+			{"leading dash", "-evil.tar", "./-evil.tar"},
+			{"colon remote host hazard", "backup:12:30.tar", "./backup:12:30.tar"},
+		} {
+			t.Run("plain_"+tc.name, func(t *testing.T) {
+				tarArgs = nil
+				if err := compressPlainTar([]string{"a.txt"}, tc.outPath, CompressOptions{Format: Tar}, nil); err != nil {
+					t.Fatalf("compressPlainTar failed: %v", err)
+				}
+				if len(tarArgs) < 2 || tarArgs[0] != "-cf" || tarArgs[1] != tc.wantArg {
+					t.Errorf("compressPlainTar args = %v, want -cf %q", tarArgs, tc.wantArg)
+				}
+			})
+		}
+
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		colonTar := "host:file.tar"
+		item := "a.txt"
+		if err := os.WriteFile(colonTar, []byte("tar"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(item, []byte("hello"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		tarArgs = nil
+		if err := DoAppend(colonTar, []string{item}, CompressOptions{}); err != nil {
+			t.Fatalf("DoAppend colon tar failed: %v", err)
+		}
+		if len(tarArgs) < 2 || tarArgs[0] != "-rf" || tarArgs[1] != "./host:file.tar" {
+			t.Errorf("DoAppend tar args = %v, want -rf ./host:file.tar", tarArgs)
+		}
+	})
+
+	t.Run("appendTarFilterFlags preserves timezone via RFC3339", func(t *testing.T) {
+		cutoff := time.Date(2026, 6, 15, 12, 30, 0, 0, time.UTC)
+		args := appendTarFilterFlags(nil, CompressOptions{CutoffTime: cutoff})
+		want := "--newer-mtime=2026-06-15T12:30:00Z"
+		if !containsArg(args, want) {
+			t.Errorf("appendTarFilterFlags = %v, want %q", args, want)
+		}
+	})
+
+	t.Run("compressSingleFile pv path uses execCommand and avoids deadlock on compressor failure", func(t *testing.T) {
+		origLookPath := lookPath
+		defer func() { lookPath = origLookPath }()
+		lookPath = func(name string) (string, error) {
+			return "/usr/bin/" + name, nil
+		}
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		pvUsedExecCommand := false
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "pv" {
+				pvUsedExecCommand = true
+				return mockExecCommand("mock-producer")
+			}
+			return mockExecCommand("mock-fail-compressor")
+		}
+
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "big.bin")
+		if err := os.WriteFile(src, bytes.Repeat([]byte("A"), 256*1024), 0644); err != nil {
+			t.Fatal(err)
+		}
+		out := filepath.Join(tmpDir, "big.bin.gz")
+
+		done := make(chan error, 1)
+		go func() {
+			done <- compressSingleFile(src, out, CompressOptions{Format: Gz, Progress: nil}, nil)
+		}()
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Errorf("expected compressor error, got nil")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("compressSingleFile deadlocked waiting for pv after compressor failed")
+		}
+		if !pvUsedExecCommand {
+			t.Errorf("compressSingleFile did not route pv through execCommand")
+		}
+	})
+}
+
 
 
 

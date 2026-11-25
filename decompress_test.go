@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3723,6 +3724,172 @@ func TestDecompressContainers_BlocksPreExistingDirSymlinkAndEscapingSymlinks(t *
 		}
 	})
 }
+
+func TestDecompress_HardenedFlagsDiagnosticsOverflowLrzAndSplitWriter(t *testing.T) {
+	t.Run("lrz safeFlagArg for -o and -- and uppercase LRZ", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		oldWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chdir(oldWd)
+
+		lrzUpper := "-dash.txt.LRZ"
+		if err := os.WriteFile(lrzUpper, []byte("stub"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		origExec := execCommand
+		origLook := lookPath
+		defer func() {
+			execCommand = origExec
+			lookPath = origLook
+		}()
+		lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+		var lrzArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "lrzip" {
+				lrzArgs = append([]string(nil), args...)
+			}
+			return mockExecCommand("mock-noop")
+		}
+
+		info := FormatInfo{Format: Lrz, Tool: "lrzip"}
+		if err := decompressSingle(lrzUpper, ".", info, DecompressOptions{
+			Force:    true,
+			Progress: NewProgressTracker(100, 1),
+		}, nil); err != nil {
+			t.Fatalf("decompressSingle(.LRZ) failed: %v", err)
+		}
+
+		gotOut := ""
+		for i := 0; i+1 < len(lrzArgs); i++ {
+			if lrzArgs[i] == "-o" {
+				gotOut = lrzArgs[i+1]
+				break
+			}
+		}
+		if gotOut != "./-dash.txt" {
+			t.Errorf("lrzip -o arg = %q, want %q (args=%v)", gotOut, "./-dash.txt", lrzArgs)
+		}
+		if lrzArgs[len(lrzArgs)-1] != "./-dash.txt.LRZ" {
+			t.Errorf("lrzip input arg = %q, want %q", lrzArgs[len(lrzArgs)-1], "./-dash.txt.LRZ")
+		}
+	})
+
+	t.Run("pipeCmdFor missing lz4 sets null stdin and safeFlagArg", func(t *testing.T) {
+		cmdLz4, c1 := pipeCmdForWithMem(FormatInfo{Format: Lz4, Tool: "lz4"}, "/nonexistent_crush_lz4_999.lz4", 1, 512)
+		if c1 != nil {
+			_ = c1.Close()
+		}
+		if cmdLz4.Stdin == nil {
+			t.Errorf("expected pipeCmdForWithMem to set null stdin when lz4 file open fails")
+		}
+
+		cmdGz, c2 := pipeCmdForWithMem(FormatInfo{Format: Gz, Tool: "gzip"}, "-dash.gz", 1, 512)
+		if c2 != nil {
+			_ = c2.Close()
+		}
+		if cmdGz.Args[len(cmdGz.Args)-1] != "./-dash.gz" {
+			t.Errorf("pipeCmdForWithMem arg = %q, want ./-dash.gz", cmdGz.Args[len(cmdGz.Args)-1])
+		}
+	})
+
+	t.Run("build7zExtractArgs includes -p- when empty and safeFlagArg dir", func(t *testing.T) {
+		args := build7zExtractArgs("-in.7z", "-out", DecompressOptions{}, "x")
+		hasPMinus, hasSafeOut := false, false
+		for _, a := range args {
+			if a == "-p-" {
+				hasPMinus = true
+			}
+			if a == "-o./-out" {
+				hasSafeOut = true
+			}
+		}
+		if !hasPMinus || !hasSafeOut {
+			t.Errorf("build7zExtractArgs = %v, want -p- and -o./-out", args)
+		}
+	})
+
+	t.Run("estimateFileNeeded avoids int64 overflow", func(t *testing.T) {
+		gotHuge := estimateFileNeeded("nonexistent.bin", math.MaxInt64)
+		if gotHuge != math.MaxInt64 {
+			t.Errorf("estimateFileNeeded(MaxInt64) = %d, want MaxInt64", gotHuge)
+		}
+		if got := estimateFileNeeded("nonexistent.bin", 100); got != 330 {
+			t.Errorf("estimateFileNeeded(100) = %d, want 330", got)
+		}
+	})
+
+	t.Run("preserves stderr diagnostics with Progress != nil", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		gzFile := filepath.Join(tmpDir, "bad.gz")
+		_ = os.WriteFile(gzFile, []byte("bad"), 0644)
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return mockExecCommand("mock-fail-compressor")
+		}
+
+		err := decompressSingle(gzFile, tmpDir, FormatInfo{Format: Gz, Tool: "gzip", PipeFlags: "-dc"}, DecompressOptions{
+			Force:    true,
+			Progress: NewProgressTracker(10, 1),
+		}, nil)
+		if err == nil || !strings.Contains(err.Error(), "compression stream corrupted") {
+			t.Errorf("expected stderr diagnostic in decompressSingle error, got: %v", err)
+		}
+
+		tarGz := filepath.Join(tmpDir, "bad.tar.gz")
+		_ = os.WriteFile(tarGz, []byte("bad"), 0644)
+		errTar := decompressTar(tarGz, tmpDir, FormatInfo{Format: Gz, IsTar: true, Tool: "gzip", PipeFlags: "-dc"}, DecompressOptions{
+			Force:    true,
+			Progress: NewProgressTracker(10, 1),
+		}, nil)
+		if errTar == nil || !strings.Contains(errTar.Error(), "compression stream corrupted") {
+			t.Errorf("expected stderr diagnostic in decompressTar error, got: %v", errTar)
+		}
+	})
+
+	t.Run("splitWriter guards non-positive splitSize and clears closed file on Create error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		f0, err := os.Create(filepath.Join(tmpDir, "zero.gz"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f0.Close()
+		sw0 := newSplitWriter(f0, 0, filepath.Join(tmpDir, "zero.gz"))
+		if _, err := sw0.Write([]byte("abc")); err == nil {
+			t.Errorf("expected error for splitSize <= 0, got nil")
+		}
+
+		subDir := filepath.Join(tmpDir, "sub")
+		if err := os.MkdirAll(subDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		base := filepath.Join(subDir, "p.gz")
+		f1, err := os.Create(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sw1 := newSplitWriter(f1, 1, base)
+		if err := os.RemoveAll(subDir); err != nil {
+			t.Fatal(err)
+		}
+		payload := make([]byte, 1024*1024+16)
+		if _, err := sw1.Write(payload); err == nil {
+			t.Fatalf("expected Write to fail when part01 parent dir removed")
+		}
+		if sw1.file != nil {
+			t.Errorf("expected sw1.file to be nil after closing old part and failing os.Create")
+		}
+	})
+}
+
 
 
 

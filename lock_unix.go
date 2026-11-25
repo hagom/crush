@@ -16,6 +16,19 @@ import (
 	"time"
 )
 
+func validateRegularLockFile(f *os.File, path string) (*os.File, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("archivo de bloqueo no es regular: %s", path)
+	}
+	return f, nil
+}
+
 func openLockFile(path string) (*os.File, error) {
 	if path == defaultLockFilePath {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -23,17 +36,21 @@ func openLockFile(path string) (*os.File, error) {
 		}
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 		if err == nil {
-			return f, nil
+			return validateRegularLockFile(f, path)
 		}
 		switch {
 		case errors.Is(err, fs.ErrPermission):
-			return os.OpenFile(path, os.O_RDONLY, 0)
+			f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+			if err != nil {
+				return nil, err
+			}
+			return validateRegularLockFile(f, path)
 		case errors.Is(err, fs.ErrNotExist):
-			f, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+			f, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 			if err == nil {
-				return f, nil
+				return validateRegularLockFile(f, path)
 			}
 			if !errors.Is(err, fs.ErrExist) {
 				return nil, err
@@ -71,8 +88,9 @@ func TryAcquireLock() (func(), error) {
 		}
 		return nil, fmt.Errorf("bloqueando %s: %w", lockFilePath, err)
 	}
+	_ = f.Chmod(0o600)
 	if err := f.Truncate(0); err == nil {
-		f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+		_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
 	}
 	var once sync.Once
 	return func() {

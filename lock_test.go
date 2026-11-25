@@ -403,3 +403,95 @@ func TestDefaultLockPath_NotSharedTmpAndPrivatePermissions(t *testing.T) {
 		}
 	})
 }
+
+func TestAcquireLock_SecurityHardening(t *testing.T) {
+	t.Run("rejects symlink without truncating target", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		victim := filepath.Join(tmpDir, "victim.txt")
+		const origContent = "critical data that must not be truncated"
+		if err := os.WriteFile(victim, []byte(origContent), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		symlinkLock := filepath.Join(tmpDir, "crush.lock")
+		if err := os.Symlink(victim, symlinkLock); err != nil {
+			t.Fatal(err)
+		}
+
+		old := lockFilePath
+		lockFilePath = symlinkLock
+		t.Cleanup(func() { lockFilePath = old })
+
+		release, err := TryAcquireLock()
+		if err == nil {
+			release()
+			t.Fatal("TryAcquireLock() must reject a symlink lock path")
+		}
+
+		got, readErr := os.ReadFile(victim)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(got) != origContent {
+			t.Fatalf("symlink target was modified/truncated: got %q, want %q", string(got), origContent)
+		}
+	})
+
+	t.Run("rejects dangling symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		target := filepath.Join(tmpDir, "nonexistent_target")
+		symlinkLock := filepath.Join(tmpDir, "dangling.lock")
+		if err := os.Symlink(target, symlinkLock); err != nil {
+			t.Fatal(err)
+		}
+
+		old := lockFilePath
+		lockFilePath = symlinkLock
+		t.Cleanup(func() { lockFilePath = old })
+
+		release, err := TryAcquireLock()
+		if err == nil {
+			release()
+			t.Fatal("TryAcquireLock() must reject a dangling symlink lock path")
+		}
+		if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
+			t.Fatalf("dangling symlink target should not be created")
+		}
+	})
+
+	t.Run("rejects directory as lock path", func(t *testing.T) {
+		dirLock := t.TempDir()
+		old := lockFilePath
+		lockFilePath = dirLock
+		t.Cleanup(func() { lockFilePath = old })
+
+		release, err := TryAcquireLock()
+		if err == nil {
+			release()
+			t.Fatal("TryAcquireLock() must reject a directory lock path")
+		}
+	})
+
+	t.Run("tightens permissive existing lock file to 0600", func(t *testing.T) {
+		p := useTempLockPath(t)
+		if err := os.WriteFile(p, []byte("999999\n"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0o666); err != nil {
+			t.Fatal(err)
+		}
+
+		release, err := TryAcquireLock()
+		if err != nil {
+			t.Fatalf("TryAcquireLock() failed on stale file: %v", err)
+		}
+		defer release()
+
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Errorf("lock file permissions = %04o, want 0600", perm)
+		}
+	})
+}

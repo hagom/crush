@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
@@ -3492,6 +3493,237 @@ func TestDecompressMemoryBudgetsAndCaps(t *testing.T) {
 		}
 	})
 }
+
+func TestDecompressContainers_BlocksPreExistingDirSymlinkAndEscapingSymlinks(t *testing.T) {
+	t.Run("RejectsPreExistingDirSymlinkForNewFilesAcrossAllContainers", func(t *testing.T) {
+		for _, force := range []bool{false, true} {
+			modeName := "NoForce"
+			if force {
+				modeName = "Force"
+			}
+			t.Run(modeName, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				srcDir := filepath.Join(tmpDir, "src")
+				if err := os.MkdirAll(filepath.Join(srcDir, "sub"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(srcDir, "sub", "new_pwned.txt"), []byte("PWNED"), 0644); err != nil {
+					t.Fatal(err)
+				}
+
+				type containerCase struct {
+					name       string
+					archive    string
+					build      func() error
+					hideSevenz bool
+					skip       bool
+				}
+
+				tarGz := filepath.Join(tmpDir, "c.tar.gz")
+				zipFile := filepath.Join(tmpDir, "c.zip")
+				szFile := filepath.Join(tmpDir, "c.7z")
+				rarFile := filepath.Join(tmpDir, "c.rar")
+
+				cases := []containerCase{
+					{
+						name:    "tar.gz",
+						archive: tarGz,
+						skip:    !hasTool("tar"),
+						build: func() error {
+							return exec.Command("tar", "-czf", tarGz, "-C", srcDir, "sub/new_pwned.txt").Run()
+						},
+					},
+					{
+						name:    "zip_7z",
+						archive: zipFile,
+						skip:    !hasTool(sevenzBin()),
+						build: func() error {
+							f, err := os.Create(zipFile)
+							if err != nil {
+								return err
+							}
+							zw := zip.NewWriter(f)
+							w, _ := zw.Create("sub/new_pwned.txt")
+							_, _ = w.Write([]byte("PWNED"))
+							_ = zw.Close()
+							return f.Close()
+						},
+					},
+					{
+						name:       "zip_unzip",
+						archive:    zipFile,
+						hideSevenz: true,
+						skip:       !hasTool("unzip"),
+						build:      func() error { return nil },
+					},
+					{
+						name:    "7z",
+						archive: szFile,
+						skip:    !hasTool(sevenzBin()),
+						build: func() error {
+							cmd := exec.Command(sevenzBin(), "a", szFile, "sub/new_pwned.txt")
+							cmd.Dir = srcDir
+							return cmd.Run()
+						},
+					},
+					{
+						name:    "rar",
+						archive: rarFile,
+						skip:    !hasTool("rar") || rarBin() != "rar",
+						build: func() error {
+							cmd := exec.Command("rar", "a", rarFile, "sub/new_pwned.txt")
+							cmd.Dir = srcDir
+							return cmd.Run()
+						},
+					},
+				}
+
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						if tc.skip {
+							t.Skipf("tool unavailable for %s", tc.name)
+						}
+						if err := tc.build(); err != nil {
+							t.Fatalf("build %s failed: %v", tc.name, err)
+						}
+						if tc.hideSevenz {
+							origLook := lookPath
+							defer func() { lookPath = origLook }()
+							lookPath = func(name string) (string, error) {
+								if strings.HasPrefix(name, "7z") {
+									return "", exec.ErrNotFound
+								}
+								return origLook(name)
+							}
+						}
+
+						outside := t.TempDir()
+						outDir := t.TempDir()
+						if err := os.Symlink(outside, filepath.Join(outDir, "sub")); err != nil {
+							t.Fatal(err)
+						}
+
+						err := DoDecompress([]string{tc.archive}, DecompressOptions{
+							OutputDir: outDir,
+							KeepOrig:  true,
+							Force:     force,
+						})
+						if err == nil {
+							t.Fatalf("%s (%s): expected error rejecting pre-existing dir symlink", tc.name, modeName)
+						}
+						if _, statErr := os.Lstat(filepath.Join(outside, "new_pwned.txt")); statErr == nil {
+							t.Fatalf("%s (%s): wrote new_pwned.txt outside extraction root via dir symlink!", tc.name, modeName)
+						}
+					})
+				}
+			})
+		}
+	})
+
+	t.Run("RejectsTraversalMemberUpfrontInZip", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		zipPath := filepath.Join(tmpDir, "trav.zip")
+		f, err := os.Create(zipPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(f)
+		w, _ := zw.Create("../escape.txt")
+		_, _ = w.Write([]byte("evil"))
+		_ = zw.Close()
+		_ = f.Close()
+
+		outDir := filepath.Join(tmpDir, "out")
+		err = DoDecompress([]string{zipPath}, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+		})
+		if err == nil {
+			t.Fatalf("expected DoDecompress to reject ../escape.txt in zip")
+		}
+		if _, statErr := os.Lstat(filepath.Join(tmpDir, "escape.txt")); statErr == nil {
+			t.Fatalf("escape.txt written outside outDir")
+		}
+		if _, statErr := os.Lstat(filepath.Join(outDir, "escape.txt")); statErr == nil {
+			t.Fatalf("traversal zip should be rejected before extracting escape.txt")
+		}
+	})
+
+	t.Run("BlocksEscapingArchiveSymlinksAndAllowsInRootRelativeSymlink", func(t *testing.T) {
+		if !hasTool("tar") {
+			t.Skip("tar not available")
+		}
+		tmpDir := t.TempDir()
+		outside := filepath.Join(tmpDir, "outside")
+		if err := os.MkdirAll(outside, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// 1. Escaping symlink in .tar -> rejected, symlink not left in outDir
+		badTar := filepath.Join(tmpDir, "bad_sym.tar")
+		{
+			f, _ := os.Create(badTar)
+			tw := tar.NewWriter(f)
+			_ = tw.WriteHeader(&tar.Header{
+				Name:     "evil_link",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "../../outside",
+				Mode:     0777,
+			})
+			_ = tw.Close()
+			_ = f.Close()
+		}
+		outBad := filepath.Join(tmpDir, "out_bad")
+		if err := DoDecompress([]string{badTar}, DecompressOptions{OutputDir: outBad, KeepOrig: true}); err == nil {
+			t.Fatalf("expected error for escaping symlink in tar")
+		}
+		if _, lerr := os.Lstat(filepath.Join(outBad, "evil_link")); lerr == nil {
+			t.Fatalf("escaping symlink left behind in outBad")
+		}
+
+		// 2. Escaping symlink in .zip -> rejected, symlink not left in outDir
+		badZip := filepath.Join(tmpDir, "bad_sym.zip")
+		{
+			f, _ := os.Create(badZip)
+			zw := zip.NewWriter(f)
+			h := &zip.FileHeader{Name: "zlink", Method: zip.Deflate}
+			h.SetMode(os.ModeSymlink | 0777)
+			w, _ := zw.CreateHeader(h)
+			_, _ = w.Write([]byte(outside))
+			_ = zw.Close()
+			_ = f.Close()
+		}
+		outBadZip := filepath.Join(tmpDir, "out_bad_zip")
+		if err := DoDecompress([]string{badZip}, DecompressOptions{OutputDir: outBadZip, KeepOrig: true}); err == nil {
+			t.Fatalf("expected error for escaping symlink in zip")
+		}
+		if _, lerr := os.Lstat(filepath.Join(outBadZip, "zlink")); lerr == nil {
+			t.Fatalf("escaping symlink left behind in outBadZip")
+		}
+
+		// 3. Valid relative in-root symlink in .tar -> succeeds
+		goodTar := filepath.Join(tmpDir, "good_sym.tar")
+		{
+			f, _ := os.Create(goodTar)
+			tw := tar.NewWriter(f)
+			_ = tw.WriteHeader(&tar.Header{Name: "sub/", Typeflag: tar.TypeDir, Mode: 0755})
+			_ = tw.WriteHeader(&tar.Header{Name: "sub/target.txt", Typeflag: tar.TypeReg, Mode: 0644, Size: 2})
+			_, _ = tw.Write([]byte("ok"))
+			_ = tw.WriteHeader(&tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "sub/target.txt", Mode: 0777})
+			_ = tw.Close()
+			_ = f.Close()
+		}
+		outGood := filepath.Join(tmpDir, "out_good")
+		if err := DoDecompress([]string{goodTar}, DecompressOptions{OutputDir: outGood, KeepOrig: true}); err != nil {
+			t.Fatalf("valid relative in-root symlink in tar failed: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(outGood, "link"))
+		if err != nil || string(got) != "ok" {
+			t.Errorf("valid in-root symlink unreadable: err=%v got=%q", err, string(got))
+		}
+	})
+}
+
 
 
 

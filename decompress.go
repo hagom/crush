@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"errors"
@@ -570,6 +571,144 @@ func topLevelArchiveEntry(member string) (string, bool) {
 	return rel, true
 }
 
+var errUnsafeArchiveMember = errors.New("ruta o enlace simbólico inseguro en archivo")
+
+func isSymlinkTargetWithinRoot(relSlash, target string) bool {
+	if target == "" || strings.ContainsRune(target, 0) {
+		return false
+	}
+	if filepath.IsAbs(target) || strings.HasPrefix(target, "/") || strings.HasPrefix(target, `\`) {
+		return false
+	}
+	normTarget := strings.ReplaceAll(target, "\\", "/")
+	parent := path.Dir(relSlash)
+	resolved := path.Clean(path.Join(parent, normTarget))
+	return resolved != ".." && !strings.HasPrefix(resolved, "../")
+}
+
+func validateZipSymlinkTargets(file string) error {
+	zr, err := zip.OpenReader(file)
+	if err != nil {
+		return nil
+	}
+	defer zr.Close()
+
+	for _, f := range zr.File {
+		if f.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		rel, ok := sanitizeArchiveRelPath(f.Name)
+		if !ok {
+			return fmt.Errorf("%w: %q", errUnsafeArchiveMember, f.Name)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		targetBytes, _ := io.ReadAll(io.LimitReader(rc, 4096))
+		_ = rc.Close()
+		target := strings.TrimRight(string(targetBytes), "\x00")
+		if !isSymlinkTargetWithinRoot(filepath.ToSlash(rel), target) {
+			return fmt.Errorf("%w: symlink %s -> %s escapa del directorio destino", errUnsafeArchiveMember, rel, target)
+		}
+	}
+	return nil
+}
+
+func prepareContainerOutputs(file, dir string, info FormatInfo, opts DecompressOptions) ([]string, []string, error) {
+	if info.Format == Zip {
+		if err := validateZipSymlinkTargets(file); err != nil {
+			return nil, nil, err
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Error abriendo directorio de salida: %w", err)
+	}
+	defer root.Close()
+
+	seenTop := make(map[string]bool)
+	checkedDirs := make(map[string]bool)
+	var outputs []string
+	var symlinkMembers []string
+	var secErr error
+
+	iterErr := IterArchiveMembers(file, opts.Password, func(m ArchiveMember) error {
+		rel, ok := sanitizeArchiveRelPath(m.Path)
+		if !ok {
+			secErr = fmt.Errorf("%w: ruta insegura %q", errUnsafeArchiveMember, m.Path)
+			return errStopIter
+		}
+		relSlash := filepath.ToSlash(rel)
+		parts := strings.Split(relSlash, "/")
+		prefixLimit := len(parts) - 1
+		if m.IsDir {
+			prefixLimit = len(parts)
+		}
+		curPrefix := ""
+		for i := 0; i < prefixLimit; i++ {
+			if i == 0 {
+				curPrefix = parts[0]
+			} else {
+				curPrefix += "/" + parts[i]
+			}
+			if checkedDirs[curPrefix] {
+				continue
+			}
+			checkedDirs[curPrefix] = true
+			if fi, lerr := root.Lstat(filepath.FromSlash(curPrefix)); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+				secErr = fmt.Errorf("%w: rechazando extracción a través de symlink existente %s", errUnsafeArchiveMember, filepath.Join(dir, filepath.FromSlash(curPrefix)))
+				return errStopIter
+			}
+		}
+		if !m.IsDir && !opts.Force && !opts.Resume {
+			if fi, lerr := root.Lstat(rel); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+				secErr = fmt.Errorf("%w: rechazando escritura sobre symlink existente %s", errUnsafeArchiveMember, filepath.Join(dir, rel))
+				return errStopIter
+			}
+		}
+		if m.Mode&os.ModeSymlink != 0 {
+			symlinkMembers = append(symlinkMembers, rel)
+		}
+		top := parts[0]
+		if top != "" && top != "." && top != ".." && !seenTop[top] {
+			seenTop[top] = true
+			outputs = append(outputs, filepath.Join(dir, top))
+		}
+		return nil
+	})
+	if secErr != nil {
+		return nil, nil, secErr
+	}
+	if len(outputs) == 0 && iterErr != nil {
+		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
+		return nil, nil, nil
+	}
+	return outputs, symlinkMembers, nil
+}
+
+func verifyExtractedSymlinksInRoot(dir string, symlinkMembers []string) error {
+	if len(symlinkMembers) == 0 {
+		return nil
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	for _, rel := range symlinkMembers {
+		target, err := root.Readlink(rel)
+		if err != nil {
+			continue
+		}
+		if !isSymlinkTargetWithinRoot(filepath.ToSlash(rel), target) {
+			_ = root.Remove(rel)
+			return fmt.Errorf("%w: symlink %s -> %s escapa del directorio destino", errUnsafeArchiveMember, rel, target)
+		}
+	}
+	return nil
+}
+
 func listTopLevelContainerOutputs(file string, dir string, password string) []string {
 	seen := make(map[string]bool)
 	var outputs []string
@@ -606,17 +745,24 @@ func newTarTopLevelTracker(out io.Writer) *tarTopLevelTracker {
 	}
 }
 
+func (t *tarTopLevelTracker) recordTopLevelLocked(top string) {
+	if top == "" || top == "." || top == ".." || t.seen[top] {
+		return
+	}
+	t.seen[top] = true
+	t.topList = append(t.topList, top)
+}
+
 func (t *tarTopLevelTracker) recordLineLocked(raw string) {
 	line := strings.TrimSpace(raw)
 	if line == "" {
 		return
 	}
 	top, ok := topLevelArchiveEntry(line)
-	if !ok || t.seen[top] {
+	if !ok {
 		return
 	}
-	t.seen[top] = true
-	t.topList = append(t.topList, top)
+	t.recordTopLevelLocked(top)
 }
 
 func (t *tarTopLevelTracker) Write(p []byte) (int, error) {
@@ -850,6 +996,7 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 
 	isTar := info.IsTar || info.Format == Tar
 	var outputs []string
+	var symlinkMembers []string
 	var preExisting map[string]bool
 	var preExistingTop map[string]bool
 	var tarTracker *tarTopLevelTracker
@@ -880,7 +1027,11 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 			}
 		}
 	} else {
-		outputs = listTopLevelContainerOutputs(file, dir, opts.Password)
+		var prepErr error
+		outputs, symlinkMembers, prepErr = prepareContainerOutputs(file, dir, info, opts)
+		if prepErr != nil {
+			return prepErr
+		}
 		if len(outputs) > 0 && fp != nil {
 			fp.SetOutPath(outputs[0])
 		}
@@ -903,6 +1054,9 @@ func decompressFile(file string, opts DecompressOptions, fp *FileProgress) error
 		}
 	} else {
 		err = decompressSingle(file, dir, info, opts, fp)
+		if err == nil {
+			err = verifyExtractedSymlinksInRoot(dir, symlinkMembers)
+		}
 	}
 
 	if err != nil {
@@ -1026,10 +1180,138 @@ func build7zExtractArgs(file, dir string, opts DecompressOptions, baseFlags ...s
 	return args
 }
 
+func validateStageEntryAgainstRoot(stageDir, dir string, root *os.Root, opts DecompressOptions) ([]string, error) {
+	topEntries, err := os.ReadDir(stageDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(topEntries) == 0 {
+		return nil, nil
+	}
+
+	var topNames []string
+	for _, e := range topEntries {
+		topNames = append(topNames, e.Name())
+	}
+
+	err = filepath.WalkDir(stageDir, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(stageDir, p)
+		if err != nil || rel == "." {
+			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		if _, ok := sanitizeArchiveRelPath(relSlash); !ok {
+			return fmt.Errorf("%w: ruta insegura %q", errUnsafeArchiveMember, rel)
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(p)
+			if err != nil || !isSymlinkTargetWithinRoot(relSlash, target) {
+				return fmt.Errorf("%w: symlink %s -> %s escapa del directorio destino", errUnsafeArchiveMember, rel, target)
+			}
+		}
+		destInfo, lerr := root.Lstat(rel)
+		if lerr != nil {
+			if !errors.Is(lerr, os.ErrNotExist) {
+				return lerr
+			}
+			return nil
+		}
+		if destInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: rechazando escritura sobre symlink existente %s", errUnsafeArchiveMember, filepath.Join(dir, rel))
+		}
+		if d.IsDir() {
+			if !destInfo.IsDir() && !opts.Force && !opts.Resume {
+				return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", filepath.Join(dir, rel))
+			}
+			return nil
+		}
+		if destInfo.IsDir() {
+			return fmt.Errorf("no se puede sobrescribir directorio existente %s con archivo", filepath.Join(dir, rel))
+		}
+		if !opts.Force && !opts.Resume {
+			return fmt.Errorf("el archivo de salida %s ya existe (use --force para sobrescribir)", filepath.Join(dir, rel))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return topNames, nil
+}
+
+func mergeStageNode(stageDir, dir, rel string, root *os.Root) error {
+	srcPath := filepath.Join(stageDir, rel)
+	dstPath := filepath.Join(dir, rel)
+
+	destInfo, lerr := root.Lstat(rel)
+	if errors.Is(lerr, os.ErrNotExist) {
+		return os.Rename(srcPath, dstPath)
+	}
+	if lerr != nil {
+		return lerr
+	}
+	srcInfo, err := os.Lstat(srcPath)
+	if err != nil {
+		return err
+	}
+	if srcInfo.IsDir() && destInfo.IsDir() {
+		children, err := os.ReadDir(srcPath)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := mergeStageNode(stageDir, dir, filepath.Join(rel, child.Name()), root); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := root.RemoveAll(rel); err != nil {
+		return err
+	}
+	return os.Rename(srcPath, dstPath)
+}
+
+func mergeTarStageIntoDir(stageDir, dir string, opts DecompressOptions, tracker *tarTopLevelTracker) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("Error abriendo directorio de salida: %w", err)
+	}
+	defer root.Close()
+
+	topNames, err := validateStageEntryAgainstRoot(stageDir, dir, root, opts)
+	if err != nil {
+		return err
+	}
+	for _, top := range topNames {
+		if err := mergeStageNode(stageDir, dir, top, root); err != nil {
+			return err
+		}
+		if tracker != nil {
+			tracker.mu.Lock()
+			tracker.recordTopLevelLocked(top)
+			tracker.mu.Unlock()
+		}
+	}
+	return nil
+}
+
 func decompressTar(file string, dir string, info FormatInfo, opts DecompressOptions, fp *FileProgress, trackers ...*tarTopLevelTracker) error {
 	if info.Tool == "" {
 		return fmt.Errorf("No se detectó herramienta para: %s", file)
 	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("Error creando directorio de salida: %w", err)
+	}
+	stageDir, err := os.MkdirTemp(dir, ".crush-stage-*")
+	if err != nil {
+		return fmt.Errorf("Error creando directorio temporal de extracción: %w", err)
+	}
+	defer os.RemoveAll(stageDir)
 
 	WriteLogf("  → %s/\n", dir)
 
@@ -1041,17 +1323,20 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 	}
 
 	if strings.HasSuffix(strings.ToLower(file), ".tar") {
-		tarExtract := execCommand("tar", buildTarExtractArgs(file, dir, opts)...)
+		tarExtract := execCommand("tar", buildTarExtractArgs(file, stageDir, opts)...)
 		tarExtract.Stdout = tracker
 		tarExtract.Stderr = stderrFor(opts.Progress)
 		if err := augmentErr(tarExtract, tarExtract.Run()); err != nil {
+			return fmt.Errorf("Error extrayendo %s: %w", file, err)
+		}
+		if err := mergeTarStageIntoDir(stageDir, dir, opts, tracker); err != nil {
 			return fmt.Errorf("Error extrayendo %s: %w", file, err)
 		}
 		return nil
 	}
 
 	parts := findSplitParts(file)
-	tarExtract := execCommand("tar", buildTarExtractArgs("-", dir, opts)...)
+	tarExtract := execCommand("tar", buildTarExtractArgs("-", stageDir, opts)...)
 	budget := effectiveDecompressMemBudget(opts.MemBudgetMB)
 
 	if len(parts) == 1 && opts.Progress == nil && hasTool("pv") {
@@ -1083,6 +1368,9 @@ func decompressTar(file string, dir string, info FormatInfo, opts DecompressOpti
 		}
 	}
 
+	if err := mergeTarStageIntoDir(stageDir, dir, opts, tracker); err != nil {
+		return fmt.Errorf("Error extrayendo %s: %w", file, err)
+	}
 	return nil
 }
 

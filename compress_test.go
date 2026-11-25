@@ -3879,6 +3879,214 @@ func TestCompressAudit_ExternalCommandHardening(t *testing.T) {
 	})
 }
 
+func TestCompressAudit_DryRunResumePipesAndSymlinkSafety(t *testing.T) {
+	t.Run("DryRun with Resume never deletes corrupt files on disk and releases reserved names", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		f1 := filepath.Join(tmpDir, "a.txt")
+		f2 := filepath.Join(tmpDir, "b.txt")
+		if err := os.WriteFile(f1, []byte("alpha"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f2, []byte("beta"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		corrupt := filepath.Join(tmpDir, "a.txt.gz")
+		if err := os.WriteFile(corrupt, []byte("TRUNCATED"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := DoCompress([]string{f1, f2}, CompressOptions{
+			Format:    Gz,
+			OutputDir: tmpDir,
+			DryRun:    true,
+			Resume:    true,
+			KeepOrig:  true,
+		}); err != nil {
+			t.Fatalf("DoCompress dry-run resume failed: %v", err)
+		}
+		if _, err := os.Stat(corrupt); err != nil {
+			t.Errorf("DryRun with Resume deleted existing file %s on disk: %v", corrupt, err)
+		}
+
+		// Also verify DryRun without Resume does not leak reserved names into subsequent real runs
+		subOut := filepath.Join(tmpDir, "dry_release")
+		if _, err := DoCompress([]string{f1}, CompressOptions{
+			Format:    Gz,
+			OutputDir: subOut,
+			DryRun:    true,
+			KeepOrig:  true,
+		}); err != nil {
+			t.Fatalf("DoCompress dry-run failed: %v", err)
+		}
+		realOut, err := DoCompress([]string{f1}, CompressOptions{
+			Format:    Gz,
+			OutputDir: subOut,
+			DryRun:    false,
+			KeepOrig:  true,
+		})
+		if err != nil {
+			t.Fatalf("real DoCompress after dry-run failed: %v", err)
+		}
+		want := filepath.Join(subOut, "a.txt.gz")
+		if len(realOut) != 1 || realOut[0] != want {
+			t.Errorf("DryRun leaked reserved name: real run got %v, want [%s]", realOut, want)
+		}
+	})
+
+	t.Run("compressTarPipe lrz does not pipe lrzip stdout into outPath", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "file.txt")
+		if err := os.WriteFile(src, []byte("hello"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		outPath := filepath.Join(tmpDir, "out.tar.lrz")
+
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "lrzip" {
+				// Simulate lrzip draining stdin, writing archive to -o path, and printing progress to stdout
+				return exec.Command("sh", "-c", `cat >/dev/null; printf 'LRZIP_ARCHIVE_BYTES' > "$1"; printf 'Total: 100%%\n'`, "sh", outPath)
+			}
+			return origExec(name, args...)
+		}
+
+		if err := compressTarPipe([]string{src}, outPath, CompressOptions{Format: Lrz}, nil); err != nil {
+			t.Fatalf("compressTarPipe(Lrz) failed: %v", err)
+		}
+		got, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("reading %s: %v", outPath, err)
+		}
+		if string(got) != "LRZIP_ARCHIVE_BYTES" {
+			t.Errorf("lrzip stdout corrupted outPath: got %q, want %q", string(got), "LRZIP_ARCHIVE_BYTES")
+		}
+	})
+
+	t.Run("compressTarPipe reaps tar process when compressor Start fails", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+
+		var tarCmd *exec.Cmd
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "tar" {
+				tarCmd = mockExecCommand("mock-producer")
+				return tarCmd
+			}
+			return exec.Command("/nonexistent-compressor-binary-for-test")
+		}
+
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "f.txt")
+		if err := os.WriteFile(src, []byte("hello"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		outPath := filepath.Join(tmpDir, "out.tar.gz")
+		pt := NewProgressTracker(5, 1)
+
+		err := compressTarPipe([]string{src}, outPath, CompressOptions{Format: Gz, Progress: pt}, nil)
+		if err == nil {
+			t.Fatal("expected error when compressor fails to start")
+		}
+		if tarCmd == nil || tarCmd.ProcessState == nil {
+			t.Errorf("tar producer was not reaped via Wait() after compressor Start failure (zombie leak)")
+		}
+	})
+
+	t.Run("compressSingleFile lrz with nil Progress does not mark FileProgress as error on success", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return mockExecCommand("mock-noop")
+		}
+
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "f.txt")
+		if err := os.WriteFile(src, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		fp := &FileProgress{Name: "f.txt", Size: 4}
+		fp.SetStatus("active")
+
+		if err := compressSingleFile(src, filepath.Join(tmpDir, "f.txt.lrz"), CompressOptions{Format: Lrz, Progress: nil}, fp); err != nil {
+			t.Fatalf("compressSingleFile(Lrz) failed: %v", err)
+		}
+		if fp.Status() == "error" {
+			t.Errorf("FileProgress status = %q after successful lrz compression, should not be error", fp.Status())
+		}
+	})
+
+	t.Run("DoAppend tar.gz ignores pre-planted .crush_tmp symlink", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		f1 := filepath.Join(tmpDir, "a.txt")
+		f2 := filepath.Join(tmpDir, "b.txt")
+		victim := filepath.Join(tmpDir, "victim.txt")
+		if err := os.WriteFile(f1, []byte("one"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f2, []byte("two"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(victim, []byte("DO_NOT_OVERWRITE"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		out, err := DoCompress([]string{f1}, CompressOptions{Format: Gz, OutputDir: tmpDir, Combine: true, KeepOrig: true})
+		if err != nil || len(out) == 0 {
+			t.Fatalf("setup tar.gz failed: %v", err)
+		}
+		tarGz := out[0]
+
+		// Plant symlink at predictable archive + ".crush_tmp"
+		if err := os.Symlink(victim, tarGz+".crush_tmp"); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		if err := DoAppend(tarGz, []string{f2}, CompressOptions{}); err != nil {
+			t.Fatalf("DoAppend tar.gz failed: %v", err)
+		}
+		gotVictim, err := os.ReadFile(victim)
+		if err != nil {
+			t.Fatalf("reading victim: %v", err)
+		}
+		if string(gotVictim) != "DO_NOT_OVERWRITE" {
+			t.Errorf("DoAppend followed predictable .crush_tmp symlink and overwrote victim file!")
+		}
+	})
+
+	t.Run("compressParallelTasks excludes failed outputs from returned outPaths", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod 000 does not block root")
+		}
+		tmpDir := t.TempDir()
+		good := filepath.Join(tmpDir, "good.txt")
+		bad := filepath.Join(tmpDir, "bad.txt")
+		if err := os.WriteFile(good, []byte("ok"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bad, []byte("no"), 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(bad, 0644) })
+
+		outPaths, err := DoCompress([]string{good, bad}, CompressOptions{
+			Format:    Gz,
+			OutputDir: tmpDir,
+			KeepOrig:  true,
+			Parallel:  2,
+		})
+		if err == nil {
+			t.Fatal("expected error for unreadable file")
+		}
+		for _, p := range outPaths {
+			if strings.Contains(p, "bad.txt") {
+				t.Errorf("failed output %s should not be returned in outPaths: %v", p, outPaths)
+			}
+		}
+	})
+}
+
 
 
 

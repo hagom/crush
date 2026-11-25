@@ -95,13 +95,22 @@ var DefaultCleanExcludes = []string{
 }
 
 type CompressionTask struct {
-	ID        int
-	File      string
-	Format    Format
-	Size      int64
-	ThreadCap int
-	OutPath   string
-	Skipped   bool
+	ID              int
+	File            string
+	Format          Format
+	Size            int64
+	ThreadCap       int
+	OutPath         string
+	Skipped         bool
+	RemoveBeforeRun bool
+}
+
+func removeArchiveAndParts(path string) bool {
+	removed := os.Remove(path) == nil
+	for _, p := range globSplitParts(path) {
+		_ = os.Remove(p)
+	}
+	return removed
 }
 
 func FormatComplexityWeight(f Format) int64 {
@@ -363,24 +372,22 @@ func generateCompressionTasks(items []string, opts CompressOptions) ([]Compressi
 
 			var outPath string
 			if opts.Resume {
-				canonicalPath := splitOutPath(filepath.Join(targetDir, baseName+"."+ext), fileOpts)
-				if _, err := os.Stat(canonicalPath); err == nil {
+				canonicalPath := filepath.Join(targetDir, baseName+"."+ext)
+				if info, err := os.Lstat(canonicalPath); err == nil && !info.IsDir() {
 					status, testErr := testArchiveIntegrity(canonicalPath, TestOptions{Quick: true, Password: opts.Password})
 					if testErr == nil && status == "OK" {
 						task.OutPath = canonicalPath
 						task.Skipped = true
 						WriteLogf("%sℹ [reanudado] '%s' ya existe y es válido; omitiendo compresión.%s\n", Blue, canonicalPath, NC)
 					} else {
-						_ = os.RemoveAll(canonicalPath)
-						WriteLogf("%s⚠ [reanudando] '%s' existe pero está incompleto o corrupto; recomprimiendo.%s\n", Yellow, canonicalPath, NC)
 						task.OutPath = canonicalPath
+						task.RemoveBeforeRun = true
 					}
 				} else {
 					task.OutPath = canonicalPath
 				}
 			} else {
 				outPath = GetUniqueName(filepath.Join(targetDir, baseName), ext)
-				outPath = splitOutPath(outPath, fileOpts)
 				task.OutPath = outPath
 			}
 
@@ -406,6 +413,7 @@ func compressStream(r io.Reader, w io.Writer, opts CompressOptions) error {
 }
 
 func DoCompress(items []string, opts CompressOptions) (outPaths []string, err error) {
+	CompressCleanupFiles = nil
 	var outPath string
 	if len(items) == 0 && opts.FromFile == "" {
 		return nil, fmt.Errorf("No se especificaron archivos. Use -i archivo o pase archivos como argumento")
@@ -543,12 +551,17 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 			WriteLogf("%s[Simulacro] Modo: %s (%d tareas × %d núcleos)%s\n", Blue, mode, len(tasks), NCPU(), NC)
 			for _, t := range tasks {
 				WriteLogf("%s[Simulacro]   %s → %s [%s]%s\n", Blue, t.File, t.OutPath, t.Format, NC)
+				if !opts.Resume {
+					ReleaseReservedName(t.OutPath)
+				}
 			}
 		} else {
-			WriteLogf("%s[Simulacro] Salida: %s%s\n", Blue, calcOutPath(), NC)
-			if opts.Format == Gz || opts.Format == Xz || opts.Format == Bz2 ||
-				opts.Format == Bz3 || opts.Format == Zst || opts.Format == Lz ||
-				opts.Format == Lrz || opts.Format == Lz4 || opts.Format == Br {
+			simOut := calcOutPath()
+			if !opts.Resume {
+				ReleaseReservedName(simOut)
+			}
+			WriteLogf("%s[Simulacro] Salida: %s%s\n", Blue, simOut, NC)
+			if opts.Format.IsStream() {
 				if singleItem && !singleIsDir {
 					WriteLogf("%s[Simulacro] Formato: %s (1 archivo → 1 archivo comprimido)%s\n", Blue, opts.Format, NC)
 				} else {
@@ -676,12 +689,8 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 			WriteLogf("%sComprimiendo %d tarea(s) en paralelo...%s\n", Bold, len(tasks), NC)
 			WriteLogf("  Formatos: %s\n", strings.Join(fmtSummary, ", "))
 		} else {
-			parFormat := opts.Format.String()
-			if opts.Format == SevenZ {
-				parFormat = "7z"
-			}
 			WriteLogf("%sComprimiendo %d archivo(s) en paralelo...%s\n", Bold, len(files), NC)
-			WriteLogf("  Formato: %s\n", parFormat)
+			WriteLogf("  Formato: %s\n", opts.Format.String())
 			WriteLogf("  Modo: %s\n", compressModeDesc(opts.Format))
 		}
 		WriteLogf("\n")
@@ -710,15 +719,15 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	if cap := resolveThreadCapForBudget(opts.Format, totalSize, opts.MemBudgetMB); opts.ThreadLimit <= 0 || cap < opts.ThreadLimit {
 		opts.ThreadLimit = cap
 	}
-	realOut := splitOutPath(outPath, opts)
+	realOut := outPath
 	if opts.Resume {
-		if _, err := os.Stat(realOut); err == nil {
+		if info, err := os.Lstat(realOut); err == nil && !info.IsDir() {
 			status, testErr := testArchiveIntegrity(realOut, TestOptions{Quick: true, Password: opts.Password})
 			if testErr == nil && status == "OK" {
 				WriteLogf("%sℹ [reanudado] '%s' ya existe y es válido; omitiendo compresión.%s\n", Blue, realOut, NC)
 				return []string{realOut}, nil
 			}
-			_ = os.RemoveAll(realOut)
+			removeArchiveAndParts(realOut)
 			WriteLogf("%s⚠ [reanudando] '%s' existe pero está incompleto o corrupto; recomprimiendo.%s\n", Yellow, realOut, NC)
 		}
 	}
@@ -737,7 +746,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	pt.Start()
 	defer pt.Stop()
 
-	_, preExistErr := os.Stat(realOut)
+	_, preExistErr := os.Lstat(realOut)
 	if singleItem {
 		err = compressSingleFile(files[0], outPath, opts, nil, totalSize)
 	} else {
@@ -745,21 +754,23 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	}
 	if err != nil {
 		if preExistErr != nil {
-			if rmErr := os.Remove(realOut); rmErr == nil {
+			if removeArchiveAndParts(realOut) {
 				WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, realOut, NC)
 			}
 			if opts.SplitSize > 0 {
 				_ = os.Remove(filepath.Dir(outPath))
 			}
+			ReleaseReservedName(outPath)
 		}
 		return nil, err
 	}
 
 	elapsed := time.Since(startTime)
 
+	allOutParts := append([]string{realOut}, globSplitParts(realOut)...)
 	var primaryHash string
 	if opts.Hash {
-		for _, p := range append([]string{realOut}, globSplitParts(realOut)...) {
+		for _, p := range allOutParts {
 			h, err := WriteSHA256File(p)
 			if err == nil && p == realOut {
 				primaryHash = h
@@ -768,12 +779,7 @@ func DoCompress(items []string, opts CompressOptions) (outPaths []string, err er
 	}
 
 	origSize := totalSize
-	finalSize := int64(0)
-	for _, p := range append([]string{realOut}, globSplitParts(realOut)...) {
-		if info, err := os.Stat(p); err == nil {
-			finalSize += info.Size()
-		}
-	}
+	finalSize := PartsTotalSize(allOutParts)
 
 	WriteLogf("\n")
 	WriteLogf("%s=== Reporte de Compresión ===%s\n", Green, NC)
@@ -854,10 +860,6 @@ func expandGlobs(items []string) []string {
 		result = append(result, matches...)
 	}
 	return result
-}
-
-func splitOutPath(outPath string, opts CompressOptions) string {
-	return outPath
 }
 
 func compressToolName(f Format) string {
@@ -1083,8 +1085,10 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 				WriteLogf("  $ lrzip %s\n", strings.Join(args, " "))
 			}
 			err := augmentErr(cmd, cmd.Run())
-			if err == nil && opts.Progress != nil {
-				opts.Progress.FileDone(outPath)
+			if err == nil {
+				if opts.Progress != nil {
+					opts.Progress.FileDone(outPath)
+				}
 				if fp != nil {
 					fp.SetStatus("done")
 				}
@@ -1104,15 +1108,17 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 		if err != nil {
 			return fmt.Errorf("Error creando %s: %w", outPath, err)
 		}
-		defer outFile.Close()
 
-		var writer io.Writer = outFile
+		var writer io.WriteCloser = outFile
 		if opts.SplitSize > 0 {
 			writer = newSplitWriter(outFile, opts.SplitSize, outPath)
 		}
-		if closer, ok := writer.(io.Closer); ok {
-			defer closer.Close()
-		}
+		writerClosed := false
+		defer func() {
+			if !writerClosed {
+				_ = writer.Close()
+			}
+		}()
 
 		var inReader io.Reader = inFile
 		if opts.Progress != nil {
@@ -1152,10 +1158,15 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 				_ = pvCmd.Process.Kill()
 			}
 			_ = pvCmd.Wait()
-			if compressErr == nil && opts.Progress != nil {
-				opts.Progress.FileDone(outPath)
+			writerClosed = true
+			closeErr := writer.Close()
+			if compressErr != nil {
+				return compressErr
 			}
-			return compressErr
+			if closeErr != nil {
+				return fmt.Errorf("Error cerrando %s: %w", outPath, closeErr)
+			}
+			return nil
 		}
 
 		compressCmd.Stdin = inReader
@@ -1166,10 +1177,18 @@ func compressSingleFile(file, outPath string, opts CompressOptions, fp *FileProg
 		}
 
 		err = augmentErr(compressCmd, compressCmd.Run())
-		if err == nil && opts.Progress != nil {
+		writerClosed = true
+		closeErr := writer.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return fmt.Errorf("Error cerrando %s: %w", outPath, closeErr)
+		}
+		if opts.Progress != nil {
 			opts.Progress.FileDone(outPath)
 		}
-		return err
+		return nil
 	}
 
 	switch opts.Format {
@@ -1438,28 +1457,35 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 				pendingTasks[t.File].Add(-1)
 				return
 			}
+			if t.RemoveBeforeRun {
+				removeArchiveAndParts(outPath)
+				WriteLogf("%s⚠ [reanudando] '%s' existe pero está incompleto o corrupto; recomprimiendo.%s\n", Yellow, outPath, NC)
+			}
 			fp.SetOutPath(outPath)
-
-			mu.Lock()
-			outFiles = append(outFiles, outPath)
-			mu.Unlock()
 
 			if opts.Verbose {
 				WriteLogf("  %s → %s (formato: %s, hilos: %d)\n", t.File, outPath, t.Format, th)
 			}
 
-			_, preExistErr := os.Stat(outPath)
+			_, preExistErr := os.Lstat(outPath)
 			err := compressSingleFile(t.File, outPath, fileOpts, fp, t.Size)
 			if err != nil {
 				fp.SetStatus("error")
 				failedFiles.Store(t.File, true)
 				if preExistErr != nil {
-					if rmErr := os.Remove(outPath); rmErr == nil {
+					if removeArchiveAndParts(outPath) {
 						WriteLogf("  %sSalida parcial eliminada: %s%s\n", Yellow, outPath, NC)
 					}
+					if fileOpts.SplitSize > 0 {
+						_ = os.Remove(filepath.Dir(outPath))
+					}
+					ReleaseReservedName(outPath)
 				}
 				errCh <- fmt.Errorf("%s [%s]: %w", t.File, t.Format, err)
 			} else {
+				mu.Lock()
+				outFiles = append(outFiles, outPath)
+				mu.Unlock()
 				allOutParts := append([]string{outPath}, globSplitParts(outPath)...)
 				if opts.Hash {
 					for _, p := range allOutParts {
@@ -1467,13 +1493,7 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 					}
 				}
 				totalOrigBytes.Add(t.Size)
-				var finalSize int64
-				for _, p := range allOutParts {
-					if info, err := os.Stat(p); err == nil {
-						finalSize += info.Size()
-					}
-				}
-				totalFinalBytes.Add(finalSize)
+				totalFinalBytes.Add(PartsTotalSize(allOutParts))
 				fp.SetStatus("done")
 			}
 
@@ -1517,11 +1537,7 @@ func compressParallelTasks(tasks []CompressionTask, opts CompressOptions, precal
 		WriteLogf("%sFormatos:%s          %s%s%s\n", Blue, NC, Yellow, strings.Join(fmtSummary, ", "), NC)
 		WriteLogf("%sTareas:%s            %s%d%s\n", Blue, NC, Bold, len(tasks), NC)
 	} else {
-		ext := tasks[0].Format.String()
-		if tasks[0].Format == SevenZ {
-			ext = "7z"
-		}
-		WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, ext, NC)
+		WriteLogf("%sFormato:%s           %s%s%s\n", Blue, NC, Yellow, tasks[0].Format.String(), NC)
 		WriteLogf("%sArchivos:%s          %s%d%s\n", Blue, NC, Bold, len(tasks), NC)
 	}
 	origSize := totalOrigBytes.Load()
@@ -1575,29 +1591,12 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 	var pvCmd *exec.Cmd
 	ext := opts.Format.String()
 
-	compressCmd := buildCompressCmd(opts)
-
 	if opts.Progress == nil && hasTool("pv") {
 		pvArgs := []string{"-f", "-B", "256k"}
 		if opts.TotalSize > 0 {
 			pvArgs = append(pvArgs, "-s", fmt.Sprintf("%d", opts.TotalSize))
 		}
 		pvCmd = execCommand("pv", pvArgs...)
-	}
-
-	outFile, err := os.Create(outPath)
-	if err != nil {
-		return fmt.Errorf("Error creando archivo de salida: %w", err)
-	}
-	defer outFile.Close()
-
-	var writer io.Writer = outFile
-
-	if opts.SplitSize > 0 {
-		writer = newSplitWriter(outFile, opts.SplitSize, outPath)
-	}
-	if closer, ok := writer.(io.Closer); ok {
-		defer closer.Close()
 	}
 
 	tarArgs := []string{"-cf", "-"}
@@ -1613,7 +1612,7 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 
 	tarCmd := execCommand("tar", tarArgs...)
 
-	// For lrzip which writes directly to file instead of stdout
+	// lrzip writes the archive directly to -o outPath while emitting progress on stdout
 	if ext == "lrz" {
 		args := []string{"-f", "-p", threadStr(opts.ThreadLimit), "-L", fmt.Sprintf("%d", fastOrSlow(opts, 9)), "-z"}
 		if budget := effectiveMemBudget(opts.MemBudgetMB); budget > 0 {
@@ -1621,13 +1620,13 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 		}
 		args = append(args, strings.Fields(opts.CompressionOpts)...)
 		args = append(args, "-o", safeFlagArg(outPath))
-		compressCmd = execCommand("lrzip", args...)
+		compressCmd := execCommand("lrzip", args...)
 		pipeCmds := []*exec.Cmd{tarCmd}
 		if pvCmd != nil {
 			pipeCmds = append(pipeCmds, pvCmd)
 		}
 		pipeCmds = append(pipeCmds, compressCmd)
-		if err := pipeline(writer, os.Stderr, pipeCmds...); err != nil {
+		if err := pipeline(stdoutFor(opts.Progress), stderrFor(opts.Progress), pipeCmds...); err != nil {
 			return fmt.Errorf("Error en pipeline de compresión: %w", err)
 		}
 		if opts.Progress != nil {
@@ -1635,6 +1634,24 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 		}
 		return nil
 	}
+
+	compressCmd := buildCompressCmd(opts)
+
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		return fmt.Errorf("Error creando archivo de salida: %w", err)
+	}
+
+	var writer io.WriteCloser = outFile
+	if opts.SplitSize > 0 {
+		writer = newSplitWriter(outFile, opts.SplitSize, outPath)
+	}
+	writerClosed := false
+	defer func() {
+		if !writerClosed {
+			_ = writer.Close()
+		}
+	}()
 
 	if opts.Progress != nil && pvCmd == nil {
 		pr, pw := io.Pipe()
@@ -1650,22 +1667,27 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 		}
 
 		if err := tarCmd.Start(); err != nil {
+			_ = pr.Close()
 			_ = pw.Close()
 			return fmt.Errorf("Error iniciando tar: %w", err)
 		}
 		if err := compressCmd.Start(); err != nil {
-			_ = tarCmd.Process.Kill()
-			_ = pw.Close()
+			abortPipeProducer(tarCmd, pr, pw)
 			return fmt.Errorf("Error iniciando compresor: %w", err)
 		}
 
 		tarErr, compErr := waitPipePair(tarCmd, compressCmd, pr, pw)
+		writerClosed = true
+		closeErr := writer.Close()
 
 		if compErr != nil {
 			return fmt.Errorf("Error en compresión: %w", compErr)
 		}
 		if tarErr != nil {
 			return fmt.Errorf("Error en tar: %w", tarErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("Error cerrando archivo de salida: %w", closeErr)
 		}
 
 		opts.Progress.FileDone(outPath)
@@ -1677,8 +1699,12 @@ func compressTarPipe(files []string, outPath string, opts CompressOptions, fp *F
 		pipeCmds = append(pipeCmds, pvCmd)
 	}
 	pipeCmds = append(pipeCmds, compressCmd)
-	if err := pipeline(writer, os.Stderr, pipeCmds...); err != nil {
+	if err := pipeline(writer, stderrFor(opts.Progress), pipeCmds...); err != nil {
 		return fmt.Errorf("Error en pipeline de compresión: %w", err)
+	}
+	writerClosed = true
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("Error cerrando archivo de salida: %w", err)
 	}
 
 	if opts.Progress != nil {
@@ -2152,17 +2178,19 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		tmpTarPath := tmpTar.Name()
 		defer os.Remove(tmpTarPath)
 
-		decompCmd, closer := pipeCmdFor(info, archive, opts.ThreadLimit)
+		decompCmd, closer := pipeCmdForWithMem(info, archive, opts.ThreadLimit, opts.MemBudgetMB)
 		if closer != nil {
 			defer closer.Close()
 		}
 		decompCmd.Stdout = tmpTar
 		decompCmd.Stderr = stderrFor(opts.Progress)
 		if err := decompCmd.Run(); err != nil {
-			tmpTar.Close()
+			_ = tmpTar.Close()
 			return fmt.Errorf("error descomprimiendo tar existente: %w", err)
 		}
-		tmpTar.Close()
+		if err := tmpTar.Close(); err != nil {
+			return fmt.Errorf("cerrando tar temporal: %w", err)
+		}
 
 		tarArgs := []string{"-rf", safeTarArchiveArg(tmpTarPath)}
 		if opts.UseSparse() {
@@ -2184,12 +2212,13 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		}
 		defer tarFile.Close()
 
-		tmpOut := archive + ".crush_tmp"
-		outF, err := os.Create(tmpOut)
+		outF, err := os.CreateTemp(filepath.Dir(archive), ".crush_append_out_*")
 		if err != nil {
 			return fmt.Errorf("creando archivo temporal re-comprimido: %w", err)
 		}
+		tmpOut := outF.Name()
 		defer os.Remove(tmpOut)
+		_ = outF.Chmod(fi.Mode().Perm())
 
 		compOpts := opts
 		compOpts.Format = info.Format
@@ -2198,11 +2227,13 @@ func DoAppend(archive string, items []string, opts CompressOptions) error {
 		compCmd.Stdout = outF
 		compCmd.Stderr = stderrFor(opts.Progress)
 		if err := augmentErr(compCmd, compCmd.Run()); err != nil {
-			outF.Close()
+			_ = outF.Close()
 			return fmt.Errorf("error re-comprimiendo archivo: %w", err)
 		}
-		outF.Close()
-		tarFile.Close()
+		if err := outF.Close(); err != nil {
+			return fmt.Errorf("cerrando archivo temporal re-comprimido: %w", err)
+		}
+		_ = tarFile.Close()
 
 		if err := os.Rename(tmpOut, archive); err != nil {
 			return fmt.Errorf("error reemplazando archivo original: %w", err)

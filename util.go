@@ -1259,9 +1259,7 @@ const (
 	logBufTruncNotice = "\n... [log buffer truncated]\n"
 )
 
-func appendToLogBuf(s string) {
-	logMu.Lock()
-	defer logMu.Unlock()
+func appendToLogBufLocked(s string) {
 	if logBuf.Len() == 0 {
 		logBufTruncated = false
 	}
@@ -1283,10 +1281,24 @@ func appendToLogBuf(s string) {
 	logBufTruncated = true
 }
 
-func flushLogBuf() {
+func appendToLogBuf(s string) {
 	logMu.Lock()
+	appendToLogBufLocked(s)
+	logMu.Unlock()
+}
+
+func setLoggingActive(active bool) {
+	logMu.Lock()
+	loggingActive.Store(active)
+	logMu.Unlock()
+}
+
+func swapLoggingActiveAndFlush(active bool) bool {
+	logMu.Lock()
+	prev := loggingActive.Swap(active)
+	var pending []byte
 	if logBuf.Len() > 0 {
-		_, _ = lockedStderr.Write(logBuf.Bytes())
+		pending = append([]byte(nil), logBuf.Bytes()...)
 		logBuf.Reset()
 	}
 	if logBuf.Cap() > shrinkLogBufBytes {
@@ -1294,14 +1306,44 @@ func flushLogBuf() {
 	}
 	logBufTruncated = false
 	logMu.Unlock()
+
+	if len(pending) > 0 {
+		_, _ = lockedStderr.Write(pending)
+	}
+	return prev
+}
+
+func flushLogBuf() {
+	logMu.Lock()
+	var pending []byte
+	if logBuf.Len() > 0 {
+		pending = append([]byte(nil), logBuf.Bytes()...)
+		logBuf.Reset()
+	}
+	if logBuf.Cap() > shrinkLogBufBytes {
+		logBuf = bytes.Buffer{}
+	}
+	logBufTruncated = false
+	logMu.Unlock()
+
+	if len(pending) > 0 {
+		_, _ = lockedStderr.Write(pending)
+	}
+}
+
+func writeStderrOrLogBuf(s string) {
+	logMu.Lock()
+	if loggingActive.Load() {
+		appendToLogBufLocked(s)
+		logMu.Unlock()
+		return
+	}
+	logMu.Unlock()
+	_, _ = lockedStderr.Write([]byte(s))
 }
 
 func WriteLog(s string) {
-	if loggingActive.Load() {
-		appendToLogBuf(s)
-	} else {
-		lockedStderr.Write([]byte(s))
-	}
+	writeStderrOrLogBuf(s)
 	appendToLogFile(s)
 }
 
@@ -1383,11 +1425,7 @@ func formatConsoleMsg(format string, a []any, prefixes ...string) string {
 }
 
 func writeStderrFormatted(out string) {
-	if loggingActive.Load() {
-		appendToLogBuf(out)
-	} else {
-		lockedStderr.Write([]byte(out))
-	}
+	writeStderrOrLogBuf(out)
 	appendToLogFile(out)
 }
 
@@ -1491,6 +1529,9 @@ func newLimitedBuffer(maxBytes int) *limitedBuffer {
 func (lb *limitedBuffer) Write(p []byte) (int, error) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
+	if lb.max <= 0 {
+		lb.max = maxStderrBytes
+	}
 	n := len(p)
 	if n == 0 {
 		return 0, nil
@@ -1533,7 +1574,17 @@ func (lb *limitedBuffer) String() string {
 		return ""
 	}
 	if lb.truncated {
-		return "... [truncated]\n" + string(lb.buf)
+		b := lb.buf
+		skip := 0
+		for skip < 3 && skip < len(b) && !utf8.RuneStart(b[skip]) {
+			skip++
+		}
+		if skip > 0 && skip < len(b) {
+			if r, _ := utf8.DecodeRune(b[skip:]); r != utf8.RuneError {
+				b = b[skip:]
+			}
+		}
+		return "... [truncated]\n" + string(b)
 	}
 	return string(lb.buf)
 }
@@ -1751,6 +1802,9 @@ type ProgressTracker struct {
 	stopped       chan struct{}
 	stderrIsTTY   bool
 	started       atomic.Bool
+	stoppedFlag   atomic.Bool
+	lifecycleMu   sync.Mutex
+	stopOnce      sync.Once
 	files         []*FileProgress
 	linesRendered int
 	writer        io.Writer
@@ -1777,42 +1831,78 @@ func NewProgressTracker(total int64, filesTotal int) *ProgressTracker {
 }
 
 func (pt *ProgressTracker) Add(n int64) {
+	if pt == nil {
+		return
+	}
 	pt.current.Add(n)
 }
 
 func (pt *ProgressTracker) FileDone(name string) {
+	if pt == nil {
+		return
+	}
 	pt.filesDone.Add(1)
 	pt.currentFile.Store(name)
 }
 
 func (pt *ProgressTracker) SetCurrentFile(name string) {
+	if pt == nil {
+		return
+	}
 	pt.currentFile.Store(name)
 }
 
 func (pt *ProgressTracker) SetFiles(files []*FileProgress) {
-	pt.files = files
+	if pt == nil {
+		return
+	}
+	cp := append([]*FileProgress(nil), files...)
+	pt.renderMu.Lock()
+	if pt.linesRendered > 0 {
+		pt.eraseBlock()
+	}
+	pt.files = cp
+	pt.renderMu.Unlock()
 }
 
 func (pt *ProgressTracker) Start() {
-	if !pt.stderrIsTTY || pt.started.Swap(true) {
+	if pt == nil || !pt.stderrIsTTY {
 		return
 	}
+	pt.lifecycleMu.Lock()
+	if pt.started.Load() || pt.stoppedFlag.Load() {
+		pt.lifecycleMu.Unlock()
+		return
+	}
+	if pt.done == nil {
+		pt.done = make(chan struct{})
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	done := pt.done
+	stopped := make(chan struct{})
+	pt.ticker = ticker
+	pt.stopped = stopped
+	pt.started.Store(true)
+	pt.lifecycleMu.Unlock()
+
 	activeProgressTracker.Store(pt)
-	loggingActive.Store(true)
-	io.WriteString(pt.out(), "\033[?25l")
-	pt.ticker = time.NewTicker(100 * time.Millisecond)
-	pt.stopped = make(chan struct{})
+	setLoggingActive(true)
+
+	pt.renderMu.Lock()
+	_, _ = io.WriteString(pt.out(), "\033[?25l")
+	pt.renderMu.Unlock()
+
 	go func() {
-		defer close(pt.stopped)
+		defer close(stopped)
 		for {
 			select {
-			case <-pt.ticker.C:
+			case <-ticker.C:
 				if pt.renderMu.TryLock() {
 					pt.render()
 					pt.renderMu.Unlock()
 				}
-			case <-pt.done:
-				pt.ticker.Stop()
+			case <-done:
+				ticker.Stop()
 				return
 			}
 		}
@@ -1820,25 +1910,46 @@ func (pt *ProgressTracker) Start() {
 }
 
 func (pt *ProgressTracker) Stop() {
-	if pt.started.Load() {
-		pt.ticker.Stop()
-		close(pt.done)
-		<-pt.stopped
-	} else {
-		close(pt.done)
+	if pt == nil {
+		return
 	}
-	activeProgressTracker.CompareAndSwap(pt, nil)
-	loggingActive.Store(false)
-	pt.renderMu.Lock()
-	pt.eraseBlock()
-	if pt.stderrIsTTY {
-		io.WriteString(pt.out(), "\033[?25h")
-	}
-	pt.renderMu.Unlock()
-	flushLogBuf()
-	if pt.stderrIsTTY {
-		pt.renderFinal()
-	}
+	pt.stopOnce.Do(func() {
+		pt.lifecycleMu.Lock()
+		pt.stoppedFlag.Store(true)
+		wasStarted := pt.started.Load()
+		ticker := pt.ticker
+		done := pt.done
+		stopped := pt.stopped
+		pt.lifecycleMu.Unlock()
+
+		if wasStarted {
+			ticker.Stop()
+			close(done)
+			<-stopped
+		} else if done != nil {
+			close(done)
+		}
+
+		activeProgressTracker.CompareAndSwap(pt, nil)
+		pt.renderMu.Lock()
+		pt.eraseBlock()
+		if pt.stderrIsTTY {
+			_, _ = io.WriteString(pt.out(), "\033[?25h")
+		}
+		pt.renderMu.Unlock()
+
+		if activeProgressTracker.Load() == nil {
+			swapLoggingActiveAndFlush(false)
+		} else {
+			flushLogBuf()
+		}
+
+		if pt.stderrIsTTY {
+			pt.renderMu.Lock()
+			pt.renderFinal()
+			pt.renderMu.Unlock()
+		}
+	})
 }
 
 func (pt *ProgressTracker) Suspend(fn func()) {
@@ -1850,18 +1961,16 @@ func (pt *ProgressTracker) Suspend(fn func()) {
 	defer pt.renderMu.Unlock()
 
 	pt.eraseBlock()
-	pt.linesRendered = 0
 	if pt.stderrIsTTY {
-		io.WriteString(pt.out(), "\033[?25h")
+		_, _ = io.WriteString(pt.out(), "\033[?25h")
 	}
 
-	prevLogging := loggingActive.Swap(false)
-	flushLogBuf()
+	prevLogging := swapLoggingActiveAndFlush(false)
 
 	defer func() {
-		loggingActive.Store(prevLogging)
+		setLoggingActive(prevLogging)
 		if pt.stderrIsTTY {
-			io.WriteString(pt.out(), "\033[?25l")
+			_, _ = io.WriteString(pt.out(), "\033[?25l")
 		}
 	}()
 
@@ -1878,6 +1987,7 @@ func SuspendActiveProgress(fn func()) {
 
 func (pt *ProgressTracker) eraseBlock() {
 	if !pt.stderrIsTTY || pt.linesRendered <= 0 {
+		pt.linesRendered = 0
 		return
 	}
 	w := pt.out()
@@ -1886,6 +1996,7 @@ func (pt *ProgressTracker) eraseBlock() {
 		io.WriteString(w, "\r\033[K\n")
 	}
 	fmt.Fprintf(w, "\r\033[%dA", pt.linesRendered)
+	pt.linesRendered = 0
 }
 
 func (pt *ProgressTracker) render() {
@@ -2123,9 +2234,13 @@ type countingWriter struct {
 
 func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
-	cw.pt.Add(int64(n))
-	if cw.fp != nil {
-		cw.fp.Current.Add(int64(n))
+	if n > 0 {
+		if cw.pt != nil {
+			cw.pt.Add(int64(n))
+		}
+		if cw.fp != nil {
+			cw.fp.Current.Add(int64(n))
+		}
 	}
 	return n, err
 }

@@ -3615,6 +3615,111 @@ func TestRunWithProgress_ZeroSizeSilencesStdoutWhenTrackerPresent(t *testing.T) 
 	}
 }
 
+func TestProgressTracker_IdempotentStopAndRaces(t *testing.T) {
+	t.Run("Stop called twice and on zero-value or nil tracker never panics", func(t *testing.T) {
+		var nilPT *ProgressTracker
+		nilPT.Stop()
+		nilPT.Add(10)
+		nilPT.SetFiles(nil)
+
+		zeroPT := &ProgressTracker{}
+		zeroPT.Stop()
+		zeroPT.Stop()
+
+		pt := NewProgressTracker(100, 1)
+		pt.writer = io.Discard
+		pt.stderrIsTTY = true
+		pt.Start()
+		pt.Stop()
+		pt.Stop()
+	})
+
+	t.Run("concurrent Start, SetFiles, Add, WriteLog, Suspend, and Stop is race-free", func(t *testing.T) {
+		var errOut bytes.Buffer
+		restore := setOutputWriters(io.Discard, &errOut)
+		defer restore()
+
+		for iter := 0; iter < 10; iter++ {
+			pt := NewProgressTracker(1000, 3)
+			pt.writer = &lockedWriter{w: io.Discard}
+			pt.stderrIsTTY = true
+
+			var wg sync.WaitGroup
+			wg.Add(4)
+			go func() {
+				defer wg.Done()
+				pt.Start()
+			}()
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 20; j++ {
+					fps := []*FileProgress{
+						{Name: "a.bin", Size: 500},
+						{Name: "b.bin", Size: 500},
+					}
+					fps[0].SetStatus("active")
+					pt.SetFiles(fps)
+					pt.Add(10)
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 20; j++ {
+					WriteLogf("iter %d msg %d\n", iter, j)
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				time.Sleep(2 * time.Millisecond)
+				pt.Suspend(func() {})
+				pt.Stop()
+				pt.Stop()
+			}()
+			wg.Wait()
+
+			logMu.Lock()
+			stranded := logBuf.Len()
+			logMu.Unlock()
+			if stranded != 0 {
+				t.Fatalf("iter %d: %d bytes stranded in logBuf after pt.Stop()", iter, stranded)
+			}
+		}
+	})
+
+	t.Run("countingWriter with nil ProgressTracker does not panic", func(t *testing.T) {
+		var dst bytes.Buffer
+		fp := &FileProgress{Name: "f.bin", Size: 10}
+		cw := &countingWriter{w: &dst, pt: nil, fp: fp}
+		if _, err := cw.Write([]byte("hello")); err != nil {
+			t.Fatalf("countingWriter.Write error: %v", err)
+		}
+		if fp.Current.Load() != 5 {
+			t.Errorf("fp.Current = %d, want 5", fp.Current.Load())
+		}
+	})
+}
+
+func TestLimitedBuffer_UTF8TruncationAndZeroMax(t *testing.T) {
+	// 15 bytes max with 2-byte UTF-8 rune 'á' (0xC3 0xA1): 10*'á' = 20 bytes -> cuts mid-rune at offset 5
+	lb := newLimitedBuffer(15)
+	_, _ = lb.Write([]byte(strings.Repeat("á", 10)))
+	got := lb.String()
+	if !utf8.ValidString(got) {
+		t.Errorf("limitedBuffer.String() produced invalid UTF-8 on mid-rune truncation: %q", got)
+	}
+	if !strings.Contains(got, "ááááááá") {
+		t.Errorf("limitedBuffer.String() missing valid UTF-8 tail: %q", got)
+	}
+
+	var zeroLB limitedBuffer
+	if _, err := zeroLB.Write([]byte("hello stderr")); err != nil {
+		t.Fatalf("zero-value limitedBuffer.Write failed: %v", err)
+	}
+	if zeroLB.String() != "hello stderr" {
+		t.Errorf("zero-value limitedBuffer.String() = %q, want %q", zeroLB.String(), "hello stderr")
+	}
+}
+
 
 
 

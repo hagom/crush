@@ -974,5 +974,170 @@ func TestMainModeConflictsCLI(t *testing.T) {
 	}
 }
 
+func TestExtractPasswordFlag_RespectsDoubleDash(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantPassword string
+		wantPrompt   bool
+		wantCleaned  []string
+	}{
+		{
+			name:         "positional -p after -- is not treated as password flag",
+			args:         []string{"crush", "-c", "-f", "7z", "--", "-p"},
+			wantPassword: "",
+			wantPrompt:   false,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", "--", "-p"},
+		},
+		{
+			name:         "positional -p=secret after -- is not treated as password flag",
+			args:         []string{"crush", "-c", "-f", "7z", "--", "-p=secret.txt"},
+			wantPassword: "",
+			wantPrompt:   false,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", "--", "-p=secret.txt"},
+		},
+		{
+			name:         "positional -cp after -- is not expanded as short password flag",
+			args:         []string{"crush", "-c", "-f", "7z", "--", "-cp"},
+			wantPassword: "",
+			wantPrompt:   false,
+			wantCleaned:  []string{"crush", "-c", "-f", "7z", "--", "-cp"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleaned, pass, prompt := extractPasswordFlag(tt.args)
+			if pass != tt.wantPassword {
+				t.Errorf("password = %q, want %q", pass, tt.wantPassword)
+			}
+			if prompt != tt.wantPrompt {
+				t.Errorf("prompt = %v, want %v", prompt, tt.wantPrompt)
+			}
+			if !reflect.DeepEqual(cleaned, tt.wantCleaned) {
+				t.Errorf("cleaned = %v, want %v", cleaned, tt.wantCleaned)
+			}
+		})
+	}
+}
+
+func TestCopyFile_SameFileAndSymlinkSafety(t *testing.T) {
+	t.Run("same src and dst does not truncate file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binPath := filepath.Join(tmpDir, "crush")
+		const payload = "#!/bin/sh\necho crush\n"
+		if err := os.WriteFile(binPath, []byte(payload), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyFile(binPath, binPath); err != nil {
+			t.Fatalf("copyFile(same, same) failed: %v", err)
+		}
+		got, err := os.ReadFile(binPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != payload {
+			t.Fatalf("same-file copy corrupted payload: got %q, want %q", string(got), payload)
+		}
+	})
+
+	t.Run("destination symlink is replaced atomically without overwriting target", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		victim := filepath.Join(tmpDir, "victim.txt")
+		const victimData = "victim original content"
+		if err := os.WriteFile(victim, []byte(victimData), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		dstLink := filepath.Join(tmpDir, "crush_installed")
+		if err := os.Symlink(victim, dstLink); err != nil {
+			t.Fatal(err)
+		}
+
+		srcBin := filepath.Join(tmpDir, "crush_src")
+		const srcData = "new binary content"
+		if err := os.WriteFile(srcBin, []byte(srcData), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := copyFile(srcBin, dstLink); err != nil {
+			t.Fatalf("copyFile failed: %v", err)
+		}
+
+		gotVictim, err := os.ReadFile(victim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotVictim) != victimData {
+			t.Fatalf("copyFile followed destination symlink and overwrote victim: got %q, want %q", string(gotVictim), victimData)
+		}
+
+		fi, err := os.Lstat(dstLink)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fi.Mode().IsRegular() {
+			t.Errorf("destination should now be a regular file, got mode %v", fi.Mode())
+		}
+	})
+}
+
+func TestBuildWatchOptions_PropagatesAllFlags(t *testing.T) {
+	cutoff := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	formats := []Format{Gz, Zst}
+
+	wComp := buildWatchOptions(
+		"/tmp/watch", "/tmp/out",
+		true, false,
+		formats, 8,
+		true, true,
+		25, false, true,
+		"-9", []string{"*.tmp"},
+		true, true,
+		"s3cr3t",
+		false, true, true,
+		"*.txt",
+		cutoff,
+	)
+
+	if wComp.Mode != WatchModeCompress {
+		t.Fatalf("Mode = %v, want WatchModeCompress", wComp.Mode)
+	}
+	c := wComp.CompressOpts
+	if c.Format != Gz || !reflect.DeepEqual(c.Formats, formats) {
+		t.Errorf("Formats = %v (primary %v), want %v", c.Formats, c.Format, formats)
+	}
+	if !c.Hash || c.Password != "s3cr3t" || !c.Clean || !c.Resume {
+		t.Errorf("CompressOpts lost Hash/Password/Clean/Resume: %+v", c)
+	}
+	if c.Sparse || !c.NoSparse {
+		t.Errorf("CompressOpts Sparse/NoSparse mismatch: Sparse=%v NoSparse=%v", c.Sparse, c.NoSparse)
+	}
+	if !c.KeepOrig {
+		t.Errorf("CompressOpts.KeepOrig must be forced true when CutoffTime is non-zero")
+	}
+
+	wDecomp := buildWatchOptions(
+		"/tmp/watch", "/tmp/out",
+		false, true,
+		nil, 8,
+		true, true,
+		0, true, true,
+		"", nil,
+		false, false,
+		"pass123",
+		true, false, true,
+		"*.sql",
+		time.Time{},
+	)
+	if wDecomp.Mode != WatchModeDecompress {
+		t.Fatalf("Mode = %v, want WatchModeDecompress", wDecomp.Mode)
+	}
+	d := wDecomp.DecompressOpts
+	if d.Password != "pass123" || d.Filter != "*.sql" || !d.Resume || !d.Force || !d.KeepOrig {
+		t.Errorf("DecompressOpts lost Password/Filter/Resume/Force/KeepOrig: %+v", d)
+	}
+}
+
 
 

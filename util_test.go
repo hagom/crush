@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"math"
 	"unicode/utf8"
@@ -3521,6 +3522,97 @@ func TestSHA256File_SecurityAndEdgeCases(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestPipeline_EarlyExitZeroAndPartialStartFDLeak(t *testing.T) {
+	t.Run("downstream exiting 0 early delivers EPIPE instead of hanging upstream", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		cs1 := []string{"-test.run=TestHelperProcess", "--", "mock-flood-producer"}
+		cmd1 := exec.CommandContext(ctx, os.Args[0], cs1...)
+		cmd1.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+
+		cmd2 := mockExecCommand("mock-read-5-bytes")
+		var out bytes.Buffer
+		err := pipeline(&out, nil, cmd1, cmd2)
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatalf("pipeline hung because parent kept pipe read end open after downstream exited 0 (err=%v)", err)
+		}
+	})
+
+	t.Run("partial Start failure closes all created pipe FDs", func(t *testing.T) {
+		countFDs := func() int {
+			entries, err := os.ReadDir("/proc/self/fd")
+			if err != nil {
+				return -1
+			}
+			return len(entries)
+		}
+		before := countFDs()
+		if before < 0 {
+			t.Skip("/proc/self/fd not available")
+		}
+		for i := 0; i < 25; i++ {
+			c1 := exec.Command("/nonexistent_crush_binary_xyz_12345")
+			c2 := mockExecCommand("mock-producer")
+			c3 := mockExecCommand("mock-consumer")
+			if err := pipeline(io.Discard, nil, c1, c2, c3); err == nil {
+				t.Fatal("expected error when first command fails to start")
+			}
+		}
+		after := countFDs()
+		if after > before+2 {
+			t.Errorf("FD leak detected across failed pipeline starts: before=%d after=%d", before, after)
+		}
+	})
+}
+
+func TestParsePercentAndFormatETA_EdgeCases(t *testing.T) {
+	pctTests := []struct {
+		in   string
+		want int
+	}{
+		{" 42%", 42},
+		{"0%", 0},
+		{"100%", 100},
+		{"12.75%", 12},
+		{"99.9%", 99},
+		{"105%", -1},
+		{"250%", -1},
+		{"-25%", -1},
+		{"Scanning 2026 files... 18%", 18},
+		{"no percent here", -1},
+	}
+	for _, tt := range pctTests {
+		if got := parsePercent(tt.in); got != tt.want {
+			t.Errorf("parsePercent(%q) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+
+	// Tiny transfer rate (2% in 200M seconds -> ~9.8B remaining seconds) previously overflowed time.Duration to negative
+	gotETA := formatETA(200_000_000*time.Second, 2, 100)
+	if gotETA != ">24h" {
+		t.Errorf("formatETA(huge remaining) = %q, want \">24h\"", gotETA)
+	}
+
+	if bar := makeBar(-10, 5); bar != "     " {
+		t.Errorf("makeBar(-10, 5) = %q, want 5 spaces", bar)
+	}
+	if bar := makeBar(50, 0); bar != "" {
+		t.Errorf("makeBar(50, 0) = %q, want empty", bar)
+	}
+}
+
+func TestRunWithProgress_ZeroSizeSilencesStdoutWhenTrackerPresent(t *testing.T) {
+	pt := NewProgressTracker(0, 1)
+	cmd := exec.Command("echo", "noisy-banner")
+	if err := runWithProgress(cmd, pt, 0, nil); err != nil {
+		t.Fatalf("runWithProgress failed: %v", err)
+	}
+	if cmd.Stdout == os.Stdout {
+		t.Errorf("runWithProgress with active ProgressTracker and fileSize=0 wrote to os.Stdout instead of stdoutFor(pt)")
+	}
 }
 
 

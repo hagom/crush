@@ -107,6 +107,20 @@ func TestHelperProcess(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 		os.Exit(0)
 
+	case "mock-flood-producer":
+		chunk := bytes.Repeat([]byte("A"), 65536)
+		for i := 0; i < 64; i++ {
+			if _, err := os.Stdout.Write(chunk); err != nil {
+				os.Exit(0)
+			}
+		}
+		os.Exit(0)
+
+	case "mock-read-5-bytes":
+		buf := make([]byte, 5)
+		_, _ = os.Stdin.Read(buf)
+		os.Exit(0)
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown mock command: %s\n", cmd)
 		os.Exit(127)

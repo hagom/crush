@@ -1607,23 +1607,33 @@ func totalFileSize(files []string) int64 {
 func parsePercent(s string) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= '0' && s[i] <= '9' {
+			neg := i > 0 && s[i-1] == '-'
 			end := i
 			for end < len(s) && s[end] >= '0' && s[end] <= '9' {
 				end++
 			}
-			if end < len(s) && s[end] == '%' {
-				val, _ := strconv.Atoi(s[i:end])
-				if val >= 0 && val <= 100 {
+			intEnd := end
+			if end+1 < len(s) && s[end] == '.' && s[end+1] >= '0' && s[end+1] <= '9' {
+				end++
+				for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+					end++
+				}
+			}
+			if !neg && end < len(s) && s[end] == '%' {
+				if val, err := strconv.Atoi(s[i:intEnd]); err == nil && val >= 0 && val <= 100 {
 					return val
 				}
 			}
+			i = end - 1
 		}
 	}
 	return -1
 }
 
+const maxProgressTokenBytes = 4096
+
 func trackProgress(r io.Reader, pt *ProgressTracker, fileSize int64, fp *FileProgress) {
-	if pt == nil || fileSize == 0 {
+	if pt == nil || fileSize <= 0 {
 		return
 	}
 	if fp != nil {
@@ -1662,6 +1672,9 @@ func trackProgress(r io.Reader, pt *ProgressTracker, fileSize int64, fp *FilePro
 			updateWithToken()
 		} else {
 			token.WriteByte(b)
+			if token.Len() >= maxProgressTokenBytes {
+				updateWithToken()
+			}
 		}
 	}
 
@@ -1709,8 +1722,8 @@ func runWithProgress(cmd *exec.Cmd, pt *ProgressTracker, fileSize int64, fp *Fil
 	if cmd.Stdin == nil {
 		cmd.Stdin = getNullFile()
 	}
-	if pt == nil || fileSize == 0 {
-		cmd.Stdout = os.Stdout
+	if pt == nil || fileSize <= 0 {
+		cmd.Stdout = stdoutFor(pt)
 		cmd.Stderr = stderrFor(pt)
 		return augmentErr(cmd, cmd.Run())
 	}
@@ -2044,11 +2057,11 @@ func formatETA(elapsed time.Duration, current, total int64) string {
 		return "--:--"
 	}
 	remainingSecs := float64(total-current) / rate
-	remaining := time.Duration(remainingSecs * float64(time.Second))
-
-	if remaining > 24*time.Hour {
+	if remainingSecs > (24 * time.Hour).Seconds() {
 		return ">24h"
 	}
+	remaining := time.Duration(remainingSecs * float64(time.Second))
+
 	if remaining < time.Minute {
 		return fmt.Sprintf("%ds", int(remaining.Seconds()))
 	}
@@ -2059,6 +2072,12 @@ func formatETA(elapsed time.Duration, current, total int64) string {
 }
 
 func makeBar(pct float64, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if pct < 0 {
+		pct = 0
+	}
 	filled := int(pct / 100 * float64(width))
 	if filled > width {
 		filled = width
@@ -2195,13 +2214,26 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	if len(cmds) == 0 {
 		return nil
 	}
+	pipes := make([]*os.File, 0, max(0, (len(cmds)-1)*2))
+	closePipes := func() {
+		for i, f := range pipes {
+			if f != nil {
+				_ = f.Close()
+				pipes[i] = nil
+			}
+		}
+	}
+
 	for i := 0; i < len(cmds)-1; i++ {
-		var err error
-		cmds[i+1].Stdin, err = cmds[i].StdoutPipe()
+		r, w, err := os.Pipe()
 		if err != nil {
+			closePipes()
 			return fmt.Errorf("pipeline pipe %d: %w", i, err)
 		}
-		setPipeCapacity(cmds[i+1].Stdin, cmds[i].Stdout, defaultPipeCapacity)
+		pipes = append(pipes, r, w)
+		setPipeCapacity(r, w, defaultPipeCapacity)
+		cmds[i].Stdout = w
+		cmds[i+1].Stdin = r
 	}
 	cmds[len(cmds)-1].Stdout = stdout
 	if stderr != nil {
@@ -2212,6 +2244,7 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 	}
 	for i := range cmds {
 		if err := cmds[i].Start(); err != nil {
+			closePipes()
 			for j := 0; j < i; j++ {
 				if cmds[j].Process != nil {
 					_ = cmds[j].Process.Kill()
@@ -2221,6 +2254,7 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 			return fmt.Errorf("pipeline start %d: %w", i, err)
 		}
 	}
+	closePipes()
 
 	type cmdResult struct {
 		idx int
@@ -2251,17 +2285,25 @@ func pipeline(stdout, stderr io.Writer, cmds ...*exec.Cmd) error {
 func waitPipePair(prod, cons *exec.Cmd, pr *io.PipeReader, pw *io.PipeWriter) (prodErr, consErr error) {
 	done := make(chan struct{})
 	go func() {
-		prodErr = augmentErr(prod, prod.Wait())
-		_ = pw.CloseWithError(prodErr)
+		if prod != nil {
+			prodErr = augmentErr(prod, prod.Wait())
+		}
+		if pw != nil {
+			_ = pw.CloseWithError(prodErr)
+		}
 		close(done)
 	}()
 
-	consErr = augmentErr(cons, cons.Wait())
-	_ = pr.CloseWithError(consErr)
+	if cons != nil {
+		consErr = augmentErr(cons, cons.Wait())
+	}
+	if pr != nil {
+		_ = pr.CloseWithError(consErr)
+	}
 	select {
 	case <-done:
 	default:
-		if consErr != nil && prod.Process != nil {
+		if consErr != nil && prod != nil && prod.Process != nil {
 			_ = prod.Process.Kill()
 		}
 		<-done

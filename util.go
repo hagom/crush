@@ -1074,40 +1074,96 @@ func GetUniqueName(base, ext string) string {
 
 // --- Logging ---
 
-func resolvePrivateLogDir() string {
+func ensurePrivateLogDir(dir string) bool {
+	if dir == "" || !filepath.IsAbs(dir) {
+		return false
+	}
+	if fi, err := os.Lstat(dir); err == nil {
+		if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || !isOwnedByCurrentUserOS(fi) {
+			return false
+		}
+	} else if !os.IsNotExist(err) {
+		return false
+	} else if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return false
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || !isOwnedByCurrentUserOS(fi) {
+		return false
+	}
+	return true
+}
+
+func resolvePrivateLogDir() (string, error) {
 	if os.Geteuid() == 0 {
-		if err := os.MkdirAll("/var/log/crush", 0o700); err == nil {
-			return "/var/log/crush"
+		if ensurePrivateLogDir("/var/log/crush") {
+			return "/var/log/crush", nil
 		}
 	}
-	if state := os.Getenv("XDG_STATE_HOME"); state != "" {
+	if state := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(state) {
 		dir := filepath.Join(state, "crush")
-		if err := os.MkdirAll(dir, 0o700); err == nil {
-			return dir
+		if ensurePrivateLogDir(dir) {
+			return dir, nil
 		}
 	}
-	if cache, err := os.UserCacheDir(); err == nil && cache != "" {
+	if cache, err := os.UserCacheDir(); err == nil && filepath.IsAbs(cache) {
 		dir := filepath.Join(cache, "crush", "logs")
-		if err := os.MkdirAll(dir, 0o700); err == nil {
-			return dir
+		if ensurePrivateLogDir(dir) {
+			return dir, nil
 		}
 	}
 	dir := filepath.Join(os.TempDir(), fmt.Sprintf("crush-log-%d", os.Getuid()))
-	_ = os.MkdirAll(dir, 0o700)
-	return dir
+	if ensurePrivateLogDir(dir) {
+		return dir, nil
+	}
+	tmpDir, err := os.MkdirTemp(os.TempDir(), fmt.Sprintf("crush-log-%d-*", os.Getuid()))
+	if err != nil {
+		return "", err
+	}
+	if !ensurePrivateLogDir(tmpDir) {
+		return "", fmt.Errorf("no se pudo asegurar directorio privado de logs: %s", tmpDir)
+	}
+	return tmpDir, nil
+}
+
+func openLogFileInRoot(root *os.Root, now string, pid int) (*os.File, error) {
+	base := fmt.Sprintf("crush_%s_%d.log", now, pid)
+	if f, err := root.OpenFile(base, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err == nil {
+		_ = f.Chmod(0o600)
+		return f, nil
+	}
+	for seq := 1; seq <= 1024; seq++ {
+		name := fmt.Sprintf("crush_%s_%d_%d.log", now, pid, seq)
+		f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_ = f.Chmod(0o600)
+			return f, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("no se pudo crear archivo de log único")
 }
 
 func SetupLogging() error {
-	logDir := resolvePrivateLogDir()
-	now := time.Now().Format("20060102_150405")
-	logPath := filepath.Join(logDir, fmt.Sprintf("crush_%s_%d.log", now, os.Getpid()))
-
-	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	logDir, err := resolvePrivateLogDir()
 	if err != nil {
-		f, err = os.CreateTemp(logDir, "crush_*.log")
-		if err != nil {
-			return err
-		}
+		return err
+	}
+	root, err := os.OpenRoot(logDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
+	now := time.Now().Format("20060102_150405")
+	f, err := openLogFileInRoot(root, now, os.Getpid())
+	if err != nil {
+		return err
 	}
 
 	logMu.Lock()

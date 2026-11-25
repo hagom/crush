@@ -2190,6 +2190,130 @@ func TestSetupLogging_PrivatePathAndConcurrentCloseRace(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSetupLogging_SymlinkAndPermSafety(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("skipping non-root XDG/TMPDIR fallback test when running as root")
+	}
+	t.Cleanup(CloseLog)
+
+	t.Run("rejects symlinked tmp log dir and leaves symlink target untouched", func(t *testing.T) {
+		fakeTmp := t.TempDir()
+		victimDir := t.TempDir()
+		squatted := filepath.Join(fakeTmp, fmt.Sprintf("crush-log-%d", os.Getuid()))
+		if err := os.Symlink(victimDir, squatted); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Setenv("TMPDIR", fakeTmp)
+		t.Setenv("XDG_STATE_HOME", "")
+		t.Setenv("XDG_CACHE_HOME", "")
+		t.Setenv("HOME", "")
+
+		if err := SetupLogging(); err != nil {
+			t.Fatalf("SetupLogging failed under symlinked tmp dir: %v", err)
+		}
+		defer CloseLog()
+
+		entries, err := os.ReadDir(victimDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("SetupLogging followed symlink and created files in victimDir: %v", entries)
+		}
+
+		logMu.Lock()
+		lf := logFile
+		logMu.Unlock()
+		if lf == nil {
+			t.Fatal("expected non-nil logFile")
+		}
+		fi, err := os.Lstat(lf.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Errorf("log file perm = %04o, want 0600", fi.Mode().Perm())
+		}
+		dirFi, err := os.Lstat(filepath.Dir(lf.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !dirFi.IsDir() || dirFi.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("log parent is not a real directory: mode=%v", dirFi.Mode())
+		}
+		if dirFi.Mode().Perm() != 0o700 {
+			t.Errorf("log dir perm = %04o, want 0700", dirFi.Mode().Perm())
+		}
+	})
+
+	t.Run("tightens pre-existing 0755 log dir to 0700", func(t *testing.T) {
+		stateDir := t.TempDir()
+		crushLogDir := filepath.Join(stateDir, "crush")
+		if err := os.MkdirAll(crushLogDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(crushLogDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_STATE_HOME", stateDir)
+
+		if err := SetupLogging(); err != nil {
+			t.Fatalf("SetupLogging failed: %v", err)
+		}
+		defer CloseLog()
+
+		dirFi, err := os.Lstat(crushLogDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dirFi.Mode().Perm() != 0o700 {
+			t.Errorf("pre-existing dir perm = %04o, want tightened 0700", dirFi.Mode().Perm())
+		}
+	})
+
+	t.Run("ignores relative XDG_STATE_HOME and rejects symlinked XDG dir", func(t *testing.T) {
+		cwdTmp := t.TempDir()
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(cwdTmp); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(origWd) }()
+
+		cacheDir := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", "relative_state_dir")
+		t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+		if err := SetupLogging(); err != nil {
+			t.Fatalf("SetupLogging failed: %v", err)
+		}
+		CloseLog()
+
+		if _, err := os.Lstat(filepath.Join(cwdTmp, "relative_state_dir")); !os.IsNotExist(err) {
+			t.Errorf("relative XDG_STATE_HOME should be ignored, but created in CWD (err=%v)", err)
+		}
+
+		stateParent := t.TempDir()
+		victimDir := t.TempDir()
+		if err := os.Symlink(victimDir, filepath.Join(stateParent, "crush")); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_STATE_HOME", stateParent)
+
+		if err := SetupLogging(); err != nil {
+			t.Fatalf("SetupLogging failed when XDG_STATE_HOME/crush is symlink: %v", err)
+		}
+		CloseLog()
+
+		if entries, _ := os.ReadDir(victimDir); len(entries) != 0 {
+			t.Errorf("SetupLogging wrote into symlinked XDG_STATE_HOME/crush target: %v", entries)
+		}
+	})
+}
+
 func TestRunWithProgress_AttachesNullStdin(t *testing.T) {
 	cmd := exec.Command("true")
 	if err := runWithProgress(cmd, nil, 0, nil); err != nil {

@@ -5,7 +5,12 @@ package main
 import (
 	"errors"
 	"io"
+	"os"
 )
+
+func isOwnedByCurrentUserOS(fi os.FileInfo) bool {
+	return fi != nil
+}
 
 func setPipeCapacityOS(r io.Reader, w io.Writer, size int) {
 }

@@ -4,9 +4,18 @@ package main
 
 import (
 	"io"
+	"os"
 	"syscall"
 	"unsafe"
 )
+
+func isOwnedByCurrentUserOS(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	return int(st.Uid) == os.Geteuid()
+}
 
 const (
 	cmdSetPipeSz = 1031

@@ -76,7 +76,7 @@ func RenderListTable(archivePath string, members []ArchiveMember, info FormatInf
 }
 
 func writeListHeader(out io.Writer, archivePath string, info FormatInfo, fi os.FileInfo) {
-	base := filepath.Base(archivePath)
+	base := sanitizeTerminalText(filepath.Base(archivePath))
 	compSizeStr := FormatSize(fi.Size())
 	formatName := info.Format.String()
 
@@ -104,9 +104,9 @@ func writeListRow(out io.Writer, m ArchiveMember) {
 		dateStr = m.Modified.Format("2006-01-02 15:04")
 	}
 
-	displayPath := m.Path
+	displayPath := sanitizeTerminalText(m.Path)
 	if m.IsDir {
-		displayPath = Blue + Bold + m.Path + NC
+		displayPath = Blue + Bold + displayPath + NC
 	}
 
 	fmt.Fprintf(out, "  %-12s %10s  %-16s  %s\n", modeStr, sizeStr, dateStr, displayPath)

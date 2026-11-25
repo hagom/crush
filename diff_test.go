@@ -60,3 +60,43 @@ func TestDoDiffComparison(t *testing.T) {
 		t.Errorf("missing summary line in output: %s", out)
 	}
 }
+
+func TestDoDiff_NormalizesCrossFormatPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	tar1 := filepath.Join(tmpDir, "a.tar")
+	tar2 := filepath.Join(tmpDir, "b.tar")
+
+	{
+		f, _ := os.Create(tar1)
+		tw := tar.NewWriter(f)
+		_ = tw.WriteHeader(&tar.Header{Name: "./dir/", Mode: 0755, Typeflag: tar.TypeDir})
+		_ = tw.WriteHeader(&tar.Header{Name: "./dir/file.txt", Mode: 0644, Size: 10, Typeflag: tar.TypeReg})
+		_, _ = tw.Write(make([]byte, 10))
+		_ = tw.WriteHeader(&tar.Header{Name: `sub\a.txt`, Mode: 0644, Size: 20, Typeflag: tar.TypeReg})
+		_, _ = tw.Write(make([]byte, 20))
+		_ = tw.Close()
+		_ = f.Close()
+	}
+	{
+		f, _ := os.Create(tar2)
+		tw := tar.NewWriter(f)
+		_ = tw.WriteHeader(&tar.Header{Name: "dir", Mode: 0755, Typeflag: tar.TypeDir})
+		_ = tw.WriteHeader(&tar.Header{Name: "dir/file.txt", Mode: 0644, Size: 10, Typeflag: tar.TypeReg})
+		_, _ = tw.Write(make([]byte, 10))
+		_ = tw.WriteHeader(&tar.Header{Name: "sub/a.txt", Mode: 0644, Size: 20, Typeflag: tar.TypeReg})
+		_, _ = tw.Write(make([]byte, 20))
+		_ = tw.Close()
+		_ = f.Close()
+	}
+
+	var buf bytes.Buffer
+	if err := DoDiff(tar1, tar2, "", &buf); err != nil {
+		t.Fatalf("DoDiff failed: %v", err)
+	}
+	out := buf.String()
+	wantSummary := "+0 añadido(s), -0 eliminado(s), ~0 modificado(s), 3 sin cambios"
+	if !strings.Contains(out, wantSummary) {
+		t.Errorf("expected %q, got:\n%s", wantSummary, out)
+	}
+}
+

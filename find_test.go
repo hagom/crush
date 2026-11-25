@@ -196,3 +196,41 @@ func TestDoFind_TableCasesAndStreaming(t *testing.T) {
 		})
 	}
 }
+
+func TestDoFind_BackslashPathsAndSanitizesControlChars(t *testing.T) {
+	tmpDir := t.TempDir()
+	tarPath := filepath.Join(tmpDir, "win.tar")
+	f, err := os.Create(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(f)
+	_ = tw.WriteHeader(&tar.Header{Name: `etc\nginx\default.conf`, Mode: 0644, Size: 12, Typeflag: tar.TypeReg})
+	_, _ = tw.Write([]byte("server {}\n  "))
+	_ = tw.WriteHeader(&tar.Header{Name: "weird\x1b[31m.conf", Mode: 0644, Size: 4, Typeflag: tar.TypeReg})
+	_, _ = tw.Write([]byte("conf"))
+	_ = tw.Close()
+	_ = f.Close()
+
+	var buf1 bytes.Buffer
+	matches, err := DoFind("def*.conf", []string{tarPath}, "", &buf1)
+	if err != nil {
+		t.Fatalf("DoFind glob basename failed: %v", err)
+	}
+	if matches != 1 {
+		t.Errorf("got %d matches for backslash path basename glob, want 1 (out:\n%s)", matches, buf1.String())
+	}
+
+	var buf2 bytes.Buffer
+	matches2, err := DoFind("*.conf", []string{tarPath}, "", &buf2)
+	if err != nil {
+		t.Fatalf("DoFind glob failed: %v", err)
+	}
+	if matches2 != 2 {
+		t.Errorf("got %d matches for *.conf, want 2", matches2)
+	}
+	if strings.Contains(buf2.String(), "\x1b[31m") {
+		t.Errorf("DoFind leaked raw ANSI escape sequence:\n%q", buf2.String())
+	}
+}
+

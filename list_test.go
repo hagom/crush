@@ -253,3 +253,32 @@ func TestDoList_StreamsRowsIncrementally(t *testing.T) {
 		t.Fatalf("DoList buffered entire archive instead of streaming rows incrementally:\n%s", out)
 	}
 }
+
+func TestDoList_SanitizesTerminalControlCharsPreservesUTF8(t *testing.T) {
+	tmpDir := t.TempDir()
+	tarPath := filepath.Join(tmpDir, "ctrl.tar")
+	f, err := os.Create(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(f)
+	for _, name := range []string{"normal_español_ñ.txt", "evil\x1b[31m_red\r.txt"} {
+		_ = tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0644, Size: 3})
+		_, _ = tw.Write([]byte("abc"))
+	}
+	_ = tw.Close()
+	_ = f.Close()
+
+	var buf bytes.Buffer
+	if err := DoList(tarPath, "", &buf); err != nil {
+		t.Fatalf("DoList failed: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "normal_español_ñ.txt") {
+		t.Errorf("valid UTF-8 name mangled:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[31m") || strings.Contains(out, "\r") {
+		t.Errorf("raw terminal control sequence leaked in DoList output:\n%q", out)
+	}
+}
+

@@ -33,36 +33,40 @@ func DoTree(files []string, password string, out io.Writer) error {
 		if i > 0 {
 			fmt.Fprintln(out)
 		}
-		members, err := ListArchiveMembers(file, password)
-		if err != nil {
-			fmt.Fprintf(out, "%s✗ Error listando %s: %v%s\n", Red, file, err, NC)
-			continue
-		}
 
 		root := newTreeNode("", true)
 		var totalSize int64
 		var fileCount int
 		var dirCount int
 
-		for _, m := range members {
-			cleanPath := strings.TrimPrefix(m.Path, "/")
-			cleanPath = strings.TrimSuffix(cleanPath, "/")
+		err := IterArchiveMembers(file, password, func(m ArchiveMember) error {
+			cleanPath := normalizeArchiveMemberKey(m.Path)
 			if cleanPath == "" {
-				continue
+				return nil
 			}
 			parts := strings.Split(cleanPath, "/")
 			curr := root
-			for idx, part := range parts {
+			for idx, rawPart := range parts {
+				if rawPart == "" || rawPart == "." {
+					continue
+				}
+				part := sanitizeTerminalText(rawPart)
 				isLast := idx == len(parts)-1
 				isPartDir := !isLast || m.IsDir
 				child, exists := curr.children[part]
 				if !exists {
 					child = newTreeNode(part, isPartDir)
 					curr.children[part] = child
+				} else if isPartDir {
+					child.isDir = true
 				}
 				if isLast {
 					child.size = m.Size
-					child.isDir = m.IsDir
+					if m.IsDir || len(child.children) > 0 {
+						child.isDir = true
+					} else {
+						child.isDir = false
+					}
 				}
 				curr = child
 			}
@@ -72,9 +76,14 @@ func DoTree(files []string, password string, out io.Writer) error {
 				fileCount++
 				totalSize += m.Size
 			}
+			return nil
+		})
+		if err != nil {
+			fmt.Fprintf(out, "%s✗ Error listando %s: %v%s\n", Red, file, err, NC)
+			continue
 		}
 
-		fmt.Fprintf(out, "%s%s%s\n", Bold, file, NC)
+		fmt.Fprintf(out, "%s%s%s\n", Bold, sanitizeTerminalText(file), NC)
 		renderTree(out, root, "")
 
 		dirWord := "directorios"

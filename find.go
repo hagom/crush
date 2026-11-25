@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 )
@@ -35,25 +35,25 @@ func DoFind(pattern string, files []string, password string, out io.Writer) (int
 
 	for i, file := range files {
 		wg.Add(1)
-		go func(idx int, path string) {
+		go func(idx int, archivePath string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			var matches []ArchiveMember
-			err := IterArchiveMembers(path, password, func(m ArchiveMember) error {
+			err := IterArchiveMembers(archivePath, password, func(m ArchiveMember) error {
 				if m.IsDir {
 					return nil
 				}
-				mPathLower := strings.ToLower(m.Path)
-				baseLower := strings.ToLower(filepath.Base(m.Path))
+				normLower := strings.ToLower(strings.ReplaceAll(m.Path, "\\", "/"))
+				baseLower := path.Base(strings.TrimRight(normLower, "/"))
 
 				matched := false
-				if ok, _ := filepath.Match(patLower, baseLower); ok {
+				if ok, _ := path.Match(patLower, baseLower); ok {
 					matched = true
-				} else if ok, _ := filepath.Match(patLower, mPathLower); ok {
+				} else if ok, _ := path.Match(patLower, normLower); ok {
 					matched = true
-				} else if strings.Contains(mPathLower, patLower) {
+				} else if strings.Contains(normLower, patLower) {
 					matched = true
 				}
 
@@ -63,10 +63,10 @@ func DoFind(pattern string, files []string, password string, out io.Writer) (int
 				return nil
 			})
 			if err != nil {
-				results[idx] = findResult{archive: path, err: err}
+				results[idx] = findResult{archive: archivePath, err: err}
 				return
 			}
-			results[idx] = findResult{archive: path, matches: matches}
+			results[idx] = findResult{archive: archivePath, matches: matches}
 		}(i, file)
 	}
 
@@ -86,9 +86,9 @@ func DoFind(pattern string, files []string, password string, out io.Writer) (int
 		matchedArchives++
 		totalMatches += len(res.matches)
 
-		fmt.Fprintf(out, "%s%s%s:\n", Bold, res.archive, NC)
+		fmt.Fprintf(out, "%s%s%s:\n", Bold, sanitizeTerminalText(res.archive), NC)
 		for _, m := range res.matches {
-			fmt.Fprintf(out, "  → %s%s%s (%s)\n", Green, m.Path, NC, FormatSize(m.Size))
+			fmt.Fprintf(out, "  → %s%s%s (%s)\n", Green, sanitizeTerminalText(m.Path), NC, FormatSize(m.Size))
 		}
 	}
 

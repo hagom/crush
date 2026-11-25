@@ -10,11 +10,54 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
+
+func sanitizeTerminalText(s string) string {
+	needsClean := false
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < 0x20 || b == 0x7f || b >= 0x80 {
+			needsClean = true
+			break
+		}
+	}
+	if !needsClean {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for _, r := range s {
+		if r == unicode.ReplacementChar {
+			sb.WriteRune('?')
+		} else if unicode.IsControl(r) {
+			sb.WriteByte('?')
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+func normalizeArchiveMemberKey(raw string) string {
+	norm := strings.ReplaceAll(raw, "\\", "/")
+	norm = strings.TrimLeft(norm, "/")
+	if norm == "" {
+		return ""
+	}
+	clean := path.Clean(norm)
+	clean = strings.TrimPrefix(clean, "./")
+	clean = strings.TrimLeft(clean, "/")
+	if clean == "" || clean == "." {
+		return ""
+	}
+	return clean
+}
 
 var errStopIter = errors.New("stop iteration")
 

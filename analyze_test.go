@@ -1664,3 +1664,76 @@ func TestDoAnalyze_MultiTargetRotationalLimit(t *testing.T) {
 		}
 	})
 }
+
+func TestAnalyze_UTF8TruncationAndEdgeCases(t *testing.T) {
+	t.Run("renderAnalyzeReport preserves valid UTF-8 and truncates by rune count", func(t *testing.T) {
+		// Multi-byte UTF-8 names where byte index 25 lands mid-rune
+		entries := []EntryReport{
+			{
+				Name:           "documentación_histórica_español_2026.sql",
+				RelPath:        "documentación_histórica_español_2026.sql",
+				IsDir:          true,
+				TotalSize:      102400,
+				EstimatedSize:  20480,
+				SavingsBytes:   81920,
+				SavingsPct:     80.0,
+				CompLevel:      "Alta",
+				RecommendedFmt: "xz",
+				FileCount:      2,
+				Files: []FileAnalysis{
+					{
+						// 22 ASCII chars -> "  └─ " (5 runes, 9 bytes) + 22 runes = 27 runes (<= 28 runes, but 31 bytes > 28 bytes!)
+						Path:           "123456789012345678.txt",
+						Size:           51200,
+						EstimatedSize:  10240,
+						SavingsBytes:   40960,
+						SavingsPct:     80.0,
+						CompLevel:      "Alta",
+						RecommendedFmt: "xz",
+					},
+					{
+						// Multi-byte runes where byte 25 of "  └─ " + base cuts a 2-byte UTF-8 character in half
+						Path:           "configuración_producción_final.json",
+						Size:           51200,
+						EstimatedSize:  10240,
+						SavingsBytes:   40960,
+						SavingsPct:     80.0,
+						CompLevel:      "Alta",
+						RecommendedFmt: "xz",
+					},
+				},
+			},
+		}
+		summary := AnalyzeSummary{
+			TotalFiles:        2,
+			TotalDirs:         1,
+			TotalBytes:        102400,
+			CompressibleBytes: 102400,
+			EstimatedBytes:    20480,
+			SavingsBytes:      81920,
+			SavingsPct:        80.0,
+		}
+
+		var buf bytes.Buffer
+		renderAnalyzeReport("test_utf8", entries, summary, AnalyzeOptions{Verbose: true}, &buf)
+		out := buf.String()
+
+		if strings.ContainsRune(out, '\ufffd') {
+			t.Errorf("renderAnalyzeReport produced invalid UTF-8 replacement character:\\n%s", out)
+		}
+		if !strings.Contains(out, "  └─ 123456789012345678.txt") {
+			t.Errorf("27-rune inner file label should not be truncated at 28 runes, got:\\n%s", out)
+		}
+	})
+
+	t.Run("analyzeFileWithSize clamps negative size to zero", func(t *testing.T) {
+		res, err := analyzeFileWithSize("nonexistent_negative.bin", -128)
+		if err != nil {
+			t.Fatalf("unexpected error for negative size: %v", err)
+		}
+		if res.Size != 0 || res.EstimatedSize != 0 || res.SampleBytes != 0 {
+			t.Errorf("negative size leaked into result: Size=%d EstimatedSize=%d SampleBytes=%d",
+				res.Size, res.EstimatedSize, res.SampleBytes)
+		}
+	})
+}

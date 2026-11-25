@@ -49,6 +49,9 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 
 // analyzeFileWithSize analiza un archivo reutilizando un tamaño ya conocido para evitar llamadas os.Stat adicionales.
 func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
+	if size < 0 {
+		size = 0
+	}
 	res := FileAnalysis{
 		Path:          path,
 		Size:          size,
@@ -153,7 +156,10 @@ func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
 			chunkTail = fullSample[n1+n2 : n1+n2+n3]
 		}
 
-		hMid := CalculateShannonEntropy(chunkMid)
+		hMid := h1
+		if len(chunkMid) > 0 {
+			hMid = CalculateShannonEntropy(chunkMid)
+		}
 
 		// Puerta del cuerpo dominante: en archivos grandes (>= 192 KiB), si el cuerpo central
 		// es de alta entropía (ruido/video/cifrado), el archivo es incompresible con independencia
@@ -172,7 +178,10 @@ func analyzeFileWithSize(path string, size int64) (FileAnalysis, error) {
 
 		// Extrapolación ponderada por volumen real
 		ratioHead := probeDeflateRatio(chunkHead)
-		ratioMid := probeDeflateRatio(chunkMid)
+		ratioMid := ratioHead
+		if len(chunkMid) > 0 {
+			ratioMid = probeDeflateRatio(chunkMid)
+		}
 		ratioTail := ratioMid
 		if len(chunkTail) > 0 {
 			ratioTail = probeDeflateRatio(chunkTail)
@@ -356,6 +365,9 @@ func isPathExcluded(path string, isDir bool, excludes []string) bool {
 			if matched, _ := filepath.Match(cleanPat, base); matched {
 				return true
 			}
+			if matched, _ := filepath.Match(cleanPat, path); matched {
+				return true
+			}
 		}
 	}
 	return false
@@ -442,8 +454,10 @@ func buildSingleFileReport(target string, analysis FileAnalysis) ([]EntryReport,
 		SavingsPct:     analysis.SavingsPct,
 	}
 	if analysis.Compressible {
+		entry.CompressibleSize = analysis.Size
 		summary.CompressibleBytes = analysis.Size
 	} else {
+		entry.IncompressibleSize = analysis.Size
 		summary.IncompressibleBytes = analysis.Size
 	}
 	return []EntryReport{entry}, summary
@@ -1038,6 +1052,17 @@ func analyzeTarget(target string, opts AnalyzeOptions, excludes []string, out io
 	return nil
 }
 
+func truncateAnalyzeLabel(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
+}
+
 func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSummary, opts AnalyzeOptions, out io.Writer) {
 	fmt.Fprintf(out, "\n%s=== Informe de Compresibilidad: %s ===%s\n\n", Bold, target, NC)
 
@@ -1056,10 +1081,7 @@ func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSu
 			typeStr = "DIR"
 		}
 
-		nameDisplay := e.Name
-		if len(nameDisplay) > 28 {
-			nameDisplay = nameDisplay[:25] + "..."
-		}
+		nameDisplay := truncateAnalyzeLabel(e.Name, 28)
 
 		var compSymbol string
 		switch e.CompLevel {
@@ -1096,10 +1118,7 @@ func renderAnalyzeReport(target string, entries []EntryReport, summary AnalyzeSu
 
 		if opts.Verbose && len(e.Files) > 0 {
 			for _, f := range e.Files {
-				fName := "  └─ " + filepath.Base(f.Path)
-				if len(fName) > 28 {
-					fName = fName[:25] + "..."
-				}
+				fName := truncateAnalyzeLabel("  └─ "+filepath.Base(f.Path), 28)
 				fSavings := "-"
 				if f.SavingsBytes > 0 {
 					fSavings = fmt.Sprintf("-%s (%4.1f%%)", FormatSize(f.SavingsBytes), f.SavingsPct)

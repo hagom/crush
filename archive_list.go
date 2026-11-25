@@ -40,6 +40,30 @@ func ListArchiveMembers(file string, password string) ([]ArchiveMember, error) {
 	return members, err
 }
 
+func iterZipReader(file string, fn func(ArchiveMember) error) (bool, error) {
+	r, err := zip.OpenReader(file)
+	if err != nil {
+		return false, err
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		err := fn(ArchiveMember{
+			Path:     f.Name,
+			Size:     int64(f.UncompressedSize64),
+			Modified: f.Modified,
+			Mode:     f.Mode(),
+			IsDir:    f.FileInfo().IsDir() || strings.HasSuffix(f.Name, "/"),
+		})
+		if err != nil {
+			if errors.Is(err, errStopIter) {
+				return true, nil
+			}
+			return true, err
+		}
+	}
+	return true, nil
+}
+
 func IterArchiveMembers(file string, password string, fn func(ArchiveMember) error) error {
 	if fn == nil {
 		fn = func(ArchiveMember) error { return nil }
@@ -52,25 +76,11 @@ func IterArchiveMembers(file string, password string, fn func(ArchiveMember) err
 
 	lower := strings.ToLower(file)
 
-	if info.Format == Zip && password == "" {
-		if r, err := zip.OpenReader(file); err == nil {
-			defer r.Close()
-			for _, f := range r.File {
-				err := fn(ArchiveMember{
-					Path:     f.Name,
-					Size:     int64(f.UncompressedSize64),
-					Modified: f.Modified,
-					Mode:     f.Mode(),
-					IsDir:    f.FileInfo().IsDir() || strings.HasSuffix(f.Name, "/"),
-				})
-				if err != nil {
-					if errors.Is(err, errStopIter) {
-						return nil
-					}
-					return err
-				}
-			}
-			return nil
+	if info.Format == Zip && (password == "" || !hasTool(sevenzBin())) {
+		if opened, zErr := iterZipReader(file, fn); opened {
+			return zErr
+		} else if !hasTool(sevenzBin()) {
+			return zErr
 		}
 	}
 
@@ -99,7 +109,7 @@ func IterArchiveMembers(file string, password string, fn func(ArchiveMember) err
 					}
 					return iterErr
 				}
-				if count > 0 {
+				if iterErr == nil || count > 0 {
 					return iterErr
 				}
 			} else {
@@ -117,11 +127,11 @@ func IterArchiveMembers(file string, password string, fn func(ArchiveMember) err
 			if stdout, err := cmd.StdoutPipe(); err == nil {
 				if err := cmd.Start(); err == nil {
 					count, iterErr, fromCB := iterFromTarReader(tar.NewReader(stdout), fn)
+					var waitErr error
 					if fromCB || iterErr != nil {
 						stopSubprocess(cmd, stdout)
 					} else {
-						_ = stdout.Close()
-						_ = cmd.Wait()
+						waitErr = cmd.Wait()
 					}
 					if closer != nil {
 						_ = closer.Close()
@@ -133,8 +143,14 @@ func IterArchiveMembers(file string, password string, fn func(ArchiveMember) err
 						}
 						return iterErr
 					}
+					if iterErr == nil && waitErr == nil {
+						return nil
+					}
 					if count > 0 {
-						return iterErr
+						if iterErr != nil {
+							return iterErr
+						}
+						return waitErr
 					}
 				}
 			}
@@ -143,19 +159,14 @@ func IterArchiveMembers(file string, password string, fn func(ArchiveMember) err
 			}
 		}
 
-		count, err, fromCB := iterTarFallback(file, fn)
+		_, err, fromCB := iterTarFallback(file, fn)
 		if fromCB {
 			if errors.Is(err, errStopIter) {
 				return nil
 			}
 			return err
 		}
-		if err != nil {
-			return err
-		}
-		if count > 0 {
-			return nil
-		}
+		return err
 	}
 
 	if info.Format == SevenZ || info.Format == Zip {
@@ -163,30 +174,30 @@ func IterArchiveMembers(file string, password string, fn func(ArchiveMember) err
 	}
 
 	if info.Format == Rar {
-		count, err, fromCB := iterRarStream(file, password, fn)
+		if !hasTool(rarBin()) {
+			return fmt.Errorf("herramienta %s no disponible", rarBin())
+		}
+		_, err, fromCB := iterRarStream(file, password, fn)
 		if fromCB {
 			if errors.Is(err, errStopIter) {
 				return nil
 			}
 			return err
 		}
-		if err != nil {
-			return err
-		}
-		if count > 0 {
-			return nil
-		}
+		return err
 	}
 
 	if info.IsStream() && !info.IsTar {
+		fi, err := os.Stat(file)
+		if err != nil {
+			return err
+		}
 		baseName := stripCompressionExt(filepath.Base(file))
 		size := EstimateUncompressedSize(file)
 		if size <= 0 {
-			if fi, err := os.Stat(file); err == nil {
-				size = fi.Size()
-			}
+			size = fi.Size()
 		}
-		err := fn(ArchiveMember{
+		err = fn(ArchiveMember{
 			Path:  baseName,
 			Size:  size,
 			IsDir: false,
@@ -214,6 +225,9 @@ func streamCmdLines(cmd *exec.Cmd, onLine func(string) error) (error, bool) {
 	if cmd.Stdin == nil {
 		cmd.Stdin = getNullFile()
 	}
+	if cmd.Stderr == nil {
+		cmd.Stderr = newLimitedBuffer(maxStderrBytes)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err, false
@@ -230,8 +244,11 @@ func streamCmdLines(cmd *exec.Cmd, onLine func(string) error) (error, bool) {
 		}
 	}
 	scanErr := sc.Err()
-	_ = cmd.Wait()
-	return scanErr, false
+	waitErr := augmentErr(cmd, cmd.Wait())
+	if scanErr != nil {
+		return scanErr, false
+	}
+	return waitErr, false
 }
 
 func iterLineMembers(cmd *exec.Cmd, fn func(ArchiveMember) error) (int, error, bool) {
@@ -251,7 +268,7 @@ func iterLineMembers(cmd *exec.Cmd, fn func(ArchiveMember) error) (int, error, b
 	if fromCB {
 		return count, err, true
 	}
-	if err != nil && errors.Is(err, bufio.ErrTooLong) {
+	if err != nil {
 		return count, err, false
 	}
 	return count, nil, false
@@ -324,7 +341,7 @@ func iterSevenZipDetailed(file string, format Format, password string, fn func(A
 	} else {
 		args = append(args, "-p-")
 	}
-	args = append(args, "--", file)
+	args = append(args, "--", safeFlagArg(file))
 
 	var cur ArchiveMember
 	emitted := 0
@@ -356,7 +373,16 @@ func iterSevenZipDetailed(file string, format Format, password string, fn func(A
 		case strings.HasPrefix(line, "Folder = "):
 			cur.IsDir = strings.TrimPrefix(line, "Folder = ") == "+"
 		case strings.HasPrefix(line, "Attributes = "):
-			if strings.Contains(strings.TrimPrefix(line, "Attributes = "), "D") {
+			attrs := strings.TrimPrefix(line, "Attributes = ")
+			for _, field := range strings.Fields(attrs) {
+				if field == "D" || (len(field) >= 1 && field[0] == 'd' && len(field) >= 10) {
+					cur.IsDir = true
+				}
+				if len(field) >= 10 && field[0] == 'l' {
+					cur.Mode |= os.ModeSymlink
+				}
+			}
+			if strings.Contains(attrs, "D") {
 				cur.IsDir = true
 			}
 		}
@@ -368,14 +394,13 @@ func iterSevenZipDetailed(file string, format Format, password string, fn func(A
 		}
 		return err
 	}
-	if err != nil {
-		return err
-	}
-	if cbErr := emit(); cbErr != nil {
-		if errors.Is(cbErr, errStopIter) {
-			return nil
+	if err == nil {
+		if cbErr := emit(); cbErr != nil {
+			if errors.Is(cbErr, errStopIter) {
+				return nil
+			}
+			return cbErr
 		}
-		return cbErr
 	}
 
 	if emitted == 0 {
@@ -384,7 +409,10 @@ func iterSevenZipDetailed(file string, format Format, password string, fn func(A
 				return iterSevenZipDetailed(file, format, resolved, fn)
 			}
 		}
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("no se encontraron miembros en %s", file)
 	}
-	return nil
+	return err
 }

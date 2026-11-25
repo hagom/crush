@@ -155,6 +155,18 @@ func TestStreamListHelperProcess(t *testing.T) {
 	case "fail-empty":
 		os.Exit(1)
 
+	case "fail-after-one":
+		fmt.Println("partial_entry.txt")
+		fmt.Fprintln(os.Stderr, "rar: CRC error in archive")
+		os.Exit(3)
+
+	case "7z-slt-symlink":
+		fmt.Println("Path = link_out")
+		fmt.Println("Size = 12")
+		fmt.Println("Modified = 2026-05-01 10:20:30")
+		fmt.Println("Attributes = A lrwxrwxrwx")
+		fmt.Println()
+
 	case "tar-long-lines":
 		longPath := "deep/" + strings.Repeat("a", 80*1024) + ".txt"
 		fmt.Println("dir/")
@@ -667,3 +679,173 @@ func TestIterArchiveMembers_RarStreamingAndEarlyStop(t *testing.T) {
 		}
 	})
 }
+
+func TestIterArchiveMembers_PropagatesSubprocessErrorsAndEmptyTar(t *testing.T) {
+	t.Run("missing single stream gz returns error", func(t *testing.T) {
+		missingGz := filepath.Join(t.TempDir(), "does_not_exist.txt.gz")
+		err := IterArchiveMembers(missingGz, "", func(m ArchiveMember) error { return nil })
+		if err == nil {
+			t.Fatalf("expected error for missing .gz, got nil")
+		}
+	})
+
+	t.Run("empty tar.gz and empty tar.xz succeed cleanly", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		emptyTarGz := filepath.Join(tmpDir, "empty.tar.gz")
+		{
+			f, err := os.Create(emptyTarGz)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gw := gzip.NewWriter(f)
+			tw := tar.NewWriter(gw)
+			_ = tw.Close()
+			_ = gw.Close()
+			_ = f.Close()
+		}
+		got := 0
+		if err := IterArchiveMembers(emptyTarGz, "", func(m ArchiveMember) error {
+			got++
+			return nil
+		}); err != nil || got != 0 {
+			t.Errorf("empty.tar.gz = (%d, %v), want (0, nil)", got, err)
+		}
+
+		if hasTool("xz") && hasTool("tar") {
+			emptyTar := filepath.Join(tmpDir, "empty.tar")
+			emptyTarXz := filepath.Join(tmpDir, "empty.tar.xz")
+			if out, err := exec.Command("tar", "-cf", emptyTar, "-T", "/dev/null").CombinedOutput(); err != nil {
+				t.Fatalf("tar empty failed: %v %s", err, string(out))
+			}
+			if out, err := exec.Command("xz", "-z", emptyTar).CombinedOutput(); err != nil {
+				t.Fatalf("xz empty failed: %v %s", err, string(out))
+			}
+			gotXz := 0
+			if err := IterArchiveMembers(emptyTarXz, "", func(m ArchiveMember) error {
+				gotXz++
+				return nil
+			}); err != nil || gotXz != 0 {
+				t.Errorf("empty.tar.xz = (%d, %v), want (0, nil)", gotXz, err)
+			}
+		}
+	})
+
+	t.Run("rar partial failure propagates exit error", func(t *testing.T) {
+		origExec := execCommand
+		origLook := lookPath
+		defer func() {
+			execCommand = origExec
+			lookPath = origLook
+		}()
+		lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			return streamListMockCmd("fail-after-one")
+		}
+
+		var got []string
+		err := IterArchiveMembers("broken.rar", "", func(m ArchiveMember) error {
+			got = append(got, m.Path)
+			return nil
+		})
+		if err == nil {
+			t.Fatalf("expected error from failing rar subprocess after 1 line, got nil (members=%v)", got)
+		}
+		if !strings.Contains(err.Error(), "CRC error") {
+			t.Errorf("expected stderr error context in err, got: %v", err)
+		}
+	})
+
+	t.Run("tar fallback failure propagates error", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "tar" {
+				return streamListMockCmd("fail-after-one")
+			}
+			return streamListMockCmd("fail-empty")
+		}
+
+		err := IterArchiveMembers("broken.tar.xz", "", func(m ArchiveMember) error { return nil })
+		if err == nil {
+			t.Fatalf("expected error from failing tar fallback, got nil")
+		}
+	})
+}
+
+func TestIterArchiveMembers_EncryptedZipFallbackWithout7z(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "pass.zip")
+	{
+		f, err := os.Create(zipPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(f)
+		w, err := zw.Create("entry.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte("zip body"))
+		_ = zw.Close()
+		_ = f.Close()
+	}
+
+	origLook := lookPath
+	defer func() { lookPath = origLook }()
+	lookPath = func(name string) (string, error) {
+		if name == "unzip" {
+			return "/usr/bin/unzip", nil
+		}
+		return "", exec.ErrNotFound
+	}
+
+	var got []ArchiveMember
+	err := IterArchiveMembers(zipPath, "somepass", func(m ArchiveMember) error {
+		got = append(got, m)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected fallback to zip.OpenReader when 7z absent, got: %v", err)
+	}
+	if len(got) != 1 || got[0].Path != "entry.txt" {
+		t.Errorf("got members %+v, want entry.txt", got)
+	}
+}
+
+func TestIterArchiveMembers_SevenZipSymlinkModeAndSafeFlagArg(t *testing.T) {
+	origExec := execCommand
+	origLook := lookPath
+	defer func() {
+		execCommand = origExec
+		lookPath = origLook
+	}()
+	lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+	var gotArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		gotArgs = append([]string(nil), args...)
+		return streamListMockCmd("7z-slt-symlink")
+	}
+
+	var got []ArchiveMember
+	err := IterArchiveMembers("-.7z", "", func(m ArchiveMember) error {
+		got = append(got, m)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("IterArchiveMembers(-.7z) failed: %v", err)
+	}
+	if len(got) != 1 || got[0].Mode&os.ModeSymlink == 0 {
+		t.Errorf("expected os.ModeSymlink to be parsed from 7z Attributes, got: %+v", got)
+	}
+	foundSafe := false
+	for _, a := range gotArgs {
+		if a == "./-.7z" {
+			foundSafe = true
+		}
+	}
+	if !foundSafe {
+		t.Errorf("expected ./-.7z via safeFlagArg in 7z args: %v", gotArgs)
+	}
+}
+

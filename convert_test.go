@@ -1,8 +1,12 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -788,5 +792,427 @@ func TestConvertViaTempDir_FallbackDirWhenTmpLowSpace(t *testing.T) {
 		t.Errorf("staging dir %s should be cleaned up", capturedStagingDir)
 	}
 }
+
+func readTarEntriesFromArchive(t *testing.T, path string, format Format) map[string]struct {
+	typeflag byte
+	mode     int64
+	linkname string
+	data     []byte
+} {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+
+	var r io.Reader = f
+	switch format {
+	case Gz:
+		gr, gErr := gzip.NewReader(f)
+		if gErr != nil {
+			t.Fatalf("gzip reader %s: %v", path, gErr)
+		}
+		defer gr.Close()
+		r = gr
+	case Zst:
+		cmd := exec.Command("zstd", "-dc", "--", path)
+		out, zErr := cmd.Output()
+		if zErr != nil {
+			t.Fatalf("zstd -dc %s: %v", path, zErr)
+		}
+		r = bytes.NewReader(out)
+	}
+
+	tr := tar.NewReader(r)
+	got := make(map[string]struct {
+		typeflag byte
+		mode     int64
+		linkname string
+		data     []byte
+	})
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar.Next %s: %v", path, err)
+		}
+		var data []byte
+		if hdr.Typeflag == tar.TypeReg {
+			data, err = io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read tar member %s: %v", hdr.Name, err)
+			}
+		}
+		got[strings.TrimSuffix(hdr.Name, "/")] = struct {
+			typeflag byte
+			mode     int64
+			linkname string
+			data     []byte
+		}{
+			typeflag: hdr.Typeflag,
+			mode:     hdr.Mode & 0o777,
+			linkname: hdr.Linkname,
+			data:     data,
+		}
+	}
+	return got
+}
+
+func TestDoConvert_StreamZipToTarVariants(t *testing.T) {
+	tests := []struct {
+		name         string
+		targetFormat Format
+		wantExt      string
+		needTool     string
+	}{
+		{name: "zip to plain tar", targetFormat: Tar, wantExt: ".tar"},
+		{name: "zip to tar.gz", targetFormat: Gz, wantExt: ".tar.gz", needTool: "gzip"},
+		{name: "zip to tar.zst", targetFormat: Zst, wantExt: ".tar.zst", needTool: "zstd"},
+	}
+
+	largePayload := bytes.Repeat([]byte("ZIP2TAR-STREAM-BLOCK-"), 16*1024) // ~336 KiB > 256 KiB buf
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.needTool == "gzip" && !hasTool("pigz") && !hasTool("gzip") {
+				t.Skip("gzip/pigz not available")
+			} else if tt.needTool != "" && tt.needTool != "gzip" && !hasTool(tt.needTool) {
+				t.Skipf("%s not available", tt.needTool)
+			}
+
+			tmpDir := t.TempDir()
+			zipPath := filepath.Join(tmpDir, "bundle.zip")
+			zf, err := os.Create(zipPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			zw := zip.NewWriter(zf)
+
+			// 1. Directory
+			dh := &zip.FileHeader{Name: "empty_dir/", Method: zip.Store}
+			dh.SetMode(os.ModeDir | 0o750)
+			if _, err := zw.CreateHeader(dh); err != nil {
+				t.Fatal(err)
+			}
+			// 2. Regular text file
+			fh1 := &zip.FileHeader{Name: "hello.txt", Method: zip.Deflate}
+			fh1.SetMode(0o644)
+			w1, _ := zw.CreateHeader(fh1)
+			_, _ = w1.Write([]byte("hello stream zip->tar\n"))
+			// 3. Executable nested file
+			fh2 := &zip.FileHeader{Name: "bin/run.sh", Method: zip.Deflate}
+			fh2.SetMode(0o755)
+			w2, _ := zw.CreateHeader(fh2)
+			_, _ = w2.Write([]byte("#!/bin/sh\necho ok\n"))
+			// 4. Symlink
+			sh := &zip.FileHeader{Name: "link.txt", Method: zip.Store}
+			sh.SetMode(os.ModeSymlink | 0o777)
+			ws, _ := zw.CreateHeader(sh)
+			_, _ = ws.Write([]byte("hello.txt"))
+			// 5. Large payload > streamBufSize
+			fhBig := &zip.FileHeader{Name: "big.bin", Method: zip.Deflate}
+			fhBig.SetMode(0o640)
+			wb, _ := zw.CreateHeader(fhBig)
+			_, _ = wb.Write(largePayload)
+
+			if err := zw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			_ = zf.Close()
+
+			origExec := execCommand
+			defer func() { execCommand = origExec }()
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				if name == "unzip" || name == "tar" || name == "7z" || name == "7zz" || name == "7za" {
+					t.Errorf("streaming zip->tar must NOT invoke external %q (args=%v)", name, args)
+				}
+				return origExec(name, args...)
+			}
+
+			outPath := filepath.Join(tmpDir, "bundle"+tt.wantExt)
+			if err := DoConvert([]string{zipPath}, tt.targetFormat, ConvertOptions{KeepOrig: true}); err != nil {
+				t.Fatalf("DoConvert zip -> %s failed: %v", tt.targetFormat, err)
+			}
+			if _, err := os.Stat(outPath); err != nil {
+				t.Fatalf("expected output %s missing: %v", outPath, err)
+			}
+
+			entries := readTarEntriesFromArchive(t, outPath, tt.targetFormat)
+			if e, ok := entries["empty_dir"]; !ok || e.typeflag != tar.TypeDir || e.mode != 0o750 {
+				t.Errorf("empty_dir mismatch: ok=%v got=%+v", ok, e)
+			}
+			if e, ok := entries["hello.txt"]; !ok || e.typeflag != tar.TypeReg || string(e.data) != "hello stream zip->tar\n" || e.mode != 0o644 {
+				t.Errorf("hello.txt mismatch: ok=%v type=%v mode=%o", ok, e.typeflag, e.mode)
+			}
+			if e, ok := entries["bin/run.sh"]; !ok || e.typeflag != tar.TypeReg || string(e.data) != "#!/bin/sh\necho ok\n" || e.mode != 0o755 {
+				t.Errorf("bin/run.sh mismatch: ok=%v type=%v mode=%o", ok, e.typeflag, e.mode)
+			}
+			if e, ok := entries["link.txt"]; !ok || e.typeflag != tar.TypeSymlink || e.linkname != "hello.txt" {
+				t.Errorf("link.txt mismatch: ok=%v got=%+v", ok, e)
+			}
+			if e, ok := entries["big.bin"]; !ok || !bytes.Equal(e.data, largePayload) || e.mode != 0o640 {
+				t.Errorf("big.bin mismatch: ok=%v len=%d want=%d mode=%o", ok, len(e.data), len(largePayload), e.mode)
+			}
+		})
+	}
+}
+
+func TestDoConvert_StreamTarToZipVariants(t *testing.T) {
+	tests := []struct {
+		name      string
+		srcFormat Format
+		srcExt    string
+		needTool  string
+	}{
+		{name: "plain tar to zip", srcFormat: Tar, srcExt: ".tar"},
+		{name: "tar.gz to zip", srcFormat: Gz, srcExt: ".tar.gz", needTool: "gzip"},
+	}
+
+	largePayload := bytes.Repeat([]byte("TAR2ZIP-STREAM-DATA-"), 16*1024)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.needTool == "gzip" && !hasTool("pigz") && !hasTool("gzip") {
+				t.Skip("gzip/pigz not available")
+			}
+
+			tmpDir := t.TempDir()
+			srcPath := filepath.Join(tmpDir, "pkg"+tt.srcExt)
+			sf, err := os.Create(srcPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var rawW io.Writer = sf
+			var gw *gzip.Writer
+			if tt.srcFormat == Gz {
+				gw = gzip.NewWriter(sf)
+				rawW = gw
+			}
+			tw := tar.NewWriter(rawW)
+
+			// Root "." entry should be skipped cleanly, nested sub/ dir preserved
+			_ = tw.WriteHeader(&tar.Header{Name: "./", Typeflag: tar.TypeDir, Mode: 0o755})
+			_ = tw.WriteHeader(&tar.Header{Name: "sub/", Typeflag: tar.TypeDir, Mode: 0o750})
+			_ = tw.WriteHeader(&tar.Header{Name: "alpha.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 5})
+			_, _ = tw.Write([]byte("alpha"))
+			_ = tw.WriteHeader(&tar.Header{Name: "sub/tool", Typeflag: tar.TypeReg, Mode: 0o755, Size: 6})
+			_, _ = tw.Write([]byte("script"))
+			_ = tw.WriteHeader(&tar.Header{Name: "sym", Typeflag: tar.TypeSymlink, Linkname: "alpha.txt", Mode: 0o777})
+			_ = tw.WriteHeader(&tar.Header{Name: "blob.bin", Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(largePayload))})
+			_, _ = tw.Write(largePayload)
+
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if gw != nil {
+				_ = gw.Close()
+			}
+			_ = sf.Close()
+
+			origExec := execCommand
+			defer func() { execCommand = origExec }()
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				if name == "zip" || name == "tar" || name == "7z" || name == "7zz" || name == "7za" {
+					t.Errorf("streaming tar->zip must NOT invoke external %q (args=%v)", name, args)
+				}
+				return origExec(name, args...)
+			}
+
+			outZip := filepath.Join(tmpDir, "pkg.zip")
+			if err := DoConvert([]string{srcPath}, Zip, ConvertOptions{KeepOrig: true}); err != nil {
+				t.Fatalf("DoConvert %s -> zip failed: %v", tt.srcExt, err)
+			}
+
+			zr, err := zip.OpenReader(outZip)
+			if err != nil {
+				t.Fatalf("zip.OpenReader(%s): %v", outZip, err)
+			}
+			defer zr.Close()
+
+			got := make(map[string]*zip.File)
+			for _, f := range zr.File {
+				got[f.Name] = f
+			}
+
+			if f, ok := got["sub/"]; !ok || !f.FileInfo().IsDir() || f.Mode().Perm() != 0o750 {
+				t.Errorf("sub/ mismatch: ok=%v", ok)
+			}
+			readZipEntry := func(name string) ([]byte, os.FileMode) {
+				f, ok := got[name]
+				if !ok {
+					t.Fatalf("missing zip entry %q", name)
+				}
+				rc, rErr := f.Open()
+				if rErr != nil {
+					t.Fatalf("open zip entry %q: %v", name, rErr)
+				}
+				defer rc.Close()
+				b, _ := io.ReadAll(rc)
+				return b, f.Mode()
+			}
+
+			if data, mode := readZipEntry("alpha.txt"); string(data) != "alpha" || mode.Perm() != 0o644 {
+				t.Errorf("alpha.txt mismatch: data=%q mode=%o", data, mode.Perm())
+			}
+			if data, mode := readZipEntry("sub/tool"); string(data) != "script" || mode.Perm() != 0o755 {
+				t.Errorf("sub/tool mismatch: data=%q mode=%o", data, mode.Perm())
+			}
+			if data, mode := readZipEntry("sym"); mode&os.ModeSymlink == 0 || string(data) != "alpha.txt" {
+				t.Errorf("sym mismatch: mode=%v data=%q", mode, data)
+			}
+			if data, _ := readZipEntry("blob.bin"); !bytes.Equal(data, largePayload) {
+				t.Errorf("blob.bin len=%d, want=%d", len(data), len(largePayload))
+			}
+		})
+	}
+}
+
+func TestConvertStreaming_FallbacksAndErrors(t *testing.T) {
+	t.Run("password causes fallback sentinel for both directions", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		err := convertZipToTarStream(filepath.Join(tmpDir, "a.zip"), filepath.Join(tmpDir, "a.tar"), Tar, ConvertOptions{Password: "secret"})
+		if !errors.Is(err, errFallbackTempConvert) {
+			t.Errorf("convertZipToTarStream with password = %v, want errFallbackTempConvert", err)
+		}
+		err = convertTarToZipStream(filepath.Join(tmpDir, "a.tar"), filepath.Join(tmpDir, "a.zip"), FormatInfo{Format: Tar}, ConvertOptions{Password: "secret"})
+		if !errors.Is(err, errFallbackTempConvert) {
+			t.Errorf("convertTarToZipStream with password = %v, want errFallbackTempConvert", err)
+		}
+	})
+
+	t.Run("encrypted zip flag bit triggers fallback", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		zipPath := filepath.Join(tmpDir, "enc.zip")
+		zf, _ := os.Create(zipPath)
+		zw := zip.NewWriter(zf)
+		w, _ := zw.Create("a.txt")
+		_, _ = w.Write([]byte("payload"))
+		_ = zw.Close()
+		_ = zf.Close()
+
+		// Flip bit 0 (encrypted) in both local file header and central directory header for valid test detection.
+		raw, _ := os.ReadFile(zipPath)
+		raw[6] |= 0x01
+		cdIdx := bytes.Index(raw, []byte("PK\x01\x02"))
+		if cdIdx < 0 {
+			t.Fatal("central directory not found")
+		}
+		raw[cdIdx+8] |= 0x01
+		if err := os.WriteFile(zipPath, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := convertZipToTarStream(zipPath, filepath.Join(tmpDir, "enc.tar"), Tar, ConvertOptions{})
+		if !errors.Is(err, errFallbackTempConvert) {
+			t.Errorf("encrypted zip flag expected errFallbackTempConvert, got %v", err)
+		}
+	})
+
+	t.Run("unsupported zip compression method triggers fallback", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		zipPath := filepath.Join(tmpDir, "custom_method.zip")
+		zf, _ := os.Create(zipPath)
+		zw := zip.NewWriter(zf)
+		zw.RegisterCompressor(99, func(w io.Writer) (io.WriteCloser, error) {
+			return nopWriteCloser{w}, nil
+		})
+		h := &zip.FileHeader{Name: "a.txt", Method: 99}
+		w, _ := zw.CreateHeader(h)
+		_, _ = w.Write([]byte("custom"))
+		_ = zw.Close()
+		_ = zf.Close()
+
+		err := convertZipToTarStream(zipPath, filepath.Join(tmpDir, "custom.tar"), Tar, ConvertOptions{})
+		if !errors.Is(err, errFallbackTempConvert) {
+			t.Errorf("unsupported zip method expected errFallbackTempConvert, got %v", err)
+		}
+	})
+
+	t.Run("tar hardlink triggers fallback and DoConvert completes via temp dir", func(t *testing.T) {
+		if !hasTool("zip") && !hasTool(sevenzBin()) {
+			t.Skip("zip/7z not available")
+		}
+		tmpDir := t.TempDir()
+		tarPath := filepath.Join(tmpDir, "hardlink.tar")
+		tf, _ := os.Create(tarPath)
+		tw := tar.NewWriter(tf)
+		_ = tw.WriteHeader(&tar.Header{Name: "orig.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 4})
+		_, _ = tw.Write([]byte("body"))
+		_ = tw.WriteHeader(&tar.Header{Name: "hard.txt", Typeflag: tar.TypeLink, Linkname: "orig.txt", Mode: 0o644})
+		_ = tw.Close()
+		_ = tf.Close()
+
+		outZip := filepath.Join(tmpDir, "hardlink.zip")
+		err := convertTarToZipStream(tarPath, outZip, FormatInfo{Format: Tar}, ConvertOptions{})
+		if !errors.Is(err, errFallbackTempConvert) {
+			t.Fatalf("tar hardlink expected errFallbackTempConvert, got %v", err)
+		}
+
+		if err := DoConvert([]string{tarPath}, Zip, ConvertOptions{KeepOrig: true}); err != nil {
+			t.Fatalf("DoConvert fallback with hardlink failed: %v", err)
+		}
+		if _, err := os.Stat(outZip); err != nil {
+			t.Fatalf("fallback zip missing: %v", err)
+		}
+	})
+
+	t.Run("compressor failure in zip->tar stream cleans up and keeps original", func(t *testing.T) {
+		if !hasTool("xz") {
+			t.Skip("xz not available")
+		}
+		tmpDir := t.TempDir()
+		zipPath := filepath.Join(tmpDir, "fail.zip")
+		zf, _ := os.Create(zipPath)
+		zw := zip.NewWriter(zf)
+		w, _ := zw.Create("a.txt")
+		_, _ = w.Write([]byte("data"))
+		_ = zw.Close()
+		_ = zf.Close()
+
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+		var compCmd *exec.Cmd
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			compCmd = mockExecCommand("mock-fail-compressor")
+			return compCmd
+		}
+
+		outPath := filepath.Join(tmpDir, "fail.tar.xz")
+		err := convertZipToTarStream(zipPath, outPath, Xz, ConvertOptions{})
+		if err == nil {
+			t.Fatal("expected error when stream compressor fails, got nil")
+		}
+		if _, sErr := os.Stat(outPath); !os.IsNotExist(sErr) {
+			t.Errorf("partial output %s should not exist", outPath)
+		}
+		if compCmd != nil && compCmd.ProcessState == nil {
+			t.Errorf("compressor child was not reaped")
+		}
+	})
+
+	t.Run("corrupt tar.gz in tar->zip stream errors cleanly without partial output", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		badTarGz := filepath.Join(tmpDir, "corrupt.tar.gz")
+		_ = os.WriteFile(badTarGz, []byte("not-a-valid-gzip-stream"), 0o644)
+
+		outZip := filepath.Join(tmpDir, "corrupt.zip")
+		err := convertTarToZipStream(badTarGz, outZip, FormatInfo{Format: Gz, IsTar: true}, ConvertOptions{})
+		if err == nil {
+			t.Fatal("expected error on corrupt tar.gz input, got nil")
+		}
+		if _, sErr := os.Stat(outZip); !os.IsNotExist(sErr) {
+			t.Errorf("partial zip %s should not exist", outZip)
+		}
+	})
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
 
 

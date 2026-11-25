@@ -612,32 +612,58 @@ func probeDiskAvail(dir string) (int64, bool) {
 		target = parent
 	}
 
-	cmd := execCommand("df", "-B1", "--output=avail", target)
+	safeTarget := safeFlagArg(target)
+	cmd := execCommand("df", "-B1", "--output=avail", "--", safeTarget)
 	out, err := cmd.Output()
 	if err == nil {
 		lines := strings.Split(string(out), "\n")
 		if len(lines) >= 2 {
-			if avail, err := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64); err == nil {
+			s := strings.TrimSpace(lines[1])
+			if avail, ok := parseDiskInt64Clamped(s, 1); ok {
 				return avail, true
 			}
 		}
 	}
 
-	cmd = execCommand("df", target)
+	cmd = execCommand("df", "--", safeTarget)
 	out, err = cmd.Output()
 	if err == nil {
 		lines := strings.Split(string(out), "\n")
 		if len(lines) >= 2 {
 			fields := strings.Fields(lines[1])
 			if len(fields) >= 4 {
-				if blocks, err := strconv.ParseInt(fields[3], 10, 64); err == nil {
-					return blocks * 1024, true
+				if avail, ok := parseDiskInt64Clamped(fields[3], 1024); ok {
+					return avail, true
 				}
 			}
 		}
 	}
 
 	return 0, false
+}
+
+func parseDiskInt64Clamped(s string, scale int64) (int64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	if strings.HasPrefix(s, "-") {
+		if _, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return 0, true
+		}
+		return 0, false
+	}
+	u, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	if scale > 1 && u > uint64(math.MaxInt64)/uint64(scale) {
+		return math.MaxInt64, true
+	}
+	prod := u * uint64(scale)
+	if prod > uint64(math.MaxInt64) {
+		return math.MaxInt64, true
+	}
+	return int64(prod), true
 }
 
 func GetAvailBytes(dir string) int64 {
@@ -675,6 +701,61 @@ func isPrecompressedFile(name string) bool {
 	return false
 }
 
+func addClampedInt64(a, b int64) int64 {
+	if b <= 0 {
+		return a
+	}
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+func mulDivClampedInt64(v, num, den int64) int64 {
+	if v <= 0 || num <= 0 || den <= 0 {
+		return 0
+	}
+	q := v / den
+	r := v % den
+	if q > math.MaxInt64/num {
+		return math.MaxInt64
+	}
+	return addClampedInt64(q*num, (r*num)/den)
+}
+
+func parsePositiveSizeClamped(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.HasPrefix(s, "-") {
+		return 0, false
+	}
+	u, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || u == 0 {
+		return 0, false
+	}
+	if u > uint64(math.MaxInt64) {
+		return math.MaxInt64, true
+	}
+	return int64(u), true
+}
+
+func sum7zSltSizes(tool, safeFile string) int64 {
+	cmd := execCommand(tool, "l", "-slt", "-p-", "--", safeFile)
+	cmd.Stdin = getNullFile()
+	out, _ := cmd.Output()
+	var sum int64
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "Size = ") {
+			parts := strings.SplitN(line, "= ", 2)
+			if len(parts) == 2 {
+				if size, ok := parsePositiveSizeClamped(parts[1]); ok {
+					sum = addClampedInt64(sum, size)
+				}
+			}
+		}
+	}
+	return sum
+}
+
 func EstimateCompressedSize(totalSize int64, format Format, files []string) int64 {
 	if len(files) > 0 {
 		allPre := true
@@ -685,7 +766,7 @@ func EstimateCompressedSize(totalSize int64, format Format, files []string) int6
 			}
 		}
 		if allPre {
-			est := totalSize * 95 / 100
+			est := mulDivClampedInt64(totalSize, 95, 100)
 			if est < 1<<20 {
 				est = 1 << 20
 			}
@@ -693,32 +774,31 @@ func EstimateCompressedSize(totalSize int64, format Format, files []string) int6
 		}
 	}
 
-	var estimated int64
+	var pct int64
 	switch format {
 	case Tar:
-		estimated = totalSize * 102 / 100
+		pct = 102
 	case Lz4:
-		estimated = totalSize * 60 / 100
+		pct = 60
 	case Zip:
-		estimated = totalSize * 50 / 100
+		pct = 50
 	case Gz:
-		estimated = totalSize * 40 / 100
+		pct = 40
 	case Zst:
-		estimated = totalSize * 35 / 100
-	case Bz2:
-		estimated = totalSize * 30 / 100
-	case Rar:
-		estimated = totalSize * 30 / 100
+		pct = 35
+	case Bz2, Rar:
+		pct = 30
 	case Br:
-		estimated = totalSize * 28 / 100
+		pct = 28
 	case SevenZ, Xz, Bz3, Lz:
-		estimated = totalSize * 25 / 100
+		pct = 25
 	case Lrz:
-		estimated = totalSize * 20 / 100
+		pct = 20
 	default:
-		estimated = totalSize * 35 / 100
+		pct = 35
 	}
 
+	estimated := mulDivClampedInt64(totalSize, pct, 100)
 	if estimated < 1<<20 {
 		estimated = 1 << 20
 	}
@@ -727,6 +807,7 @@ func EstimateCompressedSize(totalSize int64, format Format, files []string) int6
 
 func EstimateUncompressedSize(file string) int64 {
 	f := strings.ToLower(file)
+	safeFile := safeFlagArg(file)
 
 	switch {
 	case strings.HasSuffix(f, ".gz") || strings.HasSuffix(f, ".tgz"):
@@ -744,28 +825,28 @@ func EstimateUncompressedSize(file string) int64 {
 				fHandle.Close()
 			}
 		}
-		cmd := execCommand("gzip", "-l", "--", file)
+		cmd := execCommand("gzip", "-l", "--", safeFile)
 		cmd.Stdin = getNullFile()
 		out, _ := cmd.Output()
 		lines := strings.Split(string(out), "\n")
 		if len(lines) >= 2 {
 			fields := strings.Fields(lines[1])
 			if len(fields) >= 2 {
-				if size, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+				if size, ok := parsePositiveSizeClamped(fields[1]); ok {
 					return size
 				}
 			}
 		}
 
 	case strings.HasSuffix(f, ".xz") || strings.HasSuffix(f, ".txz"):
-		cmd := execCommand("xz", "-l", "--robot", "--", file)
+		cmd := execCommand("xz", "-l", "--robot", "--", safeFile)
 		cmd.Stdin = getNullFile()
 		out, _ := cmd.Output()
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.HasPrefix(line, "file\t") {
 				fields := strings.Split(line, "\t")
 				if len(fields) >= 5 {
-					if size, err := strconv.ParseInt(fields[4], 10, 64); err == nil {
+					if size, ok := parsePositiveSizeClamped(fields[4]); ok {
 						return size
 					}
 				}
@@ -773,7 +854,7 @@ func EstimateUncompressedSize(file string) int64 {
 		}
 
 	case strings.HasSuffix(f, ".zst") || strings.HasSuffix(f, ".tzst"):
-		cmd := execCommand("zstd", "-lv", "--", file)
+		cmd := execCommand("zstd", "-lv", "--", safeFile)
 		cmd.Stdin = getNullFile()
 		out, _ := cmd.Output()
 		var sum int64
@@ -783,8 +864,8 @@ func EstimateUncompressedSize(file string) int64 {
 				if idx1 := strings.LastIndex(line, "("); idx1 != -1 {
 					if idx2 := strings.LastIndex(line, " B)"); idx2 != -1 && idx2 > idx1 {
 						numStr := strings.TrimSpace(line[idx1+1 : idx2])
-						if size, err := strconv.ParseInt(numStr, 10, 64); err == nil && size > 0 {
-							sum += size
+						if size, ok := parsePositiveSizeClamped(numStr); ok {
+							sum = addClampedInt64(sum, size)
 						}
 					}
 				}
@@ -793,15 +874,15 @@ func EstimateUncompressedSize(file string) int64 {
 		if sum > 0 {
 			return sum
 		}
-		cmdL := execCommand("zstd", "-l", "--", file)
+		cmdL := execCommand("zstd", "-l", "--", safeFile)
 		cmdL.Stdin = getNullFile()
 		outL, _ := cmdL.Output()
 		for _, line := range strings.Split(string(outL), "\n") {
 			fields := strings.Fields(line)
 			if len(fields) >= 5 {
-				if size, err := strconv.ParseInt(fields[4], 10, 64); err == nil && size > 0 {
-					sum += size
-				} else if fval, err := strconv.ParseFloat(fields[4], 64); err == nil && fval > 0 && len(fields) >= 6 {
+				if size, ok := parsePositiveSizeClamped(fields[4]); ok {
+					sum = addClampedInt64(sum, size)
+				} else if fval, err := strconv.ParseFloat(fields[4], 64); err == nil && fval > 0 && !math.IsNaN(fval) && len(fields) >= 6 {
 					unit := strings.ToUpper(fields[5])
 					mult := float64(1)
 					switch unit {
@@ -814,7 +895,12 @@ func EstimateUncompressedSize(file string) int64 {
 					case "TIB", "TB", "T":
 						mult = 1024 * 1024 * 1024 * 1024
 					}
-					sum += int64(fval * mult)
+					prod := fval * mult
+					if math.IsInf(prod, 1) || prod >= float64(math.MaxInt64) {
+						sum = math.MaxInt64
+					} else if prod > 0 {
+						sum = addClampedInt64(sum, int64(prod))
+					}
 				}
 			}
 		}
@@ -837,7 +923,7 @@ func EstimateUncompressedSize(file string) int64 {
 				return int64(sum)
 			}
 		}
-		cmd := execCommand("unzip", "-l", "--", file)
+		cmd := execCommand("unzip", "-l", "--", safeFile)
 		cmd.Stdin = getNullFile()
 		out, _ := cmd.Output()
 		lines := strings.Split(string(out), "\n")
@@ -847,28 +933,14 @@ func EstimateUncompressedSize(file string) int64 {
 		if len(lines) >= 3 {
 			fields := strings.Fields(lines[len(lines)-1])
 			if len(fields) >= 1 {
-				if size, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
+				if size, ok := parsePositiveSizeClamped(fields[0]); ok {
 					return size
 				}
 			}
 		}
 
 	case strings.HasSuffix(f, ".7z"):
-		cmd := execCommand(sevenzBin(), "l", "-slt", "-p-", "--", file)
-		cmd.Stdin = getNullFile()
-		out, _ := cmd.Output()
-		var sum int64
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(line, "Size = ") {
-				parts := strings.SplitN(line, "= ", 2)
-				if len(parts) == 2 {
-					if size, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil {
-						sum += size
-					}
-				}
-			}
-		}
-		if sum > 0 {
+		if sum := sum7zSltSizes(sevenzBin(), safeFile); sum > 0 {
 			return sum
 		}
 
@@ -877,40 +949,26 @@ func EstimateUncompressedSize(file string) int64 {
 		if !hasTool("7z") {
 			tool = sevenzBin()
 		}
-		cmd := execCommand(tool, "l", "-slt", "-p-", "--", file)
-		cmd.Stdin = getNullFile()
-		out, _ := cmd.Output()
-		var sum int64
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(line, "Size = ") {
-				parts := strings.SplitN(line, "= ", 2)
-				if len(parts) == 2 {
-					if size, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil {
-						sum += size
-					}
-				}
-			}
-		}
-		if sum > 0 {
+		if sum := sum7zSltSizes(tool, safeFile); sum > 0 {
 			return sum
 		}
 		if fi, err := os.Stat(file); err == nil {
-			return fi.Size() * 3
+			return mulDivClampedInt64(fi.Size(), 3, 1)
 		}
 
 	case strings.HasSuffix(f, ".lrz"):
-		cmd := execCommand("lrzip", "-i", "--", file)
+		cmd := execCommand("lrzip", "-i", "--", safeFile)
 		cmd.Stdin = getNullFile()
 		out, _ := cmd.Output()
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.Contains(line, "Decompressed file size") {
 				fields := strings.Fields(line)
 				if len(fields) >= 1 {
-					if size, err := strconv.ParseInt(fields[len(fields)-1], 10, 64); err == nil {
+					if size, ok := parsePositiveSizeClamped(fields[len(fields)-1]); ok {
 						return size
 					}
 					if len(fields) >= 2 {
-						if size, err := strconv.ParseInt(fields[len(fields)-2], 10, 64); err == nil {
+						if size, ok := parsePositiveSizeClamped(fields[len(fields)-2]); ok {
 							return size
 						}
 					}
@@ -924,21 +982,21 @@ func EstimateUncompressedSize(file string) int64 {
 			tool = "lzip"
 		}
 		if hasTool(tool) {
-			cmd := execCommand(tool, "-l", "--", file)
+			cmd := execCommand(tool, "-l", "--", safeFile)
 			cmd.Stdin = getNullFile()
 			out, _ := cmd.Output()
 			lines := strings.Split(string(out), "\n")
 			if len(lines) >= 2 {
 				fields := strings.Fields(lines[1])
 				if len(fields) >= 2 {
-					if size, err := strconv.ParseInt(fields[0], 10, 64); err == nil && size > 0 {
+					if size, ok := parsePositiveSizeClamped(fields[0]); ok {
 						return size
 					}
 				}
 			}
 		}
 		if fi, err := os.Stat(file); err == nil {
-			return fi.Size() * 4
+			return mulDivClampedInt64(fi.Size(), 4, 1)
 		}
 
 	case strings.HasSuffix(f, ".tar"):
@@ -948,24 +1006,24 @@ func EstimateUncompressedSize(file string) int64 {
 
 	case strings.HasSuffix(f, ".lz4"):
 		if fi, err := os.Stat(file); err == nil {
-			return fi.Size() * 2
+			return mulDivClampedInt64(fi.Size(), 2, 1)
 		}
 
 	case strings.HasSuffix(f, ".br"):
 		if fi, err := os.Stat(file); err == nil {
-			return fi.Size() * 7 / 2
+			return mulDivClampedInt64(fi.Size(), 7, 2)
 		}
 
 	case strings.HasSuffix(f, ".bz2") || strings.HasSuffix(f, ".tbz2") ||
 		strings.HasSuffix(f, ".bz3"):
 		if fi, err := os.Stat(file); err == nil {
-			return fi.Size() * 4
+			return mulDivClampedInt64(fi.Size(), 4, 1)
 		}
 	}
 
 	// Fallback
 	if fi, err := os.Stat(file); err == nil {
-		return fi.Size() * 3
+		return mulDivClampedInt64(fi.Size(), 3, 1)
 	}
 	return 0
 }
@@ -981,8 +1039,19 @@ var (
 )
 
 func safeFlagArg(p string) string {
-	if strings.HasPrefix(p, "-") {
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(p, "-") || strings.HasPrefix(p, "@") {
 		return "./" + p
+	}
+	if filepath.VolumeName(p) == "" {
+		if colon := strings.IndexByte(p, ':'); colon >= 0 {
+			slash := strings.IndexAny(p, `/\`)
+			if slash < 0 || colon < slash {
+				return "./" + p
+			}
+		}
 	}
 	return p
 }
@@ -1612,18 +1681,25 @@ func redactArgs(args []string) []string {
 	copy(masked, args)
 	for i := 0; i < len(masked); i++ {
 		a := masked[i]
+		if a == "--" {
+			break
+		}
 		switch {
-		case a == "-p" || a == "-P" || a == "-password" || a == "--password":
+		case a == "-p" || a == "-P" || a == "-hp" || a == "-password" || a == "--password":
 			if i+1 < len(masked) {
 				masked[i+1] = "***"
 				i++
 			}
-		case strings.HasPrefix(a, "-p") && len(a) > 2:
-			masked[i] = "-p***"
-		case strings.HasPrefix(a, "-password="):
-			masked[i] = "-password=***"
 		case strings.HasPrefix(a, "--password="):
 			masked[i] = "--password=***"
+		case strings.HasPrefix(a, "-password="):
+			masked[i] = "-password=***"
+		case strings.HasPrefix(a, "-hp") && len(a) > 3:
+			masked[i] = "-hp***"
+		case strings.HasPrefix(a, "-P") && len(a) > 2:
+			masked[i] = "-P***"
+		case strings.HasPrefix(a, "-p") && len(a) > 2 && a != "-p-":
+			masked[i] = "-p***"
 		}
 	}
 	return masked

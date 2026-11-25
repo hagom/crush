@@ -3201,6 +3201,197 @@ func TestReservedNames_BoundedAndRelease(t *testing.T) {
 	})
 }
 
+func TestSafeFlagArg_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"normal relative", "archive.tar.gz", "archive.tar.gz"},
+		{"leading dash flag", "-rf", "./-rf"},
+		{"double dash option", "--checkpoint-action=exec=sh", "./--checkpoint-action=exec=sh"},
+		{"7z/rar listfile prefix", "@filelist.txt", "./@filelist.txt"},
+		{"tar remote host:file colon", "backup_2026-11-24T12:00:00.tar", "./backup_2026-11-24T12:00:00.tar"},
+		{"attacker host:path", "attacker.example:payload.tar", "./attacker.example:payload.tar"},
+		{"already prefixed relative colon", "./backup_12:00.tar", "./backup_12:00.tar"},
+		{"subdir before colon", "backups/2026_12:00.tar", "backups/2026_12:00.tar"},
+		{"absolute path with colon", "/tmp/2026_12:00.tar", "/tmp/2026_12:00.tar"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := safeFlagArg(tt.in); got != tt.want {
+				t.Errorf("safeFlagArg(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRedactArgs_AllVariants(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "7z attached -p and -p-",
+			args: []string{"a", "-pMyS3cr3t!", "-mhe=on", "out.7z", "--", "-pfile.txt"},
+			want: []string{"a", "-p***", "-mhe=on", "out.7z", "--", "-pfile.txt"},
+		},
+		{
+			name: "7z/rar -p- no-password flag preserved",
+			args: []string{"l", "-slt", "-p-", "--", "arc.7z"},
+			want: []string{"l", "-slt", "-p-", "--", "arc.7z"},
+		},
+		{
+			name: "zip separated and attached -P",
+			args: []string{"-r", "-P", "sec1", "-Psec2", "out.zip", "--", "-Pnotflag.txt"},
+			want: []string{"-r", "-P", "***", "-P***", "out.zip", "--", "-Pnotflag.txt"},
+		},
+		{
+			name: "rar -hp header password separated and attached",
+			args: []string{"a", "-hp", "sec1", "-hpSecret2", "out.rar", "--", "-hpfile"},
+			want: []string{"a", "-hp", "***", "-hp***", "out.rar", "--", "-hpfile"},
+		},
+		{
+			name: "long -password and --password separated and equals",
+			args: []string{"-password=abc", "--password=def", "-password", "ghi", "--password", "jkl"},
+			want: []string{"-password=***", "--password=***", "-password", "***", "--password", "***"},
+		},
+		{
+			name: "zip -P whose password value literally is --",
+			args: []string{"-P", "--", "out.zip", "--", "-pkeep.txt"},
+			want: []string{"-P", "***", "out.zip", "--", "-pkeep.txt"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := append([]string(nil), tt.args...)
+			got := redactArgs(tt.args)
+			if strings.Join(got, "\x00") != strings.Join(tt.want, "\x00") {
+				t.Errorf("redactArgs(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+			if strings.Join(tt.args, "\x00") != strings.Join(orig, "\x00") {
+				t.Errorf("redactArgs mutated input slice: %v", tt.args)
+			}
+		})
+	}
+}
+
+func TestProbeDiskAvail_EdgeCases(t *testing.T) {
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	t.Run("passes -- and safeFlagArg to df and clamps negative over-quota avail to 0", func(t *testing.T) {
+		tmp := t.TempDir()
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(origWd) }()
+		if err := os.Mkdir("-weird_dir", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		var capturedArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			capturedArgs = append([]string(nil), args...)
+			return exec.Command("printf", "Avail\n-4096\n")
+		}
+		err = CheckDiskSpace(1024, "-weird_dir", "descomprimir")
+		if err == nil {
+			t.Fatalf("CheckDiskSpace succeeded when df reported negative over-quota space (-4096)")
+		}
+		joined := strings.Join(capturedArgs, " ")
+		if !strings.Contains(joined, "-- ./-weird_dir") {
+			t.Errorf("probeDiskAvail did not pass '-- ./-weird_dir' to df: %v", capturedArgs)
+		}
+	})
+
+	t.Run("clamps huge fallback 1K-block count to math.MaxInt64 without overflow", func(t *testing.T) {
+		call := 0
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			call++
+			if call == 1 {
+				return exec.Command("false")
+			}
+			return exec.Command("printf", "Filesystem 1K-blocks Used Available Use%% Mounted\n/dev/sda1 1 1 9223372036854775000 1%% /\n")
+		}
+		avail, ok := probeDiskAvail(".")
+		if !ok || avail != math.MaxInt64 {
+			t.Errorf("probeDiskAvail huge blocks = (%d, %v), want (%d, true)", avail, ok, int64(math.MaxInt64))
+		}
+	})
+}
+
+func TestEstimateSize_SecurityAndOverflow(t *testing.T) {
+	origExec := execCommand
+	defer func() { execCommand = origExec }()
+
+	t.Run("EstimateCompressedSize avoids int64 multiplication overflow", func(t *testing.T) {
+		huge := int64(math.MaxInt64 / 2)
+		if got := EstimateCompressedSize(huge, Tar, []string{"a.bin"}); got <= 0 {
+			t.Errorf("EstimateCompressedSize(huge, Tar) overflowed to %d", got)
+		}
+		if got := EstimateCompressedSize(math.MaxInt64, Tar, []string{"a.bin"}); got != math.MaxInt64 {
+			t.Errorf("EstimateCompressedSize(MaxInt64, Tar) = %d, want clamped MaxInt64", got)
+		}
+		if got := EstimateCompressedSize(huge, SevenZ, []string{"video.mp4"}); got <= 0 {
+			t.Errorf("EstimateCompressedSize(huge, precompressed) overflowed to %d", got)
+		}
+	})
+
+	t.Run("EstimateUncompressedSize 7z/rar/zst clamp int64 sum overflow and pass safeFlagArg", func(t *testing.T) {
+		tmp := t.TempDir()
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(origWd) }()
+
+		for _, name := range []string{"-bomb.7z", "@bomb.rar", "multi:frame.zst"} {
+			if err := os.WriteFile(name, []byte("stub"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		var lastArgs []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			lastArgs = append([]string(nil), args...)
+			switch {
+			case strings.Contains(name, "zstd"):
+				return exec.Command("printf", "Decompressed Size: 8 EiB (9223372036854775800 B)\nDecompressed Size: 8 EiB (9223372036854775800 B)\n")
+			default:
+				return exec.Command("printf", "Size = 9223372036854775800\nSize = 9223372036854775800\n")
+			}
+		}
+
+		for _, tc := range []struct {
+			file    string
+			wantArg string
+		}{
+			{"-bomb.7z", "./-bomb.7z"},
+			{"@bomb.rar", "./@bomb.rar"},
+			{"multi:frame.zst", "./multi:frame.zst"},
+		} {
+			got := EstimateUncompressedSize(tc.file)
+			if got != math.MaxInt64 {
+				t.Errorf("EstimateUncompressedSize(%q) = %d, want clamped MaxInt64", tc.file, got)
+			}
+			if len(lastArgs) == 0 || lastArgs[len(lastArgs)-1] != tc.wantArg {
+				t.Errorf("EstimateUncompressedSize(%q) passed args %v, want last arg %q", tc.file, lastArgs, tc.wantArg)
+			}
+		}
+	})
+}
+
 
 
 

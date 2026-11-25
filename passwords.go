@@ -308,11 +308,6 @@ func probePasswordCmd(cmd *exec.Cmd) (started, valid bool, exitCode int, stderrS
 	return true, false, code, errBuf.String()
 }
 
-func probeStdoutPassword(cmd *exec.Cmd) (started, valid bool) {
-	started, valid, _, _ = probePasswordCmd(cmd)
-	return started, valid
-}
-
 func buildPasswordProbeCmd(file string, format Format, pass string) (toolUsed string, cmd *exec.Cmd) {
 	passArg := "-p" + pass
 	if pass == "" {

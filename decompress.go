@@ -745,25 +745,6 @@ func verifyExtractedSymlinksInRoot(dir string, symlinkMembers []string) error {
 	return nil
 }
 
-func listTopLevelContainerOutputs(file string, dir string, password string) []string {
-	seen := make(map[string]bool)
-	var outputs []string
-	err := IterArchiveMembers(file, password, func(m ArchiveMember) error {
-		top, ok := topLevelArchiveEntry(m.Path)
-		if !ok || seen[top] {
-			return nil
-		}
-		seen[top] = true
-		outputs = append(outputs, filepath.Join(dir, top))
-		return nil
-	})
-	if len(outputs) == 0 && err != nil {
-		WriteLogf("  %s⚠ No se pudo listar %s para limpiar salidas parciales%s\n", Yellow, file, NC)
-		return nil
-	}
-	return outputs
-}
-
 const maxTarLineCarry = 64 * 1024
 
 type tarTopLevelTracker struct {

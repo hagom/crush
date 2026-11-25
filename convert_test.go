@@ -643,3 +643,150 @@ func TestConvertAudit_SecurityForceAndPipeCleanup(t *testing.T) {
 	})
 }
 
+func TestSelectConvertTempBase(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeTmp := filepath.Join(tmpDir, "fake_tmp")
+	outDir := filepath.Join(tmpDir, "dest_out")
+	_ = os.MkdirAll(fakeTmp, 0o755)
+	_ = os.MkdirAll(outDir, 0o755)
+
+	zipPath := filepath.Join(tmpDir, "data.zip")
+	zf, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(zf)
+	w, _ := zw.Create("big.txt")
+	_, _ = w.Write(make([]byte, 4096))
+	_ = zw.Close()
+	_ = zf.Close()
+
+	outPath := filepath.Join(outDir, "data.tar")
+
+	tests := []struct {
+		name     string
+		tmpAvail int64
+		wantBase string
+	}{
+		{
+			name:     "uses convertTempDir when space exceeds estimated size plus 10 percent margin",
+			tmpAvail: 1 << 20,
+			wantBase: fakeTmp,
+		},
+		{
+			name:     "falls back to output dir when tmp space is less than estimated size plus margin",
+			tmpAvail: 4200, // < 4096 + 409 (4505)
+			wantBase: outDir,
+		},
+		{
+			name:     "keeps convertTempDir when getDiskAvail returns -1",
+			tmpAvail: -1,
+			wantBase: fakeTmp,
+		},
+		{
+			name:     "falls back to output dir when tmp disk is full (0 bytes)",
+			tmpAvail: 0,
+			wantBase: outDir,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origTmp := convertTempDir
+			origAvail := getDiskAvail
+			defer func() {
+				convertTempDir = origTmp
+				getDiskAvail = origAvail
+			}()
+			convertTempDir = func() string { return fakeTmp }
+			getDiskAvail = func(dir string) int64 {
+				if dir == fakeTmp {
+					return tt.tmpAvail
+				}
+				return 1 << 30
+			}
+
+			got := selectConvertTempBase(zipPath, outPath)
+			if got != tt.wantBase {
+				t.Errorf("selectConvertTempBase() = %q, want %q", got, tt.wantBase)
+			}
+		})
+	}
+}
+
+func TestConvertViaTempDir_FallbackDirWhenTmpLowSpace(t *testing.T) {
+	if !hasTool("unzip") && !hasTool(sevenzBin()) {
+		t.Skip("unzip/7z not available")
+	}
+	tmpDir := t.TempDir()
+	fakeTmp := filepath.Join(tmpDir, "tiny_tmp")
+	outDir := filepath.Join(tmpDir, "big_disk")
+	_ = os.MkdirAll(fakeTmp, 0o755)
+	_ = os.MkdirAll(outDir, 0o755)
+
+	zipPath := filepath.Join(tmpDir, "archive.zip")
+	zf, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(zf)
+	w, _ := zw.Create("item.txt")
+	_, _ = w.Write([]byte("disk aware staging test payload"))
+	_ = zw.Close()
+	_ = zf.Close()
+
+	origTmp := convertTempDir
+	origAvail := getDiskAvail
+	origExec := execCommand
+	defer func() {
+		convertTempDir = origTmp
+		getDiskAvail = origAvail
+		execCommand = origExec
+	}()
+	convertTempDir = func() string { return fakeTmp }
+	getDiskAvail = func(dir string) int64 {
+		if dir == fakeTmp {
+			return 10
+		}
+		return 1 << 30
+	}
+
+	var capturedStagingDir string
+	var capturedPerm os.FileMode
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "tar" {
+			for i, a := range args {
+				if a == "-C" && i+1 < len(args) {
+					capturedStagingDir = args[i+1]
+					if fi, sErr := os.Stat(capturedStagingDir); sErr == nil {
+						capturedPerm = fi.Mode().Perm()
+					}
+				}
+			}
+		}
+		return origExec(name, args...)
+	}
+
+	outTar := filepath.Join(outDir, "archive.tar")
+	if err := convertViaTempDir(zipPath, outTar, FormatInfo{Format: Zip}, Tar, ConvertOptions{Force: true}); err != nil {
+		t.Fatalf("convertViaTempDir failed: %v", err)
+	}
+	if _, err := os.Stat(outTar); err != nil {
+		t.Fatalf("output tar missing: %v", err)
+	}
+	if !strings.HasPrefix(capturedStagingDir, outDir+string(filepath.Separator)) {
+		t.Errorf("expected staging dir inside %s, got %q", outDir, capturedStagingDir)
+	}
+	if capturedPerm != 0o700 {
+		t.Errorf("staging dir permissions = %o, want 0700", capturedPerm)
+	}
+	entries, _ := os.ReadDir(fakeTmp)
+	if len(entries) != 0 {
+		t.Errorf("fakeTmp should remain untouched, got entries: %v", entries)
+	}
+	if _, err := os.Stat(capturedStagingDir); !os.IsNotExist(err) {
+		t.Errorf("staging dir %s should be cleaned up", capturedStagingDir)
+	}
+}
+
+

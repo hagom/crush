@@ -4,12 +4,45 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+var convertTempDir = os.TempDir
+
+func selectConvertTempBase(srcFile, outPath string) string {
+	needed := EstimateUncompressedSize(srcFile)
+	if needed <= 0 {
+		if fi, err := os.Stat(srcFile); err == nil && fi.Size() > 0 {
+			if fi.Size() > math.MaxInt64/4 {
+				needed = math.MaxInt64
+			} else {
+				needed = fi.Size() * 4
+			}
+		}
+	}
+	if needed > 0 {
+		margin := needed / 10
+		if needed > math.MaxInt64-margin {
+			needed = math.MaxInt64
+		} else {
+			needed += margin
+		}
+	}
+
+	tmpBase := convertTempDir()
+	avail := getDiskAvail(tmpBase)
+	if avail >= 0 && needed > 0 && avail < needed {
+		fallback := filepath.Dir(outPath)
+		WriteWarning("Espacio insuficiente en %s (%s disponibles, %s estimados); usando %s para extracción temporal", tmpBase, FormatSize(avail), FormatSize(needed), fallback)
+		return fallback
+	}
+	return tmpBase
+}
 
 func safeTarArchiveArg(p string) string {
 	if strings.HasPrefix(p, "-") {
@@ -295,10 +328,12 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 	}
 	outPath = absOut
 
-	tmpDir, err := os.MkdirTemp("", "crush_conv_*")
+	tmpBase := selectConvertTempBase(srcFile, outPath)
+	tmpDir, err := os.MkdirTemp(tmpBase, ".crush_conv_*")
 	if err != nil {
 		return fmt.Errorf("creando directorio temporal para conversión: %w", err)
 	}
+	_ = os.Chmod(tmpDir, 0o700)
 	defer os.RemoveAll(tmpDir)
 
 	decompOpts := DecompressOptions{

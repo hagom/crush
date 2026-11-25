@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,46 @@ import (
 	"strconv"
 	"strings"
 )
+
+func safeTarArchiveArg(p string) string {
+	if strings.HasPrefix(p, "-") {
+		return "./" + p
+	}
+	if colon := strings.IndexByte(p, ':'); colon != -1 {
+		if slash := strings.IndexByte(p, '/'); slash == -1 || colon < slash {
+			return "./" + p
+		}
+	}
+	return p
+}
+
+func publishStagedFile(stagePath, outPath string, force bool) error {
+	if _, err := os.Stat(stagePath); err != nil {
+		return fmt.Errorf("el archivo convertido no se generó en %s: %w", outPath, err)
+	}
+	if force {
+		return os.Rename(stagePath, outPath)
+	}
+	if err := os.Link(stagePath, outPath); err == nil {
+		_ = os.Remove(stagePath)
+		return nil
+	} else if errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("el archivo destino ya existe: %s (use -force para sobrescribir)", outPath)
+	}
+	if _, err := os.Lstat(outPath); err == nil {
+		return fmt.Errorf("el archivo destino ya existe: %s (use -force para sobrescribir)", outPath)
+	}
+	return os.Rename(stagePath, outPath)
+}
+
+func abortPipeProducer(prod *exec.Cmd, pr *io.PipeReader, pw *io.PipeWriter) {
+	_ = pr.Close()
+	if prod != nil && prod.Process != nil {
+		_ = prod.Process.Kill()
+		_ = prod.Wait()
+	}
+	_ = pw.Close()
+}
 
 type ConvertOptions struct {
 	OutputDir   string
@@ -30,42 +71,29 @@ func targetPathForConvert(srcFile string, srcFormat, targetFormat Format, outDir
 	var targetBase string
 	lower := strings.ToLower(base)
 
-	if HasTarSuffix(base) {
-		stem := StripTarSuffix(base)
-		if targetFormat == Tar {
-			targetBase = stem + ".tar"
-		} else if targetFormat.IsContainer() {
+	switch {
+	case HasTarSuffix(base) || strings.HasSuffix(lower, ".tar"):
+		var stem string
+		if HasTarSuffix(base) {
+			stem = StripTarSuffix(base)
+		} else {
+			stem = strings.TrimSuffix(base, filepath.Ext(base))
+		}
+		if targetFormat.IsContainer() {
 			targetBase = stem + "." + targetFormat.String()
 		} else {
 			targetBase = stem + ".tar." + targetFormat.String()
 		}
-	} else if strings.HasSuffix(lower, ".tar") {
-		stem := strings.TrimSuffix(base, filepath.Ext(base))
-		if targetFormat == Tar {
-			targetBase = stem + ".tar"
-		} else if targetFormat.IsContainer() {
-			targetBase = stem + "." + targetFormat.String()
-		} else {
-			targetBase = stem + ".tar." + targetFormat.String()
-		}
-	} else if srcFormat.IsContainer() {
+	case srcFormat.IsContainer():
 		stem := strings.TrimSuffix(base, filepath.Ext(base))
 		if targetFormat.IsContainer() {
 			targetBase = stem + "." + targetFormat.String()
-		} else if targetFormat == Tar {
-			targetBase = stem + ".tar"
 		} else {
 			targetBase = stem + ".tar." + targetFormat.String()
 		}
-	} else {
+	default:
 		stem := strings.TrimSuffix(base, filepath.Ext(base))
-		if targetFormat.IsContainer() {
-			targetBase = stem + "." + targetFormat.String()
-		} else if targetFormat == Tar {
-			targetBase = stem + ".tar"
-		} else {
-			targetBase = stem + "." + targetFormat.String()
-		}
+		targetBase = stem + "." + targetFormat.String()
 	}
 
 	return filepath.Join(dir, targetBase)
@@ -139,12 +167,39 @@ func buildDecompressCmdForFileWithMem(srcFile string, info FormatInfo, threadLim
 	}
 }
 
+func attachLz4StdinIfNeeded(cmd *exec.Cmd, srcFile string, format Format) (io.Closer, error) {
+	if format != Lz4 {
+		return nil, nil
+	}
+	inF, err := os.Open(srcFile)
+	if err != nil {
+		return nil, err
+	}
+	if n := len(cmd.Args); n >= 2 && cmd.Args[n-2] == "--" && cmd.Args[n-1] == srcFile {
+		cmd.Args = cmd.Args[:n-2]
+	}
+	cmd.Stdin = inF
+	return inF, nil
+}
+
 func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat Format, opts ConvertOptions) error {
-	outFile, err := os.Create(outPath)
+	stageDir, err := os.MkdirTemp(filepath.Dir(outPath), ".crush-conv-*")
+	if err != nil {
+		return fmt.Errorf("creando directorio temporal de salida: %w", err)
+	}
+	defer os.RemoveAll(stageDir)
+
+	stageOut := filepath.Join(stageDir, filepath.Base(outPath))
+	outFile, err := os.Create(stageOut)
 	if err != nil {
 		return fmt.Errorf("creando archivo de salida: %w", err)
 	}
-	defer outFile.Close()
+	outClosed := false
+	defer func() {
+		if !outClosed {
+			_ = outFile.Close()
+		}
+	}()
 
 	var srcSize int64
 	if fi, err := os.Stat(srcFile); err == nil {
@@ -158,21 +213,26 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 			decompThreads = opts.ThreadLimit
 		}
 		decompCmd := buildDecompressCmdForFileWithMem(srcFile, srcInfo, decompThreads, memTotal)
+		if closer, err := attachLz4StdinIfNeeded(decompCmd, srcFile, srcInfo.Format); err != nil {
+			return err
+		} else if closer != nil {
+			defer closer.Close()
+		}
 		decompCmd.Stdout = outFile
 		decompCmd.Stderr = os.Stderr
 		if err := decompCmd.Run(); err != nil {
-			outFile.Close()
-			os.Remove(outPath)
 			return fmt.Errorf("descomprimiendo a tar: %w", err)
 		}
-		return nil
+		outClosed = true
+		if err := outFile.Close(); err != nil {
+			return fmt.Errorf("cerrando archivo de salida: %w", err)
+		}
+		return publishStagedFile(stageOut, outPath, opts.Force)
 	}
 
 	if srcInfo.Format == Tar {
 		inFile, err := os.Open(srcFile)
 		if err != nil {
-			outFile.Close()
-			os.Remove(outPath)
 			return err
 		}
 		defer inFile.Close()
@@ -186,11 +246,13 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		compCmd.Stdout = outFile
 		compCmd.Stderr = os.Stderr
 		if err := compCmd.Run(); err != nil {
-			outFile.Close()
-			os.Remove(outPath)
 			return fmt.Errorf("comprimiendo desde tar: %w", err)
 		}
-		return nil
+		outClosed = true
+		if err := outFile.Close(); err != nil {
+			return fmt.Errorf("cerrando archivo de salida: %w", err)
+		}
+		return publishStagedFile(stageOut, outPath, opts.Force)
 	}
 
 	stageBudget := 0
@@ -209,6 +271,13 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 	pr, pw := io.Pipe()
 
 	decompCmd := buildDecompressCmdForFileWithMem(srcFile, srcInfo, decompThreads, stageBudget)
+	if closer, err := attachLz4StdinIfNeeded(decompCmd, srcFile, srcInfo.Format); err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
+		return err
+	} else if closer != nil {
+		defer closer.Close()
+	}
 	decompCmd.Stdout = pw
 	decompCmd.Stderr = os.Stderr
 
@@ -218,33 +287,31 @@ func convertStreamPipe(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 	compCmd.Stderr = os.Stderr
 
 	if err := decompCmd.Start(); err != nil {
-		pw.Close()
-		outFile.Close()
-		os.Remove(outPath)
+		_ = pr.Close()
+		_ = pw.Close()
 		return fmt.Errorf("iniciando descompresión en pipe: %w", err)
 	}
 
 	if err := compCmd.Start(); err != nil {
-		_ = decompCmd.Process.Kill()
-		pw.Close()
-		outFile.Close()
-		os.Remove(outPath)
+		abortPipeProducer(decompCmd, pr, pw)
 		return fmt.Errorf("iniciando compresión en pipe: %w", err)
 	}
 
 	decompErr, compErr := waitPipePair(decompCmd, compCmd, pr, pw)
-	_ = outFile.Close()
+	outClosed = true
+	closeErr := outFile.Close()
 
 	if decompErr != nil {
-		os.Remove(outPath)
 		return fmt.Errorf("fallo descompresor durante pipe: %w", decompErr)
 	}
 	if compErr != nil {
-		os.Remove(outPath)
 		return fmt.Errorf("fallo compresor durante pipe: %w", compErr)
 	}
+	if closeErr != nil {
+		return fmt.Errorf("cerrando archivo de salida: %w", closeErr)
+	}
 
-	return nil
+	return publishStagedFile(stageOut, outPath, opts.Force)
 }
 
 func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat Format, opts ConvertOptions) error {
@@ -270,6 +337,13 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		return fmt.Errorf("extrayendo archivo para conversión: %w", err)
 	}
 
+	stageDir, err := os.MkdirTemp(filepath.Dir(outPath), ".crush-conv-*")
+	if err != nil {
+		return fmt.Errorf("creando directorio temporal de salida: %w", err)
+	}
+	defer os.RemoveAll(stageDir)
+	stageOut := filepath.Join(stageDir, filepath.Base(outPath))
+
 	dirSize, _ := GetDirSize(tmpDir)
 	memTotal := getMemLimit()
 	compThreads := resolveThreadCapForBudget(targetFormat, dirSize, memTotal)
@@ -279,22 +353,30 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 
 	if targetFormat.IsStream() || targetFormat == Tar {
 		if targetFormat == Tar {
-			cmd := execCommand("tar", "-cf", outPath, "-C", tmpDir, ".")
-			if err := cmd.Run(); err != nil {
-				os.Remove(outPath)
+			cmd := execCommand("tar", "-cf", safeTarArchiveArg(stageOut), "-C", safeFlagArg(tmpDir), "--", ".")
+			cmd.Stdout = io.Discard
+			cmd.Stderr = newLimitedBuffer(maxStderrBytes)
+			if err := augmentErr(cmd, cmd.Run()); err != nil {
 				return fmt.Errorf("creando tar final: %w", err)
 			}
-			return nil
+			return publishStagedFile(stageOut, outPath, opts.Force)
 		}
 
-		outFile, err := os.Create(outPath)
+		outFile, err := os.Create(stageOut)
 		if err != nil {
 			return err
 		}
-		defer outFile.Close()
+		outClosed := false
+		defer func() {
+			if !outClosed {
+				_ = outFile.Close()
+			}
+		}()
 
-		tarCmd := execCommand("tar", "-cf", "-", "-C", tmpDir, ".")
+		tarCmd := execCommand("tar", "-cf", "-", "-C", safeFlagArg(tmpDir), "--", ".")
+		tarCmd.Stderr = newLimitedBuffer(maxStderrBytes)
 		compCmd := buildCompressCmd(CompressOptions{Format: targetFormat, ThreadLimit: compThreads, MemBudgetMB: memTotal})
+		compCmd.Stderr = newLimitedBuffer(maxStderrBytes)
 
 		pr, pw := io.Pipe()
 		tarCmd.Stdout = pw
@@ -302,31 +384,29 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		compCmd.Stdout = outFile
 
 		if err := tarCmd.Start(); err != nil {
-			pw.Close()
-			outFile.Close()
-			os.Remove(outPath)
+			_ = pr.Close()
+			_ = pw.Close()
 			return err
 		}
 		if err := compCmd.Start(); err != nil {
-			_ = tarCmd.Process.Kill()
-			pw.Close()
-			outFile.Close()
-			os.Remove(outPath)
+			abortPipeProducer(tarCmd, pr, pw)
 			return err
 		}
 
 		tarErr, compErr := waitPipePair(tarCmd, compCmd, pr, pw)
-		_ = outFile.Close()
+		outClosed = true
+		closeErr := outFile.Close()
 
 		if tarErr != nil {
-			os.Remove(outPath)
 			return tarErr
 		}
 		if compErr != nil {
-			os.Remove(outPath)
 			return compErr
 		}
-		return nil
+		if closeErr != nil {
+			return fmt.Errorf("cerrando archivo de salida: %w", closeErr)
+		}
+		return publishStagedFile(stageOut, outPath, opts.Force)
 	}
 
 	switch targetFormat {
@@ -336,28 +416,30 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 			if opts.Password != "" {
 				args = append(args, "-P", opts.Password)
 			}
-			args = append(args, outPath, ".")
+			args = append(args, safeFlagArg(stageOut), "--", ".")
 			cmd := execCommand("zip", args...)
 			cmd.Dir = tmpDir
-			if err := cmd.Run(); err != nil {
-				os.Remove(outPath)
+			cmd.Stdout = io.Discard
+			cmd.Stderr = newLimitedBuffer(maxStderrBytes)
+			if err := augmentErr(cmd, cmd.Run()); err != nil {
 				return fmt.Errorf("comprimiendo zip: %w", err)
 			}
-			return nil
+			return publishStagedFile(stageOut, outPath, opts.Force)
 		}
-		if hasTool("7z") {
+		if bin := sevenzBin(); hasTool(bin) {
 			args := []string{"a", "-tzip", "-mmt=" + threadStr(compThreads)}
 			if opts.Password != "" {
 				args = append(args, "-p"+opts.Password)
 			}
-			args = append(args, outPath, ".")
-			cmd := execCommand("7z", args...)
+			args = append(args, safeFlagArg(stageOut), "--", ".")
+			cmd := execCommand(bin, args...)
 			cmd.Dir = tmpDir
-			if err := cmd.Run(); err != nil {
-				os.Remove(outPath)
-				return fmt.Errorf("comprimiendo zip con 7z: %w", err)
+			cmd.Stdout = io.Discard
+			cmd.Stderr = newLimitedBuffer(maxStderrBytes)
+			if err := augmentErr(cmd, cmd.Run()); err != nil {
+				return fmt.Errorf("comprimiendo zip con %s: %w", bin, err)
 			}
-			return nil
+			return publishStagedFile(stageOut, outPath, opts.Force)
 		}
 		return fmt.Errorf("no hay herramienta disponible para crear zip")
 	case SevenZ:
@@ -367,28 +449,32 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password, "-mhe=on")
 		}
-		args = append(args, outPath, ".")
+		args = append(args, safeFlagArg(stageOut), "--", ".")
 		cmd := execCommand(bin, args...)
 		cmd.Dir = tmpDir
-		if err := cmd.Run(); err != nil {
-			os.Remove(outPath)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = newLimitedBuffer(maxStderrBytes)
+		if err := augmentErr(cmd, cmd.Run()); err != nil {
 			return fmt.Errorf("comprimiendo 7z: %w", err)
 		}
-		return nil
+		return publishStagedFile(stageOut, outPath, opts.Force)
 	case Rar:
-		bin := rarBin()
+		if !hasTool("rar") {
+			return fmt.Errorf("no se encontró rar para crear archivo rar")
+		}
 		args := []string{"a", "-mt" + threadStr(compThreads)}
 		if opts.Password != "" {
 			args = append(args, "-p"+opts.Password)
 		}
-		args = append(args, outPath, ".")
-		cmd := execCommand(bin, args...)
+		args = append(args, safeFlagArg(stageOut), "--", ".")
+		cmd := execCommand("rar", args...)
 		cmd.Dir = tmpDir
-		if err := cmd.Run(); err != nil {
-			os.Remove(outPath)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = newLimitedBuffer(maxStderrBytes)
+		if err := augmentErr(cmd, cmd.Run()); err != nil {
 			return fmt.Errorf("comprimiendo rar: %w", err)
 		}
-		return nil
+		return publishStagedFile(stageOut, outPath, opts.Force)
 	default:
 		return fmt.Errorf("formato contenedor destino no soportado: %s", targetFormat)
 	}
@@ -397,6 +483,12 @@ func convertViaTempDir(srcFile, outPath string, srcInfo FormatInfo, targetFormat
 func DoConvert(files []string, targetFormat Format, opts ConvertOptions) error {
 	if len(files) == 0 {
 		return fmt.Errorf("no se especificaron archivos para convertir")
+	}
+	if targetFormat == Auto {
+		return fmt.Errorf("-convert requiere un formato de destino concreto (no 'auto')")
+	}
+	if _, ok := formatNames[targetFormat]; !ok {
+		return fmt.Errorf("formato destino no soportado: %s", targetFormat)
 	}
 
 	for _, file := range files {
@@ -461,7 +553,7 @@ func DoConvert(files []string, targetFormat Format, opts ConvertOptions) error {
 
 		WriteSuccess("Convertido con éxito: %s (%s)", outPath, FormatSize(outFi.Size()))
 
-		if !opts.KeepOrig {
+		if !opts.KeepOrig && !os.SameFile(fi, outFi) {
 			_ = os.Remove(file)
 			_ = os.Remove(file + ".sha256")
 		}

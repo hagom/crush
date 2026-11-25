@@ -455,3 +455,191 @@ func TestConvertStreamPipe_SplitsMemoryBudgetBetweenStages(t *testing.T) {
 	}
 }
 
+func TestConvertAudit_SecurityForceAndPipeCleanup(t *testing.T) {
+	t.Run("DoConvert rejects Auto target format without deleting original", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "data.txt.gz")
+		f, err := os.Create(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gw := gzip.NewWriter(f)
+		_, _ = gw.Write([]byte("payload"))
+		_ = gw.Close()
+		_ = f.Close()
+
+		if err := DoConvert([]string{src}, Auto, ConvertOptions{KeepOrig: false}); err == nil {
+			t.Fatalf("DoConvert(..., Auto) expected error, got nil")
+		}
+		if _, err := os.Stat(src); err != nil {
+			t.Errorf("original %s should remain intact on invalid format: %v", src, err)
+		}
+	})
+
+	t.Run("Force overwrite replaces existing zip instead of merging stale members", func(t *testing.T) {
+		if !hasTool("zip") && !hasTool(sevenzBin()) {
+			t.Skip("zip/7z not available")
+		}
+		tmpDir := t.TempDir()
+
+		// Create source tar.gz containing only fresh.txt
+		fresh := filepath.Join(tmpDir, "fresh.txt")
+		if err := os.WriteFile(fresh, []byte("new content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		srcTarGz := filepath.Join(tmpDir, "bundle.tar.gz")
+		out, err := DoCompress([]string{fresh}, CompressOptions{Format: Gz, OutputDir: tmpDir, Combine: true, KeepOrig: true})
+		if err != nil || len(out) == 0 {
+			t.Fatalf("setup compress failed: %v", err)
+		}
+		if err := os.Rename(out[0], srcTarGz); err != nil {
+			t.Fatal(err)
+		}
+
+		// Pre-create destination bundle.zip with an unrelated stale.txt
+		destZip := filepath.Join(tmpDir, "bundle.zip")
+		zf, err := os.Create(destZip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(zf)
+		w, _ := zw.Create("stale.txt")
+		_, _ = w.Write([]byte("old stale data"))
+		_ = zw.Close()
+		_ = zf.Close()
+
+		if err := DoConvert([]string{srcTarGz}, Zip, ConvertOptions{Force: true, KeepOrig: true}); err != nil {
+			t.Fatalf("DoConvert -force failed: %v", err)
+		}
+
+		members, err := ListArchiveMembers(destZip, "")
+		if err != nil {
+			t.Fatalf("ListArchiveMembers failed: %v", err)
+		}
+		var names []string
+		for _, m := range members {
+			names = append(names, m.Path)
+			if strings.Contains(m.Path, "stale.txt") {
+				t.Errorf("Force overwrite merged stale.txt from previous archive instead of replacing: %v", members)
+			}
+		}
+		if !strings.Contains(strings.Join(names, " "), "fresh.txt") {
+			t.Errorf("converted zip missing fresh.txt: %v", names)
+		}
+	})
+
+	t.Run("convertViaTempDir passes -- separator and uses sevenzBin and rar", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		srcZip := filepath.Join(tmpDir, "in.zip")
+		zf, err := os.Create(srcZip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(zf)
+		w, _ := zw.Create("a.txt")
+		_, _ = w.Write([]byte("hello"))
+		_ = zw.Close()
+		_ = zf.Close()
+
+		t.Run("tar uses --", func(t *testing.T) {
+			origExec := execCommand
+			defer func() { execCommand = origExec }()
+			var tarArgs []string
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				if name == "tar" && len(args) > 0 && args[0] == "-cf" {
+					tarArgs = append([]string(nil), args...)
+				}
+				return origExec(name, args...)
+			}
+			outTar := filepath.Join(tmpDir, "out.tar")
+			if err := convertViaTempDir(srcZip, outTar, FormatInfo{Format: Zip}, Tar, ConvertOptions{Force: true}); err != nil {
+				t.Fatalf("convertViaTempDir(Tar) failed: %v", err)
+			}
+			if !containsArg(tarArgs, "--") {
+				t.Errorf("tar args missing '--': %v", tarArgs)
+			}
+		})
+
+		t.Run("7z uses --", func(t *testing.T) {
+			origExec := execCommand
+			defer func() { execCommand = origExec }()
+			var szArgs []string
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				if name == sevenzBin() && len(args) > 0 && args[0] == "a" {
+					szArgs = append([]string(nil), args...)
+					return mockExecCommand("mock-noop")
+				}
+				return origExec(name, args...)
+			}
+			out7z := filepath.Join(tmpDir, "out.7z")
+			_ = convertViaTempDir(srcZip, out7z, FormatInfo{Format: Zip}, SevenZ, ConvertOptions{Force: true})
+			if !containsArg(szArgs, "--") {
+				t.Errorf("7z args missing '--': %v", szArgs)
+			}
+		})
+
+		t.Run("rar invokes rar binary (not unrar) with --", func(t *testing.T) {
+			origLookPath := lookPath
+			defer func() { lookPath = origLookPath }()
+			lookPath = func(name string) (string, error) {
+				if name == "rar" || name == "unzip" || name == sevenzBin() {
+					return "/usr/bin/" + name, nil
+				}
+				return "", os.ErrNotExist
+			}
+			origExec := execCommand
+			defer func() { execCommand = origExec }()
+			var rarTool string
+			var rarArgs []string
+			execCommand = func(name string, args ...string) *exec.Cmd {
+				if len(args) > 0 && args[0] == "a" && (name == "rar" || name == "unrar") {
+					rarTool = name
+					rarArgs = append([]string(nil), args...)
+					return mockExecCommand("mock-noop")
+				}
+				return origExec(name, args...)
+			}
+			outRar := filepath.Join(tmpDir, "out.rar")
+			_ = convertViaTempDir(srcZip, outRar, FormatInfo{Format: Zip}, Rar, ConvertOptions{Force: true})
+			if rarTool != "rar" {
+				t.Errorf("expected rar tool for creation, got %q", rarTool)
+			}
+			if !containsArg(rarArgs, "--") {
+				t.Errorf("rar args missing '--': %v", rarArgs)
+			}
+		})
+	})
+
+	t.Run("convertStreamPipe reaps producer when compressor Start fails", func(t *testing.T) {
+		origExec := execCommand
+		defer func() { execCommand = origExec }()
+
+		var prodCmd *exec.Cmd
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			if name == "xz" {
+				prodCmd = mockExecCommand("mock-producer")
+				return prodCmd
+			}
+			return exec.Command("/nonexistent-compressor-binary-for-test")
+		}
+
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "a.tar.xz")
+		if err := os.WriteFile(src, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		out := filepath.Join(tmpDir, "a.tar.zst")
+
+		err := convertStreamPipe(src, out, FormatInfo{Format: Xz, Tool: "xz", IsTar: true}, Zst, ConvertOptions{})
+		if err == nil {
+			t.Fatal("expected error when compressor fails to start")
+		}
+		if prodCmd == nil || prodCmd.ProcessState == nil {
+			t.Errorf("producer process was not reaped via Wait() after consumer Start failure (zombie leak)")
+		}
+		if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+			t.Errorf("partial output %s should not exist after Start failure", out)
+		}
+	})
+}
+

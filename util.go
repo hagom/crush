@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -2725,6 +2726,7 @@ func readPasswordTerminal(prompt string) (string, error) {
 	if err == nil && restore != nil {
 		defer func() {
 			restore()
+			runtime.KeepAlive(f)
 			fmt.Fprintln(os.Stderr)
 		}()
 	}

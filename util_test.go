@@ -3859,6 +3859,141 @@ func TestMemPoolSplitCutoffAndUniqueName_EdgeCases(t *testing.T) {
 	})
 }
 
+type nonblockFdEndpoint struct {
+	*os.File
+	fd uintptr
+}
+
+func (e nonblockFdEndpoint) Fd() uintptr { return e.fd }
+
+func wrapNonblockingEndpoint(t *testing.T, f *os.File) nonblockFdEndpoint {
+	t.Helper()
+	rc, err := f.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn failed: %v", err)
+	}
+	var raw uintptr
+	if err := rc.Control(func(fd uintptr) { raw = fd }); err != nil {
+		t.Fatalf("RawConn.Control failed: %v", err)
+	}
+	return nonblockFdEndpoint{File: f, fd: raw}
+}
+
+func TestSplicePipe_NonBlockingEAGAINAndAppendFallback(t *testing.T) {
+	t.Run("handles real non-blocking pipes returning EAGAIN on slow writer and slow reader", func(t *testing.T) {
+		pr1, pw1, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pr1.Close()
+
+		pr2, pw2, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pr2.Close()
+
+		nbReader := wrapNonblockingEndpoint(t, pr1)
+		nbWriter := wrapNonblockingEndpoint(t, pw2)
+
+		// ~1.5 MiB payload written after initial delay so first splice hits EAGAIN on empty input,
+		// and larger than pipe capacity so splice also hits EAGAIN on full output before consumer drains.
+		payload := bytes.Repeat([]byte("nonblocking-splice-chunk-"), 64*1024)
+
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			for off := 0; off < len(payload); {
+				end := min(len(payload), off+128*1024)
+				_, _ = pw1.Write(payload[off:end])
+				off = end
+				time.Sleep(2 * time.Millisecond)
+			}
+			_ = pw1.Close()
+		}()
+
+		var dst bytes.Buffer
+		readDone := make(chan error, 1)
+		go func() {
+			time.Sleep(40 * time.Millisecond)
+			_, rErr := io.Copy(&dst, pr2)
+			readDone <- rErr
+		}()
+
+		n, sErr := splicePipe(nbReader, nbWriter)
+		_ = pw2.Close()
+		if sErr != nil {
+			t.Fatalf("splicePipe failed on non-blocking pipe (EAGAIN not handled): %v", sErr)
+		}
+		if rErr := <-readDone; rErr != nil {
+			t.Fatalf("consumer read error: %v", rErr)
+		}
+		if n != int64(len(payload)) || !bytes.Equal(dst.Bytes(), payload) {
+			t.Errorf("splicePipe transferred %d bytes (match=%v), want %d", n, bytes.Equal(dst.Bytes(), payload), len(payload))
+		}
+	})
+
+	t.Run("falls back cleanly when destination file is O_APPEND (EINVAL)", func(t *testing.T) {
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pr.Close()
+
+		outPath := filepath.Join(t.TempDir(), "append.bin")
+		if err := os.WriteFile(outPath, []byte("HEAD:"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		appendF, err := os.OpenFile(outPath, os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer appendF.Close()
+
+		body := bytes.Repeat([]byte("TAIL"), 4096)
+		go func() {
+			_, _ = pw.Write(body)
+			_ = pw.Close()
+		}()
+
+		n, err := splicePipe(pr, appendF)
+		if err != nil {
+			t.Fatalf("splicePipe to O_APPEND file failed: %v", err)
+		}
+		if n != int64(len(body)) {
+			t.Errorf("splicePipe O_APPEND bytes = %d, want %d", n, len(body))
+		}
+		got, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, append([]byte("HEAD:"), body...)) {
+			t.Errorf("unexpected O_APPEND file content (len=%d)", len(got))
+		}
+	})
+}
+
+func TestDisableTerminalEchoOS_Safety(t *testing.T) {
+	if _, err := disableTerminalEchoOS(^uintptr(0)); err == nil {
+		t.Errorf("expected error for invalid fd ^uintptr(0), got nil")
+	}
+	if runtime.GOOS != "linux" {
+		return
+	}
+	ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("/dev/ptmx unavailable: %v", err)
+	}
+	defer ptmx.Close()
+
+	restore, err := disableTerminalEchoOS(ptmx.Fd())
+	if err != nil {
+		t.Fatalf("disableTerminalEchoOS(/dev/ptmx) failed: %v", err)
+	}
+	// Idempotent double restore must not fail or panic
+	restore()
+	restore()
+}
+
 
 
 

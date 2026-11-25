@@ -5,6 +5,9 @@ package main
 import (
 	"io"
 	"os"
+	"os/signal"
+	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -61,22 +64,88 @@ func getPipeCapacityOS(r io.Reader, w io.Writer) int {
 	return int(res)
 }
 
+func ioctlTermios(fd, req uintptr, termios *syscall.Termios) syscall.Errno {
+	for {
+		_, _, errNo := syscall.Syscall(syscall.SYS_IOCTL, fd, req, uintptr(unsafe.Pointer(termios)))
+		if errNo == syscall.EINTR {
+			continue
+		}
+		return errNo
+	}
+}
+
 func disableTerminalEchoOS(fd uintptr) (func(), error) {
+	if fd == ^uintptr(0) {
+		return nil, syscall.EBADF
+	}
 	var termios syscall.Termios
-	_, _, errNo := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&termios)))
-	if errNo != 0 {
+	if errNo := ioctlTermios(fd, uintptr(syscall.TCGETS), &termios); errNo != 0 {
 		return nil, errNo
 	}
 	newTermios := termios
 	newTermios.Lflag &^= syscall.ECHO
-	_, _, errNo = syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&newTermios)))
-	if errNo != 0 {
+	if errNo := ioctlTermios(fd, uintptr(syscall.TCSETS), &newTermios); errNo != 0 {
 		return nil, errNo
 	}
+
+	sigCh := make(chan os.Signal, 1)
+	doneCh := make(chan struct{})
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
+	var once sync.Once
 	restore := func() {
-		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&termios)))
+		once.Do(func() {
+			signal.Stop(sigCh)
+			close(doneCh)
+			_ = ioctlTermios(fd, uintptr(syscall.TCSETS), &termios)
+		})
 	}
+
+	go func() {
+		select {
+		case sig := <-sigCh:
+			restore()
+			_, _ = os.Stderr.WriteString("\n")
+			signal.Reset(sig)
+			if sysSig, ok := sig.(syscall.Signal); ok {
+				_ = syscall.Kill(os.Getpid(), sysSig)
+			}
+		case <-doneCh:
+		}
+	}()
+
 	return restore, nil
+}
+
+func waitFdReady(epfd *int, fd uintptr, events uint32) (bool, error) {
+	if *epfd < 0 {
+		created, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
+		if err != nil {
+			return false, err
+		}
+		ev := syscall.EpollEvent{Events: events, Fd: int32(fd)}
+		if ctlErr := syscall.EpollCtl(created, syscall.EPOLL_CTL_ADD, int(fd), &ev); ctlErr != nil {
+			_ = syscall.Close(created)
+			if ctlErr == syscall.EPERM {
+				return false, nil
+			}
+			return false, ctlErr
+		}
+		*epfd = created
+	}
+	var evs [1]syscall.EpollEvent
+	for {
+		n, err := syscall.EpollWait(*epfd, evs[:], -1)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			return true, err
+		}
+		if n > 0 {
+			return true, nil
+		}
+	}
 }
 
 func splicePipe(r io.Reader, w io.Writer) (int64, error) {
@@ -86,6 +155,19 @@ func splicePipe(r io.Reader, w io.Writer) (int64, error) {
 		return copyWithSplicePool(w, r)
 	}
 
+	epfdR := -1
+	epfdW := -1
+	defer func() {
+		if epfdR >= 0 {
+			_ = syscall.Close(epfdR)
+		}
+		if epfdW >= 0 {
+			_ = syscall.Close(epfdW)
+		}
+		runtime.KeepAlive(r)
+		runtime.KeepAlive(w)
+	}()
+
 	var total int64
 	chunkSize := uintptr(1024 * 1024)
 	for {
@@ -94,8 +176,22 @@ func splicePipe(r io.Reader, w io.Writer) (int64, error) {
 			if errno == syscall.EINTR {
 				continue
 			}
-			if total == 0 && (errno == syscall.ENOSYS || errno == syscall.EINVAL) {
-				return copyWithSplicePool(w, r)
+			if errno == syscall.EAGAIN {
+				supR, errR := waitFdReady(&epfdR, rfd, syscall.EPOLLIN|syscall.EPOLLHUP|syscall.EPOLLERR)
+				if errR != nil {
+					rem, err := copyWithSplicePool(w, r)
+					return total + rem, err
+				}
+				supW, errW := waitFdReady(&epfdW, wfd, syscall.EPOLLOUT|syscall.EPOLLHUP|syscall.EPOLLERR)
+				if errW != nil || (!supR && !supW) {
+					rem, err := copyWithSplicePool(w, r)
+					return total + rem, err
+				}
+				continue
+			}
+			if errno == syscall.ENOSYS || errno == syscall.EINVAL || errno == syscall.EOPNOTSUPP {
+				rem, err := copyWithSplicePool(w, r)
+				return total + rem, err
 			}
 			return total, errno
 		}

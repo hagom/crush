@@ -651,6 +651,8 @@ func prepareContainerOutputs(file, dir string, info FormatInfo, opts DecompressO
 
 	seenTop := make(map[string]bool)
 	checkedDirs := make(map[string]bool)
+	archiveSymlinks := make(map[string]bool)
+	parentPrefixes := make(map[string]bool)
 	var outputs []string
 	var symlinkMembers []string
 	var secErr error
@@ -674,6 +676,13 @@ func prepareContainerOutputs(file, dir string, info FormatInfo, opts DecompressO
 			} else {
 				curPrefix += "/" + parts[i]
 			}
+			if archiveSymlinks[curPrefix] {
+				secErr = fmt.Errorf("%w: ruta atraviesa symlink interno del archivo %s", errUnsafeArchiveMember, curPrefix)
+				return errStopIter
+			}
+			if i < len(parts)-1 {
+				parentPrefixes[curPrefix] = true
+			}
 			if checkedDirs[curPrefix] {
 				continue
 			}
@@ -683,13 +692,18 @@ func prepareContainerOutputs(file, dir string, info FormatInfo, opts DecompressO
 				return errStopIter
 			}
 		}
-		if !m.IsDir && !opts.Force && !opts.Resume {
+		if !m.IsDir {
 			if fi, lerr := root.Lstat(rel); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
 				secErr = fmt.Errorf("%w: rechazando escritura sobre symlink existente %s", errUnsafeArchiveMember, filepath.Join(dir, rel))
 				return errStopIter
 			}
 		}
 		if m.Mode&os.ModeSymlink != 0 {
+			if parentPrefixes[relSlash] {
+				secErr = fmt.Errorf("%w: ruta atraviesa symlink interno del archivo %s", errUnsafeArchiveMember, relSlash)
+				return errStopIter
+			}
+			archiveSymlinks[relSlash] = true
 			symlinkMembers = append(symlinkMembers, rel)
 		}
 		top := parts[0]

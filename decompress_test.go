@@ -3723,6 +3723,121 @@ func TestDecompressContainers_BlocksPreExistingDirSymlinkAndEscapingSymlinks(t *
 			t.Errorf("valid in-root symlink unreadable: err=%v got=%q", err, string(got))
 		}
 	})
+
+	t.Run("RejectsPreExistingFileSymlinkEvenWithForceInContainers", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		srcDir := filepath.Join(tmpDir, "src")
+		if err := os.MkdirAll(srcDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, "target.txt"), []byte("OVERWRITTEN"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		zipPath := filepath.Join(tmpDir, "file_sym.zip")
+		{
+			f, _ := os.Create(zipPath)
+			zw := zip.NewWriter(f)
+			w, _ := zw.Create("target.txt")
+			_, _ = w.Write([]byte("OVERWRITTEN"))
+			_ = zw.Close()
+			_ = f.Close()
+		}
+		szPath := filepath.Join(tmpDir, "file_sym.7z")
+		if hasTool(sevenzBin()) {
+			cmd := exec.Command(sevenzBin(), "a", szPath, "target.txt")
+			cmd.Dir = srcDir
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("7z create failed: %v", err)
+			}
+		}
+
+		for _, tc := range []struct {
+			name string
+			path string
+			skip bool
+		}{
+			{name: "zip", path: zipPath},
+			{name: "7z", path: szPath, skip: !hasTool(sevenzBin())},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if tc.skip {
+					t.Skip("7z unavailable")
+				}
+				outside := filepath.Join(t.TempDir(), "victim.txt")
+				if err := os.WriteFile(outside, []byte("SAFE"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				outDir := t.TempDir()
+				linkPath := filepath.Join(outDir, "target.txt")
+				if err := os.Symlink(outside, linkPath); err != nil {
+					t.Fatal(err)
+				}
+
+				err := DoDecompress([]string{tc.path}, DecompressOptions{
+					OutputDir: outDir,
+					KeepOrig:  true,
+					Force:     true,
+				})
+				if err == nil {
+					t.Fatalf("%s: expected error rejecting pre-existing file symlink with Force=true", tc.name)
+				}
+				if fi, lerr := os.Lstat(linkPath); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+					t.Errorf("%s: pre-existing symlink was altered/removed (lerr=%v)", tc.name, lerr)
+				}
+				if got, _ := os.ReadFile(outside); string(got) != "SAFE" {
+					t.Errorf("%s: outside victim modified: %q", tc.name, string(got))
+				}
+			})
+		}
+	})
+
+	t.Run("RejectsInArchiveSymlinkChainUpfront", func(t *testing.T) {
+		if !hasTool(sevenzBin()) {
+			t.Skip("7z unavailable")
+		}
+		tmpDir := t.TempDir()
+		outside := t.TempDir()
+
+		symSrc := filepath.Join(tmpDir, "symsrc")
+		if err := os.MkdirAll(symSrc, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("sub_inside", filepath.Join(symSrc, "link")); err != nil {
+			t.Fatal(err)
+		}
+		szChain := filepath.Join(tmpDir, "chain.7z")
+		cmd1 := exec.Command(sevenzBin(), "a", "-snl", szChain, "link")
+		cmd1.Dir = symSrc
+		if out, err := cmd1.CombinedOutput(); err != nil {
+			t.Fatalf("7z symlink add failed: %v %s", err, string(out))
+		}
+		childSrc := filepath.Join(tmpDir, "childsrc")
+		if err := os.MkdirAll(filepath.Join(childSrc, "link"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(childSrc, "link", "pwn.txt"), []byte("PWN"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd2 := exec.Command(sevenzBin(), "a", szChain, "link/pwn.txt")
+		cmd2.Dir = childSrc
+		if out, err := cmd2.CombinedOutput(); err != nil {
+			t.Fatalf("7z child add failed: %v %s", err, string(out))
+		}
+
+		outDir := t.TempDir()
+		err := decompressFile(szChain, DecompressOptions{
+			OutputDir: outDir,
+			KeepOrig:  true,
+		}, nil)
+		if err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("expected upfront symlink-chain rejection, got: %v", err)
+		}
+		if _, lerr := os.Lstat(filepath.Join(outDir, "link")); lerr == nil {
+			t.Errorf("archive with symlink chain extracted link before rejecting")
+		}
+		_ = outside
+	})
 }
 
 func TestDecompress_HardenedFlagsDiagnosticsOverflowLrzAndSplitWriter(t *testing.T) {
